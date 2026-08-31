@@ -1,8 +1,525 @@
 # crane_mpc
 
-First-slice ROS-free shell for W06. It installs no C++ headers, libraries, or
-runtime nodes; the deterministic fixture is private to the package tests and
-only exercises the installed `crane_model` mock. Acados, CasADi, model
-dynamics, ROS topics, solver tuning, and actuator authority are non-goals
-until the W03 model API and shadow gates are accepted. No legacy MPC or
-`ax_comp_lib` is linked.
+The `crane_mpc` node is the producer of `/crane/mpc/horizon` described by
+[ROS 2 Interfaces](../../wiki/implementation/ros2_interfaces.md) §2. It runs
+beside the controller manager and solves the OCP in [mpc](../../wiki/mpc.md) §1
+with acados once per 40 ms cycle.
+
+## OCP
+
+The state is `x = [q_a, q_u, dq_a, dq_u]` and the input is actuated
+acceleration `u = ddq_a`. The continuous dynamics and the actuated-force output
+come directly from `crane_model`'s private CasADi graph; this package contains no
+second rigid-body dynamics implementation. acados integrates that graph with one
+explicit ERK4 step per shooting interval and runs `SQP_RTI`, exactly one
+iteration per cycle.
+
+Stage and terminal costs use nonlinear least squares and a Gauss–Newton Hessian.
+The stage residual is
+
+    [q_a, dq_a, q_u, dq_u, tau_a, u]
+
+against `[q_a,ref, dq_a,ref, q_eq, 0, 0, 0]`. In particular, effort prices
+`tau_a`, not acceleration, so effective inertia affects how hard the optimizer
+pushes. Sway offset and sway rate are independent terms. The terminal cost omits
+the two input-dependent blocks and raises the remaining weights; it is a cost,
+not a hard terminal set.
+
+Constraints 1–5 of `mpc` §3 are native boxes: control-safe actuated position,
+actuated velocity, sway about `q_eq`, sway rate, and input rate. Constraints 6
+and 7 are native nonlinear rows taken from the graph's cylinder-force and
+already-smoothed per-axis flow outputs. The shared pump row sums all six axis
+flows. Constraints 3, 4, 6, and 7 carry configured L1 slack; every solution
+reports whether slack was used and its penalty, while command constraints 1, 2,
+and 5 remain hard.
+
+### One solver ships: the PZS100, constrained
+
+    ./scripts/export_ocp.py            # rewrite `generated/`
+    ./scripts/export_ocp.py --check    # regenerate into a scratch tree and diff
+
+`generated/` carries **one** artifact, `crane_mpc_pzs100/`. The description is
+baked into a generated solver, so an artifact is one machine's, and the PZS100 is
+the machine that has to run; `tool` is therefore not a runtime choice any more,
+and anything but `pzs100` is refused at construction with a message that says so.
+The Epsilon 7040 is still a real machine in `crane_model` -- description,
+hydraulics and collision model -- and what was retired here is its *solver*.
+
+`docs/features/cbs-ocp-python/grill.md` D6 asked whether the planner's kappa
+headroom (`wiki/trajectory_planning.md` §5.5) already keeps the reference inside
+constraints 6 and 7, which would make the MPC's copy of them redundant, and an
+`_unconstrained` artifact of each machine was shipped so the question could be
+measured. **It is settled and the artifacts are gone.** Measured on this OCP,
+dropping the nonlinear cylinder-force and pump-flow rows moves the solve from 19
+QP iterations and 7.15 ms to 20 and 7.02 ms: those rows cost essentially nothing,
+so there was never a case for shipping a second artifact without them.
+
+The problem is built once, when the transient-local robot description arrives; a
+backend failure leaves the node unconfigured. It builds with a declared empty
+gripper — valid, zero mass — and that is not a placeholder for something the
+node is waiting for: the payload is an acados parameter (issue 072), so it is
+set on the running solver by `/crane/mpc/set_payload`, the service the behaviour
+tree calls at a grasp and at a release. The mass and the centre of mass reach
+every stage of the next solve; no reconfigure and no regeneration is involved,
+and a change drops the warm start because the dynamics after it are a different
+machine's. `crane_msgs/Payload` carries a point mass here — `robot_model` §5.3:
+for a gravity moment shape and inertia do not enter — which is the same reading
+`crane_planner` gives the same field of the same type.
+
+`/crane/payload_estimate` is the estimator's channel and is recorded rather than
+adopted: it does not gate configuration and does not change the model under a
+running horizon. Both CBS profiles publish `valid == false` on it today (issue
+033), and even a valid estimate measures a load rather than stating that one was
+picked up, which is the tree's to say.
+
+## Timing and command
+
+`T_s` and the horizon length have one parameter source. The shipped grid is 50
+knots at 40 ms (49 shooting intervals, 1.96 s from first to last knot). The
+default remains a design value based on a sway period of order two seconds; the
+slowest sway period has never been computed and is not presented as a
+measurement.
+
+The state pinned as `x_0` is the measured state propagated under the command
+already applied by `sensor_to_valve_delay`, default 50 ms. This is deliberately
+not one 40 ms step. The configured solve budget is 30 ms; the solve is not
+interrupted at it, and what it decides is whether the finished step is applied
+(see the next section). The offline performance test prints the measured median
+rather than asserting wall-clock timing on whichever machine runs CI.
+
+Only `u_0` is used. The inner-loop command is a velocity,
+`dq_a,d = dq_a,0 + T_s u_0 = [x_1]_{dq_a}`—never acceleration, force, or valve
+command.
+
+## The four requirements of `mpc` §5.3
+
+None of the four is hypothetical: each is a defect that was observed in the
+deployed iLQR integration—solve failures reported as success, regularization
+latching high after a deadline miss, no exposed residuals, and no defined
+behaviour past the budget. They are answered here as follows.
+
+**1. Report failure.** Every solve returns a three-valued outcome—converged,
+budget-exceeded, failed—and carries acados' own `status` beside it rather than a
+boolean this integration invented. `qp_status` travels too, and is not
+redundant: acados accepts an `ACADOS_MAXITER` from the QP solver and returns
+`ACADOS_SUCCESS` from the NLP, so a QP that stopped short of its own tolerance
+is visible in that field and in no other. A solution comes back as a solution
+even when the horizon is non-finite, because failing the call would erase the
+backend's own account of what went wrong.
+
+**2. Never latch internal state across cycles.** Every quantity acados carries
+between `solve` calls is named in `src/ocp.cpp` and answered per quantity:
+
+| Quantity | Carried by acados | What happens |
+|---|---|---|
+| primal iterate `x`, `u` | `out->ux` | reset, then written from §6's initial guess |
+| slacks `sl`, `su` | `out->ux` | reset to zero |
+| duals `pi`, `lam` | `out->pi`, `out->lam` | reset to zero (`ocp_nlp_out_set_values_to_zero`) |
+| QP memory, RTI `is_first_call` | solver memory | reset (`ocp_nlp_solver_reset_qp_memory`) |
+| Levenberg–Marquardt | a constant set at `create` | never adapted; the plan carries `NO_REGULARIZE` |
+| trust region, step length | — | absent; the plan carries `FIXED_STEP` |
+
+The duals and the QP memory were the two that used to survive a cycle. The
+primal iterate is the one quantity a previous cycle can now reach, and it reaches
+it **through the caller**: what is written is `solve`'s `InitialGuess` argument or
+its own cold rollout, never what the last `ocp_nlp_solve` happened to leave
+behind. That is the whole of how this requirement and §6's warm start coexist —
+the difference between them is not the numbers, it is whether a caller can see
+them and drop them.
+
+So the property under test is no longer "nothing survives a cycle" but the
+stronger and more useful one: **the same `x0`, `stages` and `guess` give the same
+answer bit for bit, whatever ran in between**. A quantity acados carried over
+would break it; the guess cannot, because it is one of the three.
+
+**3. Bound the solve time, and define what is applied past it.** Enforced, not
+measured. A solve whose `time_tot` exceeds `solve_budget` is not published as a
+horizon; what goes out instead is §6's previous solution shifted by one step with
+its last stage duplicated, and the overrun is on the health stream. The knot
+times do not move, so the shifted knots land on the instants they were computed
+for. Any other non-convergence takes the same path, because §6 gives failure the
+same fallback. It is never a zero-velocity fallback: on a hydraulic crane a
+commanded zero excites exactly the sway this controller exists to suppress.
+
+**With nothing to shift the node publishes nothing.** The fallback is *the
+previous solution*, and on the first cycle—and on the first cycle after any
+silence—there is not one. §6's cold start does not fill that hole and is not
+meant to: it is a rule about the initial guess a solve is linearised from, not a
+way of manufacturing a horizon out of a solve that failed. Inventing one there
+would be requirement 3's enforcement taken back out. The receiver's expiry ramp
+is the defined behaviour instead.
+
+That case is not hypothetical. **At the shipped 50-knot horizon the measured RTI
+solve on the CI image is 70–80 ms against the 30 ms budget**, so on that machine
+every solve overruns: the node publishes nothing until a solve lands inside the
+budget, and reaches §6's repeated-failure escalation in
+`max_consecutive_failures` cycles. `mpc` §4 names the two mitigations—a
+non-uniform grid, or terminal weighting instead of horizon length—and neither is
+implemented; the budget is not widened to hide the measurement. What the
+deployed RT-IPC does is unmeasured, and PRD §14 leaves that measurement human-run.
+
+**4. Expose the residuals.** The per-constraint violation and the per-term cost
+go out on a stream, not only into a log, because §5.3's reason for wanting them
+is that they are the only way to tell a tuning problem from a modelling one—and
+the PRD's risk table records that a modelling violation presents as a tuning
+problem. A total cost cannot make that distinction: `tau_a` running decades above
+`q_a` is a statement about the weights, while `q_u` refusing to fall with `tau_a`
+against its constraint is a statement about the machine. The split has eight
+rows—§2's six terms, the terminal cost and §3.2's L1 price—and is computed only
+on the cycles that publish, because it costs one residual evaluation per shooting
+node: **1.5 ms at the shipped 50 knots** on the CI image, measured by the same
+offline performance test that measures the solve.
+
+The four constraint-violation rows are each divided by their own allowance, so
+one unit is one whole allowance past the limit on all four. That normalisation
+happens in the reduction and not in the problem: acados returns the two box
+groups (constraints 3 and 4) in radians and the two nonlinear groups
+(constraints 6 and 7) as fractions, because only the latter are scaled before
+they reach the solver. **A consequence worth knowing is that `slack_penalty`
+charges the sway prices per radian and the hydraulic prices per allowance, so the
+four L1 weights are not directly comparable as they stand**—which is a property
+of the softening of issue 050 and is not changed here.
+
+## Initialization and fallback (`mpc` §6)
+
+§6 is four rules. The first two decide how a cycle is *started*, the last two
+decide what happens when one fails.
+
+**Warm start.** Every cycle is linearised about the previous solution shifted one
+step, with the last stage duplicated—`shifted()` in `ocp.hpp`. The shift is the
+whole content of the rule: an unshifted copy is also a warm start, also
+converges, and also publishes a horizon that satisfies every contract here,
+because one RTI iteration repairs a one-step defect without complaint. It is
+simply one step of phase behind its own plan on every stage, for as long as the
+node runs, and nothing downstream can see it. The test for it therefore reads the
+guess and not the answer.
+
+**Cold start.** On the first cycle, and after any silence, from a rollout holding
+`u = 0`—`Ocp::cold_start`, `N` ERK4 steps on the same `F` the solver integrates,
+so the guess satisfies the dynamics it is a guess for. Not the measured state
+held: a held state violates its own continuity conditions by `F(x_0, 0) - x_0`
+per interval, and on the passive rows that defect is the entire tool swing, which
+is exactly where §2's sway terms live.
+
+A silence is this node's reactivation. It stopped publishing, the receiver ran
+its expiry ramp, and the cycle that resumes is solving for a machine that has
+been moving under someone else's command since. Carrying the warm start across it
+is `control_architecture` §7.1 rule 3's defect—an element that resumes with state
+accumulated in a completely different situation—applied to the one quantity this
+node carries between cycles. `cold_starts()` counts them, and a healthy run of
+any length has exactly one.
+
+**On failure, the shifted previous solution and a diagnostic**—never zero
+velocity. See requirement 3 above; the same path serves both, because §6 gives
+failure and a deadline miss the same fallback.
+
+**On repeated failure, stop.** After `max_consecutive_failures` consecutive
+solves that do not converge, the node stops publishing and raises the escalation
+on the health stream. The ceiling is not taste: a fallback shifts the horizon up
+a knot and duplicates the last, so after `k` of them the last `k` knots are all
+copies of one knot the optimizer computed `k` cycles ago—a held pose carrying a
+velocity from somewhere else—and at `k = horizon_length - 1` the whole horizon is
+that single stale knot. Past a handful of cycles, a receiver executing **its own**
+last good spline is executing a better plan than one being re-fitted every cycle
+to a plan whose tail is a duplicated knot. Recovery is symmetric: a solve that
+converges again clears the escalation, and the cycle that does it cold-starts.
+
+The half that is here is the escalation reaching `/crane/mpc/solver_health`. The
+supervisor consuming it, re-planning from the measured state and sequencing the
+handover is **issue 054** and does not exist yet.
+
+### The escalation and the expiry ramp are two mechanisms
+
+Both end in a zero velocity command, so a reader looking at a stopped crane has
+to be able to say which produced it.
+
+| | Escalation | Expiry ramp |
+|---|---|---|
+| Whose | `crane_mpc`, this package | `crane_velocity_controller`, issue 008 |
+| What it does | stops publishing `/crane/mpc/horizon` | takes the velocity command to zero over `horizon_expiry_ramp` |
+| When | `max_consecutive_failures` consecutive non-convergent solves | the fitted spline runs past its last knot |
+| Reported as | `FAULT_SOLVER` on `/crane/mpc/solver_health`, with the count in `message` | the receiver's own health stream |
+
+**This node never ramps and never commands a zero.** It stops; the receiver's
+ramp then runs out of plan and produces the zero, over its own configured time
+and in its own process. A ramp here would be a second producer of the same
+command, in the process that has just admitted it cannot compute one, with no way
+to tell whose zero arrived.
+
+### Nothing here fits a spline
+
+`control_architecture` §3.3 gives two mechanisms for the seam between horizons
+and this package owns neither of them outright. Mechanism 1, agreement by
+construction, is issue 049's `x_0`—the measured state propagated forward by
+`sensor_to_valve_delay`, so the horizon starts where the executing spline will be.
+It is unchanged here and is the only place it lives. Mechanism 2, continuity by
+constraint, is the receiver's clamp and has been since issue 008.
+
+There is no third. What goes out is **knots**: one point per grid instant,
+positions and velocities only, `accelerations` and `effort` empty. A spline needs
+an input this message has no field for—the outgoing command at the switch
+instant—which is why §3.3 puts the fit at the receiver, and which is what the
+contract test demonstrates: the same published horizon, fitted against two
+different outgoing commands, is two different splines.
+
+## Solver health
+
+| Property | Value |
+|---|---|
+| Topic | `/crane/mpc/solver_health`, `crane_msgs/SolverHealth` |
+| Rate and QoS | 12.5 Hz; reliable, depth 1, volatile |
+| Frame | empty; status |
+| Contents | the verdict, acados' status, the solve time and budget, the four constraint violations, the eight cost terms, `fault` |
+| Names | the six actuated URDF joints, carried in the message |
+
+`fault` is a `SupervisorStatus` `FAULT_*` constant and is deliberately not
+renumbered, exactly as `VelocityControllerHealth`'s is: the supervisor merges the
+code rather than translating it, and a panel renders one numbering. The only code
+this producer raises is `FAULT_SOLVER`, which `control_architecture` §5 row 3
+gives to non-convergence and to a deadline miss alike. **`FAULT_SOLVER` still has
+no consumer**: the supervisor merging it onto `/crane/supervisor/status` is issue
+054. Publishing a fault nobody reads is honest and it is not a finished path.
+
+§6's repeated-failure escalation goes out on the same stream and under the same
+code, with `applied_previous_solution` false—nothing was published at all—and the
+count and the ceiling in `message`. `crane_msgs/SolverHealth` has no field of its
+own for it and this issue does not add one: `crane_msgs` is out of scope here, and
+a supervisor's action on the escalation is the same as on a standing
+`FAULT_SOLVER` with no horizon arriving. Issue 054 is where that is decided, and
+if it wants the escalation as a distinct code, that is where the field belongs.
+
+The stream is decimated to one report per `solver_health_decimation` solves,
+default two—12.5 Hz against the 25 Hz cycle, which is the largest integer
+decimation that does not run ahead of the 20 Hz supervisor that will read it.
+That is `ROS 2 Interfaces` §4's reason for the inner loop's own health stream one
+rate down: the loop does not spend the real-time boundary on messages nobody
+reads.
+
+**A change of verdict is exempt from the decimation and a standing verdict is
+not.** A fault goes out on the cycle it first happens, and so does its clearing;
+a fault that persists then falls back to the decimated cadence. The edge and not
+the level, for two reasons that both bite:
+
+* exempting the *level* publishes a fault promptly and then drops the
+  `FAULT_NONE` that ends it whenever that lands off-cadence, so a supervisor
+  holds a fault the node has already recovered from for up to a whole decimation
+  period;
+* the shipped configuration exceeds §4's budget on **every** solve (see below),
+  so a level exemption is not an occasional extra message but the stream running
+  permanently at the full 25 Hz—against the 12.5 Hz `ROS 2 Interfaces` §4 states
+  for it—each report costing one stage-residual evaluation per shooting node on
+  top of a solve that was already too slow. That is requirement 3's own budget
+  spent on repeating a report, in the one regime with none to spare.
+
+`outcome` is compared beside `fault`, so a move between a budget overrun and a QP
+failure counts as a change: they are one fault code but two different things to
+chase (§5.3 requirement 1).
+
+A cycle in which no solve was attempted—no reference, no fresh measurement, an
+unconfigured node—publishes no report. Absence is the supervisor's own staleness
+policy (`control_architecture` §5.3: every input it holds by topic carries a
+freshness deadline of its own), and inventing a report for a cycle that did
+nothing would make a wedged producer indistinguishable from a healthy one.
+
+## Shadow mode (`mpc` §5.3's judgement, PRD §2's "shadow → active")
+
+**This node ships in shadow and publishes no horizon.** PRD §2 puts slice 6 at
+"shadow → active" and user story 68 says what shadow is for: the acados MPC runs
+before it is active so that its solutions are *judged before they drive the
+machine*.
+
+It is a state of this node and not an arrangement of the graph around it, and the
+receiver is what forces that. `/crane/mpc/horizon` is a contract topic
+`crane_velocity_controller` subscribes; issue 048 had to establish that the
+chained path wins whenever a trajectory controller is chained onto it. Relying on
+that would make shadow mode a property of an activation order, and a gate may not
+rest on one. So in `mode: shadow` **nothing at all goes out on
+`/crane/mpc/horizon`** — the publisher exists and is never called.
+
+Everything else runs at rate. The reference is resampled, the OCP is solved, §6's
+warm start, fallback and repeated-failure escalation all apply, and the message
+that *would* have gone out is published on `~/shadow_horizon` instead. It is the
+same message: the same knots under the same joint names with the same stamp
+semantics, so it still satisfies `crane_control::horizon_message_satisfies_
+contract`. Only the last hop is withheld.
+
+### The comparison is the deliverable
+
+| Property | Value |
+|---|---|
+| Topic | `~/shadow_horizon`, `trajectory_msgs/JointTrajectory` |
+| Topic | `~/shadow_comparison`, `diagnostic_msgs/DiagnosticArray` |
+| Rate and QoS | 25 Hz, one per solving cycle; reliable, depth 1, volatile |
+| Names | private (`~/`) because ROS 2 Interfaces §1 keeps contracts absolute and §4 has no row for either |
+
+"Publish somewhere harmless" is not shadow mode. What makes a solution *judgeable*
+is that the comparison against what actually drove exists and can be retrieved, so
+every shadow cycle publishes `~/shadow_comparison` carrying, on one stamped
+message:
+
+* **the per-axis difference** — the shadow command (`mpc` §1's `q̇_a,0 + T_s u_0`,
+  the velocity row of the horizon's second knot) minus the velocity the follower
+  produced, keyed by joint name because the sixth valve channel is a different
+  joint per tool;
+* **what actually drove**, off `/crane/controller_state`. `output.velocities` is
+  read first — the message defines it as the controller's own output, so it is the
+  command the follower wrote, control law included — falling back to
+  `reference.velocities` where the fork left `output` empty, and
+  `follower.velocity_source` names which. The follower's own tracking error rides
+  along as `error.velocities` and **never** `error.positions`: ROS 2 Interfaces §4
+  is explicit that the two are not interchangeable, the position row is rad on
+  four axes and m on two, and the velocity row is the one `FAULT_TRACKING` is
+  decided on and the one this stream's units are in;
+* **the constraint activity** — `used_slack`, the L1 penalty and the four soft
+  constraints of §3.2, in the same normalised units `SolverHealth` carries them,
+  so the two streams sit side by side without a conversion;
+* **whether the shadow solve converged**, plus §5.3 requirement 1's three-valued
+  outcome, the solve time against the budget and whether §6's fallback ran.
+
+A message older than `max_state_age` is refused rather than compared: "the same
+instant" is the whole claim, and a command from half a second ago read against
+this cycle's solve produces a number that looks like a divergence and is a
+staleness. One stamped further than `max_clock_skew` **ahead** of this node's
+clock is refused too — the same bound and the same reasoning the reference's own
+stamp is held to, because a command in this node's future is either one not yet
+applied or two clocks that disagree and the message does not say which. That
+refusal counts twice, since this is also the stream `x_0`'s propagation input
+comes from: comparing across it would judge the shadow solve against a command
+that never executed *from* a state the machine was never in, and both wrong
+halves would read as an ordinary divergence. `follower.velocity_source` carries
+`stale` or `future` rather than `none`, because a stream that is absent and a
+stream whose stamp cannot be used are different things to chase. An absent
+follower produces no `difference` row at all and a `WARN` level, because a
+missing side read as a zero command would be a crane that agrees with the MPC
+perfectly for as long as nobody is driving it.
+
+The level says only whether a comparison could be formed. **It never says whether
+the MPC is any good**: judging the solutions is a human gate (PRD §14), there is
+no per-axis tracking tolerance in this workspace to score against, and nothing
+here thresholds, filters or smooths the difference. Agreement where the two should
+agree and difference where §2's sway damping earns its place are both findings.
+
+`diagnostic_msgs/DiagnosticArray` because `crane_msgs` was out of issue 053's
+scope and this is the one message set already here that carries all three of the
+above on a single stamped stream; §6's own word for the report a failure owes is
+"a diagnostic". Every number is `%.17g` decimal text, which round-trips a
+`double`. A `crane_msgs/ShadowComparison.msg` is the better long-term home and
+needs a ROS 2 Interfaces §6 amendment.
+
+### What propagates `x_0` while the follower is driving
+
+§1 initialises the OCP from the measured state carried forward under **the command
+already applied**, and in shadow that command is the follower's, not this node's
+`u_0`. Propagating under a `u_0` that was never applied would judge the shadow
+solve against a state the machine was never in. So in shadow the propagation input
+is read back out of the follower's commanded velocity by the same finite
+difference the fallback path already uses — `(v − q̇_a) / T_s`, the acceleration
+that command implies over one cycle — clamped to constraint 5's box so the state
+is propagated under an input the machine could have taken. With the follower's
+stream absent, stale or stamped ahead of this node's clock it is zero, which
+holds the measured velocity: the honest "nothing is known", not an assumed
+command.
+
+One visible consequence: a follower diverging by a fixed offset shows up in the
+comparison as *less* than that offset, and by more on the axes with a large
+`u_max`, because the state the shadow solve starts from has already been carried
+part of the way there. That is the mechanism and not a leak.
+
+### The transition is not this node's to take
+
+`mode` is a parameter with a `one_of<>` of `shadow` and `active`, defaulting to
+shadow, and it is one of only three here that are not `read_only`. ROS 2
+Interfaces §4's "One command path" ends by saying that which path is live is the
+supervisor's decision alone and that the two never drive at once, so the
+supervisor's mode arbitration has to be able to move it at runtime — that is
+**issue 054**. Today no profile sets it, and `crane_bringup`'s launch contract
+asserts the declared default, the shipped value and that the shipped file is the
+only parameter source either profile hands this node.
+
+Switching in either direction **leaves no latched state**. The warm start, the
+horizon §6's fallback would shift, §6's consecutive-failure count and escalation,
+the publication cadence and the propagation input are all dropped, so the next
+solve cold-starts (§6, `control_architecture` §7.1 rule 3): every one of them was
+computed while a different element was driving.
+
+The mode is also on the health stream, as a fixed `shadow: ` or `active: ` prefix
+on `SolverHealth.message`. `crane_msgs` was frozen for issue 053 and that message
+has no field of its own for it, and the field that exists for saying what happened
+is `message`. It matters because nothing else distinguishes the two: a shadow node
+reports `SOLVE_CONVERGED` and `FAULT_NONE` every cycle exactly as a driving one
+does. `control_architecture` §5.3 separates "never connected" from "died"; shadow
+adds a third — alive and deliberately quiet — and this is where it is said.
+
+## Published contract
+
+| Property | Value |
+|---|---|
+| Topic | `/crane/mpc/horizon`, `trajectory_msgs/JointTrajectory` |
+| Rate and QoS | 25 Hz **in `mode: active` only**; reliable, depth 1, volatile |
+| Frame | empty; joint space |
+| Contents | positions and velocities only |
+| Stamp | absolute time at which the first knot is valid |
+| Names | the six actuated URDF joints, carried in the message |
+
+The horizon carries the optimizer's states, positions and velocities only. The
+receiving controller fits its own clamped spline, so accelerations and effort
+remain empty; `crane_control::horizon_from_message` is the only end of that
+contract that is enforced, and it simply never reads them.
+Consecutive stamps advance by one `T_s`, so horizons overlap and the unconsumed
+tail remains the soft-real-time fault-tolerance budget.
+
+With no completed configuration, live reference, or fresh actuated/passive
+measurement, the node publishes nothing and records why. `sensor_msgs/JointState`
+carries no validity flag, so freshness is the whole test on both halves. The receiver's expiry ramp is the defined response. Past the end of a
+still-fresh reference, the reference supplied to the OCP holds the goal at zero
+velocity.
+
+## Parameters
+
+Parameters are declared with `generate_parameter_library`; deployment values are
+in [config/crane_mpc.yaml](config/crane_mpc.yaml). The important groups are the
+shared grid (`Ts`, `horizon_length`), measured delay and solve budget, cost
+weights, the five native box limits, and L1 slack prices.
+
+All of them are read-only except three: `mode`, `solve_budget` and
+`solver_health_decimation`. The last two decide what is done with an answer rather
+than which problem is built—neither touches the acados problem—and §5.3
+requirement 3's whole subject is a threshold that has to be moved against a
+measured solve time, which PRD §14 leaves human-run. `mode` is not read-only for a
+different reason: the transition is not this node's decision at all, and the
+supervisor's arbitration must be able to drive it (issue 054). They are re-read
+per cycle
+through the listener's non-blocking `try_update_params`. Everything else is
+structural: `Ts` and `horizon_length` decide which problem was built, and a
+problem cannot be rebuilt under a running horizon any more than a description
+can. `max_consecutive_failures` is read-only for a narrower reason—it is checked
+once at startup against `horizon_length`, which is itself read-only, and a value
+judged against a number that cannot move must not be movable either. The
+hydraulic limits
+and their measurement provenance are in
+[config/hydraulic_limits.yaml](config/hydraulic_limits.yaml). Weights are
+conservative placeholders, not machine tuning; PRD §17 defers tuning until the
+slice 1b identification campaign supplies bandwidth, lag, and delay data.
+
+## Dependency resolution
+
+The image installs acados under `/usr/local`, with
+`/usr/local/cmake/acadosConfig.cmake`; CMake's standard prefix search therefore
+finds it without `acados_DIR` or a custom `CMAKE_PREFIX_PATH`. CasADi arrives
+through `crane_model::casadi_graph`. `CMakeLists.txt` records the complete lookup
+reasoning. The package manifest declares both dependencies even though neither
+has a rosdep key in this workspace.
+
+## Still out of scope
+
+Issue 054 owns the supervisor consuming `FAULT_SOLVER` and §6's escalation,
+re-planning from the measured state, driving this node's `mode` and sequencing the
+handover—so the escalation published here has no reader yet, and nothing today
+moves the mode. **Judging the shadow solutions is a human gate** (PRD §14):
+producing the comparison is this package's, and reading it and deciding the MPC is
+good enough is not. Tuning the weights against it is out too—PRD §17 keeps them
+conservative until the slice 1b campaign delivers bandwidth, lag and delay. The
+per-axis tracking tolerance, which sizes both the seam clamp and this problem's
+constraint margin, still does not exist (PRD §14). The velocity controller
+remains the sole owner of command interfaces, so this node is not a second
+hardware command producer.

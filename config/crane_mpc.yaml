@@ -1,0 +1,46 @@
+# Default MPC configuration. See wiki/ for system-level design.
+crane_mpc:
+  ros__parameters:
+    mode: shadow
+
+    tool: pzs100
+
+    Ts: 0.04
+    horizon_length: 50
+
+    sensor_to_valve_delay: 0.05
+    max_state_age: 0.2
+    levenberg_marquardt: 1.0e-6
+
+    solve_budget: 0.03
+
+    solver_health_decimation: 2
+
+    max_consecutive_failures: 5
+
+    weights:
+      q_a: [4.0, 4.0, 4.0, 4.0, 1.0, 1.0]
+      dq_a: [0.4, 0.4, 0.4, 0.4, 0.1, 0.1]
+      q_u: [0.0, 0.0]
+      dq_u: [4.0, 4.0]
+      tau_a: [1.0e-8, 1.0e-8, 1.0e-8, 1.0e-8, 1.0e-8, 1.0e-8]
+      u: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+      terminal_scale: 10.0
+
+    limits:
+      q_a_lower: [-3.71, -1.2, -0.91, 0.0, -12.566370614359172, 0.2]
+      q_a_upper: [3.71, 1.563, 4.6, 2.236, 12.566370614359172, 0.7]
+      dq_a_max: [0.802, 0.326, 0.344, 0.630, 2.122, 0.5]
+      q_u_max: [0.2, 0.2]
+      dq_u_max: [1.0, 0.5]
+      u_max: [0.5, 0.7, 0.5, 1.0, 6.0, 2.0]
+
+    slack:
+      q_u: [1.0e3, 1.0e3]
+      dq_u: [1.0e3, 1.0e3]
+      cylinder_force: [1.0e4, 1.0e4, 1.0e4, 1.0e4, 1.0e4, 1.0e4]
+      pump_flow: 1.0e4
+
+    max_reference_age: 0.5
+
+    max_clock_skew: 0.04

@@ -1,0 +1,9 @@
+# Machine hydraulic limits used by the MPC.
+crane_mpc:
+  ros__parameters:
+    hydraulics:
+      pump_flow_max: 1.4e-3
+
+      pump_flow_planning_factor: 0.95
+
+      system_pressure_pa: 2.5e7
