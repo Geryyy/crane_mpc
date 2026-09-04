@@ -17,9 +17,7 @@ scratch tree and diffs, which is what says the tree still matches its inputs.
     crane_mpc_pzs100/                the PZS100 solver, constrained
 
 **One solver.** The description is *baked in*, so a generated solver is one
-machine's, and the PZS100 is the machine that has to run. The Epsilon 7040 is
-still a real machine in `crane_model` -- description, hydraulics and collision
-model -- and what was retired here is only its solver, which nothing planned on.
+machine's, and the PZS100 is the machine that has to run.
 
 `docs/features/cbs-ocp-python/grill.md` D6's second artifact is retired too, and
 the question it existed to settle is settled: dropping `wiki/mpc.md` §3's

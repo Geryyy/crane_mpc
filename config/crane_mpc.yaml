@@ -3,8 +3,6 @@ crane_mpc:
   ros__parameters:
     mode: shadow
 
-    tool: pzs100
-
     Ts: 0.04
     horizon_length: 50
 

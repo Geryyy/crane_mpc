@@ -498,18 +498,6 @@ Result<std::unique_ptr<Ocp>> Ocp::create(
     return Result<Handle>::failure(settings_status);
   }
 
-  // The description is baked into the generated solver, so the tool is not a
-  // choice this package can honour any more: it ships the PZS100's artifact and
-  // nothing else. Refused here rather than solved on the wrong machine's
-  // dynamics, which is what ignoring `config.tool` would silently do.
-  if (config.tool != crane_model::Tool::Pzs100) {
-    return Result<Handle>::failure(
-      failure(
-        ErrorCode::BackendUnavailable,
-        "this build plans the PZS100 only: it ships one generated solver and the description is "
-        "baked into it"));
-  }
-
   const Status payload_status = check_payload(payload);
   if (!payload_status.ok()) {
     return Result<Handle>::failure(payload_status);

@@ -164,14 +164,6 @@ MpcNode::MpcNode(const rclcpp::NodeOptions & options)
   parameters_ = std::make_unique<Parameters>(this);
   const crane_mpc::Params & parameters = parameters_->values;
 
-  // One generated solver ships, and the description is baked into it, so the
-  // tool is not a runtime choice any more -- refused here, at construction,
-  // rather than at the first description with a machine the artifact is not for.
-  if (parameters.tool != "pzs100") {
-    throw std::runtime_error(
-            "crane_mpc: this build plans the PZS100 only, and 'tool' is '" + parameters.tool +
-            "'. The description is baked into the one generated solver this package ships");
-  }
   if (!mode_from_string(parameters.mode, mode_)) {
     throw std::runtime_error("crane_mpc: unknown mode '" + parameters.mode + "'");
   }

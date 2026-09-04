@@ -39,24 +39,6 @@ crane_mpc:
     validation:
       one_of<>: [["shadow", "active"]]
 
-  tool:
-    type: string
-    default_value: "pzs100"
-    read_only: true
-    description: "The mounted tool. It decides which URDF joint the eighth
-      canonical coordinate is -- q9_left_rail_joint on the PZS100 (Nomenclature
-      4, ROS 2 Interfaces 3.1) -- and therefore which name the sixth valve
-      channel is published under in every horizon. The joint strings themselves
-      come off the model built from `robot_description`, so no per-tool table
-      lives in this package, and the names are **carried in the message** rather
-      than assumed by the receiver.
-      **`pzs100` is the only value this build accepts.** The machine's
-      description is baked into the generated solver and only the PZS100's is
-      shipped, so a second tool is not a runtime choice; anything else is refused
-      at construction with a message that says so, rather than planned on the
-      wrong machine's dynamics. The Epsilon 7040 is still a real machine in
-      crane_model -- what was retired is its solver, not its model."
-
   Ts:
     type: double
     default_value: 0.04

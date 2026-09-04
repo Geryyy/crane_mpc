@@ -40,10 +40,7 @@ and 5 remain hard.
 
 `generated/` carries **one** artifact, `crane_mpc_pzs100/`. The description is
 baked into a generated solver, so an artifact is one machine's, and the PZS100 is
-the machine that has to run; `tool` is therefore not a runtime choice any more,
-and anything but `pzs100` is refused at construction with a message that says so.
-The Epsilon 7040 is still a real machine in `crane_model` -- description,
-hydraulics and collision model -- and what was retired here is its *solver*.
+the machine that has to run; there is no tool selection anywhere in this package.
 
 `docs/features/cbs-ocp-python/grill.md` D6 asked whether the planner's kappa
 headroom (`wiki/trajectory_planning.md` §5.5) already keeps the reference inside
@@ -359,8 +356,7 @@ message:
 
 * **the per-axis difference** — the shadow command (`mpc` §1's `q̇_a,0 + T_s u_0`,
   the velocity row of the horizon's second knot) minus the velocity the follower
-  produced, keyed by joint name because the sixth valve channel is a different
-  joint per tool;
+  produced, keyed by joint name;
 * **what actually drove**, off `/crane/controller_state`. `output.velocities` is
   read first — the message defines it as the controller's own output, so it is the
   command the follower wrote, control law included — falling back to
