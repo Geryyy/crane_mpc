@@ -185,7 +185,13 @@ def build_ocp(description_xml: str, parameters: dict, hydraulics: dict) -> tuple
     arithmetic combination of two of them. No equation of motion, no
     transmission ratio and no smoothing width is written here.
     """
-    model = cs.CraneSymbolicModel(description_xml, TOOL)
+    # C3 in full on every planned axis (`hydraulic_actuator_model.md` §1): the
+    # PT1 command lag, the force state and forward dynamics, with the fitted
+    # `k` and `tau_v` read out of the file rather than hand-copied. `u` is a
+    # joint velocity in rad/s at Psi's input from here on, not an acceleration.
+    model = cs.CraneSymbolicModel(
+        description_xml, TOOL, actuator=cs.load_actuator_fit()
+    )
     scale = constraint_scale(model, hydraulics)
 
     # --- `p`: the pinned tool coordinate and the payload body -----------------
@@ -233,6 +239,11 @@ def build_ocp(description_xml: str, parameters: dict, hydraulics: dict) -> tuple
     acados_model.u = u
     acados_model.p = model.p
     acados_model.f_expl_expr = xdot
+    # IRK reads `f_impl_expr` and errors on an empty one, ERK reads `f_expl_expr`;
+    # both are set so the integrator stays a solver option rather than a re-model,
+    # which is what `crane_planning`'s exporter does for the same reason.
+    acados_model.xdot = ca.SX.sym("xdot", cs.NX)
+    acados_model.f_impl_expr = acados_model.xdot - xdot
 
     # --- §2's cost, as a nonlinear least-squares residual ---------------------
     #
@@ -332,12 +343,23 @@ def build_ocp(description_xml: str, parameters: dict, hydraulics: dict) -> tuple
     # `wiki/implementation/parameters.md` §2 are ROS parameters and the sway box
     # of constraint 3 travels with each stage's own equilibrium.
     ocp.constraints.x0 = np.zeros(nx)
-    ocp.constraints.idxbx = np.arange(nx)
-    ocp.constraints.lbx = -np.ones(nx)
-    ocp.constraints.ubx = np.ones(nx)
-    ocp.constraints.idxbx_e = np.arange(nx)
-    ocp.constraints.lbx_e = -np.ones(nx)
-    ocp.constraints.ubx_e = np.ones(nx)
+    # The **force states are not boxed.** Constraint 6 is
+    # `|tau_a,i| <= J_c,ii(q) F_i^max`, and `J_c,ii` is not a constant on the boom
+    # and changes sign across the arm's control-safe range, so no constant box on
+    # `tau_a` is that constraint -- it is either slack or wrong. The nonlinear row
+    # stays and is what bounds the force state; what C3 buys there is that the row
+    # is now `x_j / J_c,ii(q)` instead of a whole inverse dynamics.
+    #
+    # The boxed rows are therefore the rigid-body state plus the lagged command,
+    # which is a **contiguous prefix** of `x`, so acados' `idxbx` positions and the
+    # state rows still coincide and `idxsbx` below indexes the same numbers.
+    nbx = cs.NX_RIGID + cs.K_COMMAND_LAG_DOF
+    ocp.constraints.idxbx = np.arange(nbx)
+    ocp.constraints.lbx = -np.ones(nbx)
+    ocp.constraints.ubx = np.ones(nbx)
+    ocp.constraints.idxbx_e = np.arange(nbx)
+    ocp.constraints.lbx_e = -np.ones(nbx)
+    ocp.constraints.ubx_e = np.ones(nbx)
     ocp.constraints.idxbu = np.arange(nu)
     ocp.constraints.lbu = -np.ones(nu)
     ocp.constraints.ubu = np.ones(nu)
@@ -410,15 +432,21 @@ def build_ocp(description_xml: str, parameters: dict, hydraulics: dict) -> tuple
     # **RTI: exactly one iteration per cycle**, which is what makes the solve time
     # deterministic. For a hard-real-time loop that is worth more than the extra
     # accuracy of a converged SQP step, because the plant moves between cycles
-    # anyway. ERK with four stages **is** ERK4, one step per shooting interval, so
-    # the integrator step is `T_s`: with the ideal inner loop the model is not
-    # stiff, so an explicit integrator is enough and cheaper than IRK, and grill
-    # D1's whole argument is that changing this line is now one line.
+    # anyway.
+    #
+    # **IRK, and it is C3 that made it necessary.** The comment that stood here
+    # said ERK4 was sound only because the ideal inner loop left the model
+    # non-stiff, and to revisit it if actuator lag came back. It came back: the
+    # fastest eigenvalue of the linearised C3 plant is `|lambda| T_s = 8.5` at an
+    # ordinary pose -- the telescope's `k = 3.5e6 N/m` against its effective mass
+    # -- and ERK4 is stable only to about 2.8, so an explicit step diverges inside
+    # three intervals and HPIPM answers status 3. Two Gauss stages are order four
+    # and A-stable, so the step size stops being a stability question at all.
     ocp.solver_options.nlp_solver_type = "SQP_RTI"
     ocp.solver_options.qp_solver = "PARTIAL_CONDENSING_HPIPM"
     ocp.solver_options.hessian_approx = "GAUSS_NEWTON"
-    ocp.solver_options.integrator_type = "ERK"
-    ocp.solver_options.sim_method_num_stages = 4
+    ocp.solver_options.integrator_type = "IRK"
+    ocp.solver_options.sim_method_num_stages = 2
     ocp.solver_options.sim_method_num_steps = 1
     # No line search: one full Newton step is what RTI *is*, and a search would
     # make the cost of a cycle depend on the problem. Nothing is regularised
@@ -436,7 +464,11 @@ def build_ocp(description_xml: str, parameters: dict, hydraulics: dict) -> tuple
 
 
 def write_header(
-    output: Path, parameters: dict, scale: np.ndarray, constants: cs.Constants
+    output: Path,
+    parameters: dict,
+    scale: np.ndarray,
+    constants: cs.Constants,
+    actuator: cs.ActuatorFit,
 ) -> Path:
     """
     Write the numbers `ocp_solver.cpp` would otherwise derive a second time.
@@ -485,6 +517,42 @@ def write_header(
         "#define CRANE_MPC_OCP_PARAMETER_INERTIA_ENTRIES {"
         + ", ".join(f"{{{row}, {column}}}" for row, column in cs.INERTIA_ENTRIES)
         + "}",
+        "",
+        "// The blocks of `x`. C3 (`wiki/hydraulic_actuator_model.md` §1) adds two",
+        "// actuator blocks after the rigid-body state: the PT1 lagged command on",
+        "// the axes whose fitted `tau_v` is positive -- the arm's is zero, which is",
+        "// a pole at infinity, so it has no lag state and its `u_f` is `u` -- and",
+        "// then the force state on every planned axis. Neither has a counterpart in",
+        "// `crane_model::State`, so both are OCP-only rows.",
+        f"#define CRANE_MPC_OCP_STATE_PLANNED_POSITION {cs.X_PLANNED_POSITION}",
+        f"#define CRANE_MPC_OCP_STATE_PASSIVE_POSITION {cs.X_PASSIVE_POSITION}",
+        f"#define CRANE_MPC_OCP_STATE_PLANNED_VELOCITY {cs.X_PLANNED_VELOCITY}",
+        f"#define CRANE_MPC_OCP_STATE_PASSIVE_VELOCITY {cs.X_PASSIVE_VELOCITY}",
+        f"#define CRANE_MPC_OCP_STATE_COMMAND_LAG {cs.X_COMMAND_LAG}",
+        f"#define CRANE_MPC_OCP_STATE_COMMAND_LAG_DOF {cs.K_COMMAND_LAG_DOF}",
+        "#define CRANE_MPC_OCP_STATE_COMMAND_LAG_AXES {"
+        + ", ".join(str(axis) for axis in cs.K_LAG_AXES)
+        + "}",
+        f"#define CRANE_MPC_OCP_STATE_ACTUATED_FORCE {cs.X_ACTUATED_FORCE}",
+        "",
+        "// The boxed rows of `x`: the rigid-body state and the lagged command, a",
+        "// contiguous prefix. The force states are left out on purpose -- see",
+        "// `export_ocp.py`; constraint 6 is the nonlinear row and not a box.",
+        f"#define CRANE_MPC_OCP_BOXED_STATE_DOF {cs.NX_RIGID + cs.K_COMMAND_LAG_DOF}",
+        "",
+        "// C3's fitted numbers as they were folded into the dynamics, per planned",
+        "// axis, from `crane_model/config/c3_full_model.json`. Here so the C++ and",
+        "// the node can *say* which fit is in the artifact rather than assume one.",
+        "// The dead time is C3 block 1 and is **not** in the model: it belongs to",
+        "// the node's predictor, and a second copy inside the horizon double-counts",
+        "// it (`docs/features/mpc-full-authority/brief.md` §2.2).",
+        "#define CRANE_MPC_OCP_ACTUATOR_STIFFNESS {"
+        + ", ".join(f"{value!r}" for value in actuator.k)
+        + "}",
+        "#define CRANE_MPC_OCP_ACTUATOR_COMMAND_LAG_S {"
+        + ", ".join(f"{value!r}" for value in actuator.tau_v)
+        + "}",
+        f"#define CRANE_MPC_OCP_ACTUATOR_DEAD_TIME_S {actuator.dead_time_s!r}",
         "",
         "// The blocks of the stage residual `y = [q_a, dq_a, q_u, dq_u, tau_a, u]`.",
         "// The order is §2's -- tracking, sway, effort, smoothness -- and not the",
@@ -608,7 +676,7 @@ def generate(
     # requirement 4 wants the residuals in physical units.
     ox.write_output_map(model, ocp.model.name, tree)
 
-    write_header(output, parameters, scale, cs.load_constants())
+    write_header(output, parameters, scale, cs.load_constants(), model.actuator)
     ox.finalise(output, README)
 
 

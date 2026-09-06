@@ -55,7 +55,7 @@ crane_mpc:
 
   sensor_to_valve_delay:
     type: double
-    default_value: 0.05
+    default_value: 0.06
     read_only: true
     description: "The transport delay the measured state is carried forward by
       before the OCP is solved from it, s. wiki/mpc.md and wiki/system.md
@@ -73,7 +73,18 @@ crane_mpc:
       the passive rows are propagated 10 ms short; and the solve's own duration is
       not added, because it is not known until the solve has happened. Zero is a
       legal value and means no delay has been measured on this deployment: nothing
-      is propagated, which is honest, and it is a different answer from one step."
+      is propagated, which is honest, and it is a different answer from one step.
+      **This is C3 block 1** (wiki/hydraulic_actuator_model.md:48), the transport
+      dead time, and it is modelled here in the predictor and nowhere else. The
+      plant model in crane_model/crane_model/symbolic.py carries blocks 2, 3 and 5
+      and deliberately carries no delay: a second one inside the horizon would
+      double-count this one. C3 pins the dead time at 60 ms common to all six
+      axes, which is where this default now comes from -- it replaces the 50 ms
+      deployed round trip, and the 10 ms difference is inside the uncertainty of
+      both numbers. docs/features/mpc-full-authority/brief.md 2.2 is the decision.
+      The propagation still holds the last applied input constant across the
+      delay rather than replaying the inputs actually in flight; that is issue
+      125."
     validation:
       gt_eq<>: [0.0]
 

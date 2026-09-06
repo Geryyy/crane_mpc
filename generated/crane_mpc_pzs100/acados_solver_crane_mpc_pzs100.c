@@ -167,7 +167,7 @@ void crane_mpc_pzs100_acados_create_set_plan(ocp_nlp_plan_t* nlp_solver_plan, co
     for (int i = 0; i < N; i++)
     {
         nlp_solver_plan->nlp_dynamics[i] = CONTINUOUS_MODEL;
-        nlp_solver_plan->sim_solver_plan[i].sim_solver = ERK;
+        nlp_solver_plan->sim_solver_plan[i].sim_solver = IRK;
     }
 
     nlp_solver_plan->nlp_constraints[0] = BGH;
@@ -244,7 +244,7 @@ static ocp_nlp_dims* crane_mpc_pzs100_acados_create_setup_dimensions(crane_mpc_p
     nbx[0] = NBX0;
     nsbx[0] = 0;
     ns[0] = NS0;
-    nbxe[0] = 14;
+    nbxe[0] = 23;
     ny[0] = NY0;
     nh[0] = NH0;
     nsh[0] = NSH0;
@@ -360,22 +360,21 @@ void crane_mpc_pzs100_acados_create_setup_functions(crane_mpc_pzs100_solver_caps
 
 
 
-    // explicit ode
-    capsule->expl_vde_forw = (external_function_external_param_casadi *) malloc(sizeof(external_function_external_param_casadi)*N);
+    // implicit dae
+    capsule->impl_dae_fun = (external_function_external_param_casadi *) malloc(sizeof(external_function_external_param_casadi)*N);
     for (int i = 0; i < N; i++) {
-        MAP_CASADI_FNC(expl_vde_forw[i], crane_mpc_pzs100_expl_vde_forw);
+        MAP_CASADI_FNC(impl_dae_fun[i], crane_mpc_pzs100_impl_dae_fun);
     }
 
-    capsule->expl_ode_fun = (external_function_external_param_casadi *) malloc(sizeof(external_function_external_param_casadi)*N);
+    capsule->impl_dae_fun_jac_x_xdot_z = (external_function_external_param_casadi *) malloc(sizeof(external_function_external_param_casadi)*N);
     for (int i = 0; i < N; i++) {
-        MAP_CASADI_FNC(expl_ode_fun[i], crane_mpc_pzs100_expl_ode_fun);
+        MAP_CASADI_FNC(impl_dae_fun_jac_x_xdot_z[i], crane_mpc_pzs100_impl_dae_fun_jac_x_xdot_z);
     }
 
-    capsule->expl_vde_adj = (external_function_external_param_casadi *) malloc(sizeof(external_function_external_param_casadi)*N);
+    capsule->impl_dae_jac_x_xdot_u_z = (external_function_external_param_casadi *) malloc(sizeof(external_function_external_param_casadi)*N);
     for (int i = 0; i < N; i++) {
-        MAP_CASADI_FNC(expl_vde_adj[i], crane_mpc_pzs100_expl_vde_adj);
+        MAP_CASADI_FNC(impl_dae_jac_x_xdot_u_z[i], crane_mpc_pzs100_impl_dae_jac_x_xdot_u_z);
     }
-
 
     // nonlinear least squares cost
     capsule->cost_y_fun = (external_function_external_param_casadi *) malloc(sizeof(external_function_external_param_casadi)*(N-1));
@@ -513,9 +512,11 @@ void crane_mpc_pzs100_acados_setup_nlp_in(crane_mpc_pzs100_solver_capsule* capsu
     /**** Dynamics ****/
     for (int i = 0; i < N; i++)
     {
-        ocp_nlp_dynamics_model_set_external_param_fun(nlp_config, nlp_dims, nlp_in, i, "expl_vde_forw", &capsule->expl_vde_forw[i]);
-        ocp_nlp_dynamics_model_set_external_param_fun(nlp_config, nlp_dims, nlp_in, i, "expl_ode_fun", &capsule->expl_ode_fun[i]);
-        ocp_nlp_dynamics_model_set_external_param_fun(nlp_config, nlp_dims, nlp_in, i, "expl_vde_adj", &capsule->expl_vde_adj[i]);
+        ocp_nlp_dynamics_model_set_external_param_fun(nlp_config, nlp_dims, nlp_in, i, "impl_dae_fun", &capsule->impl_dae_fun[i]);
+        ocp_nlp_dynamics_model_set_external_param_fun(nlp_config, nlp_dims, nlp_in, i,
+                                   "impl_dae_fun_jac_x_xdot_z", &capsule->impl_dae_fun_jac_x_xdot_z[i]);
+        ocp_nlp_dynamics_model_set_external_param_fun(nlp_config, nlp_dims, nlp_in, i,
+                                   "impl_dae_jac_x_xdot_u", &capsule->impl_dae_jac_x_xdot_u_z[i]);
     }
 
     /**** Cost ****/
@@ -733,6 +734,15 @@ void crane_mpc_pzs100_acados_setup_nlp_in(crane_mpc_pzs100_solver_capsule* capsu
     idxbx0[11] = 11;
     idxbx0[12] = 12;
     idxbx0[13] = 13;
+    idxbx0[14] = 14;
+    idxbx0[15] = 15;
+    idxbx0[16] = 16;
+    idxbx0[17] = 17;
+    idxbx0[18] = 18;
+    idxbx0[19] = 19;
+    idxbx0[20] = 20;
+    idxbx0[21] = 21;
+    idxbx0[22] = 22;
 
     double* lubx0 = calloc(2*NBX0, sizeof(double));
     double* lbx0 = lubx0;
@@ -745,7 +755,7 @@ void crane_mpc_pzs100_acados_setup_nlp_in(crane_mpc_pzs100_solver_capsule* capsu
     free(idxbx0);
     free(lubx0);
     // idxbxe_0
-    int* idxbxe_0 = malloc(14 * sizeof(int));
+    int* idxbxe_0 = malloc(23 * sizeof(int));
     idxbxe_0[0] = 0;
     idxbxe_0[1] = 1;
     idxbxe_0[2] = 2;
@@ -760,6 +770,15 @@ void crane_mpc_pzs100_acados_setup_nlp_in(crane_mpc_pzs100_solver_capsule* capsu
     idxbxe_0[11] = 11;
     idxbxe_0[12] = 12;
     idxbxe_0[13] = 13;
+    idxbxe_0[14] = 14;
+    idxbxe_0[15] = 15;
+    idxbxe_0[16] = 16;
+    idxbxe_0[17] = 17;
+    idxbxe_0[18] = 18;
+    idxbxe_0[19] = 19;
+    idxbxe_0[20] = 20;
+    idxbxe_0[21] = 21;
+    idxbxe_0[22] = 22;
     ocp_nlp_constraints_model_set(nlp_config, nlp_dims, nlp_in, 0, "idxbxe", idxbxe_0);
     free(idxbxe_0);
 
@@ -909,6 +928,10 @@ void crane_mpc_pzs100_acados_setup_nlp_in(crane_mpc_pzs100_solver_capsule* capsu
     idxbx[11] = 11;
     idxbx[12] = 12;
     idxbx[13] = 13;
+    idxbx[14] = 14;
+    idxbx[15] = 15;
+    idxbx[16] = 16;
+    idxbx[17] = 17;
     double* lubx = calloc(2*NBX, sizeof(double));
     double* lbx = lubx;
     double* ubx = lubx + NBX;
@@ -940,6 +963,14 @@ void crane_mpc_pzs100_acados_setup_nlp_in(crane_mpc_pzs100_solver_capsule* capsu
     ubx[12] = 1;
     lbx[13] = -1;
     ubx[13] = 1;
+    lbx[14] = -1;
+    ubx[14] = 1;
+    lbx[15] = -1;
+    ubx[15] = 1;
+    lbx[16] = -1;
+    ubx[16] = 1;
+    lbx[17] = -1;
+    ubx[17] = 1;
 
     for (int i = 1; i < N; i++)
     {
@@ -1004,6 +1035,10 @@ void crane_mpc_pzs100_acados_setup_nlp_in(crane_mpc_pzs100_solver_capsule* capsu
     idxbx_e[11] = 11;
     idxbx_e[12] = 12;
     idxbx_e[13] = 13;
+    idxbx_e[14] = 14;
+    idxbx_e[15] = 15;
+    idxbx_e[16] = 16;
+    idxbx_e[17] = 17;
     double* lubx_e = calloc(2*NBXN, sizeof(double));
     double* lbx_e = lubx_e;
     double* ubx_e = lubx_e + NBXN;
@@ -1035,6 +1070,14 @@ void crane_mpc_pzs100_acados_setup_nlp_in(crane_mpc_pzs100_solver_capsule* capsu
     ubx_e[12] = 1;
     lbx_e[13] = -1;
     ubx_e[13] = 1;
+    lbx_e[14] = -1;
+    ubx_e[14] = 1;
+    lbx_e[15] = -1;
+    ubx_e[15] = 1;
+    lbx_e[16] = -1;
+    ubx_e[16] = 1;
+    lbx_e[17] = -1;
+    ubx_e[17] = 1;
     ocp_nlp_constraints_model_set(nlp_config, nlp_dims, nlp_in, N, "idxbx", idxbx_e);
     ocp_nlp_constraints_model_set(nlp_config, nlp_dims, nlp_in, N, "lbx", lbx_e);
     ocp_nlp_constraints_model_set(nlp_config, nlp_dims, nlp_in, N, "ubx", ubx_e);
@@ -1117,7 +1160,7 @@ static void crane_mpc_pzs100_acados_create_set_opts(crane_mpc_pzs100_solver_caps
 
     // set up sim_method_num_stages
     // all sim_method_num_stages are identical
-    int sim_method_num_stages = 4;
+    int sim_method_num_stages = 2;
     for (int i = 0; i < N; i++)
         ocp_nlp_solver_opts_set_at_stage(nlp_config, nlp_opts, i, "dynamics_num_stages", &sim_method_num_stages);
 
@@ -1333,6 +1376,8 @@ int crane_mpc_pzs100_acados_reset(crane_mpc_pzs100_solver_capsule* capsule, int 
         if (i<N)
         {
             ocp_nlp_out_set(nlp_config, nlp_dims, nlp_out, i, "pi", buffer);
+            ocp_nlp_set(nlp_solver, i, "xdot_guess", buffer);
+            ocp_nlp_set(nlp_solver, i, "z_guess", buffer);
         }
     }
     // get qp_status: if NaN -> reset memory
@@ -1425,13 +1470,13 @@ int crane_mpc_pzs100_acados_free(crane_mpc_pzs100_solver_capsule* capsule)
     // dynamics
     for (int i = 0; i < N; i++)
     {
-        external_function_external_param_casadi_free(&capsule->expl_vde_forw[i]);
-        external_function_external_param_casadi_free(&capsule->expl_ode_fun[i]);
-        external_function_external_param_casadi_free(&capsule->expl_vde_adj[i]);
+        external_function_external_param_casadi_free(&capsule->impl_dae_fun[i]);
+        external_function_external_param_casadi_free(&capsule->impl_dae_fun_jac_x_xdot_z[i]);
+        external_function_external_param_casadi_free(&capsule->impl_dae_jac_x_xdot_u_z[i]);
     }
-    free(capsule->expl_vde_adj);
-    free(capsule->expl_vde_forw);
-    free(capsule->expl_ode_fun);
+    free(capsule->impl_dae_fun);
+    free(capsule->impl_dae_fun_jac_x_xdot_z);
+    free(capsule->impl_dae_jac_x_xdot_u_z);
 
     // cost
     external_function_external_param_casadi_free(&capsule->cost_y_0_fun);

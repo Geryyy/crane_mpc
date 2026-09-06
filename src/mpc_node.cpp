@@ -1104,6 +1104,18 @@ void MpcNode::update()
   if (mode_ == Mode::Shadow) {
     last_input_ = follower_input(follower_);
   }
+  // **This is C3 block 1** (`wiki/hydraulic_actuator_model.md`:48): the transport
+  // dead time is modelled here, in the predictor, and nowhere else. The plant in
+  // `crane_model/crane_model/symbolic.py` carries C3's PT1 command lag and force
+  // state and deliberately carries no delay, so a second one inside the horizon
+  // would double-count this one. For a pure input delay the predictor is the
+  // exact treatment and it costs no state -- 60 ms on a 40 ms step is 1.5
+  // intervals and would not land on a node anyway.
+  //
+  // The propagation holds the last applied input constant across the delay; the
+  // in-flight replay Marc's buffer does is issue 125. It also holds C3's two
+  // actuator states constant, because `crane_model::State` has no slot for them;
+  // `x_0`'s force state comes from the solver's own carried estimate instead.
   const auto propagated = ocp_->propagate(measured, last_input_, sensor_to_valve_delay_);
   if (!propagated.ok()) {
     stay_silent("the measured state could not be propagated to the instant the plan takes effect");

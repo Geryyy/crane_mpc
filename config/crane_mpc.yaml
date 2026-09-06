@@ -6,7 +6,11 @@ crane_mpc:
     Ts: 0.04
     horizon_length: 50
 
-    sensor_to_valve_delay: 0.05
+    # C3 block 1, the transport dead time, pinned common to all six axes
+    # (wiki/hydraulic_actuator_model.md:48). It is modelled **here**, in the
+    # predictor, and not inside the plant: symbolic.py carries blocks 2, 3
+    # and 5 and no delay, so a second one here would double-count it.
+    sensor_to_valve_delay: 0.06
     max_state_age: 0.2
     levenberg_marquardt: 1.0e-6
 
@@ -31,7 +35,11 @@ crane_mpc:
       dq_a_max: [0.802, 0.326, 0.344, 0.630, 2.122, 0.5]
       q_u_max: [0.2, 0.2]
       dq_u_max: [1.0, 0.5]
-      u_max: [0.5, 0.7, 0.5, 1.0, 6.0, 2.0]
+      # `u` is a **joint velocity** in rad/s at Psi's input under C3, not an
+      # acceleration, so this box is dimensionally a velocity now. Seeded from
+      # dq_a_max, which is the only rate limit in this file with provenance;
+      # issue 117 is the retune.
+      u_max: [0.802, 0.326, 0.344, 0.630, 2.122, 0.5]
 
     slack:
       q_u: [1.0e3, 1.0e3]

@@ -6,6 +6,7 @@
 #include <cmath>
 #include <cstddef>
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -44,8 +45,16 @@ constexpr int kNyTerminal = static_cast<int>(Ocp::kTerminalResidualDof);
 constexpr int kNh = static_cast<int>(Ocp::kNonlinearConstraintDof);
 constexpr int kNsbx = 2 * static_cast<int>(crane_model::kPassiveDof);
 constexpr int kNp = CRANE_MPC_OCP_PARAMETER_DOF;
+constexpr int kNbx = static_cast<int>(kOcpBoxedStateDof);
 
-static_assert(CRANE_MPC_PZS100_NX == kNx, "nx = 14 after : the tool is not planned");
+static_assert(
+  CRANE_MPC_PZS100_NX == kNx,
+  "nx is the rigid state plus C3's lagged command and force state; the tool is not planned");
+static_assert(
+  CRANE_MPC_PZS100_NBX == kNbx && CRANE_MPC_PZS100_NBXN == kNbx,
+  "the boxed rows are the rigid state and the lagged command; the force states are held by "
+  "constraint 6 and carry no box");
+static_assert(CRANE_MPC_PZS100_NBX0 == kNx, "x_0 pins every row, actuator states included");
 static_assert(CRANE_MPC_PZS100_NU == kNu, "nu = 5 after ");
 static_assert(
   CRANE_MPC_PZS100_NP == kNp, "p is the pinned tool coordinate and the payload body ()");
@@ -58,10 +67,24 @@ static_assert(CRANE_MPC_PZS100_NSH == kNh, "hydraulic constraints are soft");
 static_assert(CRANE_MPC_PZS100_NBU == kNu, "constraint 5 boxes every planned input");
 static_assert(CRANE_MPC_PZS100_N == CRANE_MPC_OCP_HORIZON, "the header and the solver agree");
 
-constexpr std::size_t kReducedActuatedPosition = 0;
-constexpr std::size_t kReducedPassivePosition = kPlannedDof;
-constexpr std::size_t kReducedActuatedVelocity = kPlannedDof + crane_model::kPassiveDof;
-constexpr std::size_t kReducedPassiveVelocity = 2 * kPlannedDof + crane_model::kPassiveDof;
+constexpr std::size_t kReducedActuatedPosition = CRANE_MPC_OCP_STATE_PLANNED_POSITION;
+constexpr std::size_t kReducedPassivePosition = CRANE_MPC_OCP_STATE_PASSIVE_POSITION;
+constexpr std::size_t kReducedActuatedVelocity = CRANE_MPC_OCP_STATE_PLANNED_VELOCITY;
+constexpr std::size_t kReducedPassiveVelocity = CRANE_MPC_OCP_STATE_PASSIVE_VELOCITY;
+
+// C3's two actuator blocks. `kCommandLagAxes` is the export's own list, derived
+// there from the fit; the arm is missing from it because its `tau_v` is zero.
+constexpr std::size_t kReducedCommandLag = CRANE_MPC_OCP_STATE_COMMAND_LAG;
+constexpr std::size_t kReducedActuatedForce = CRANE_MPC_OCP_STATE_ACTUATED_FORCE;
+constexpr std::array<std::size_t, kOcpCommandLagDof> kCommandLagAxes =
+  CRANE_MPC_OCP_STATE_COMMAND_LAG_AXES;
+
+static_assert(
+  CRANE_MPC_OCP_STATE_COMMAND_LAG_DOF == static_cast<int>(kOcpCommandLagDof),
+  "a refit that gives another axis a command lag changes every offset after it");
+static_assert(
+  CRANE_MPC_OCP_BOXED_STATE_DOF == static_cast<int>(kOcpBoxedStateDof),
+  "the boxed rows are a contiguous prefix of x, so idxbx positions are state rows");
 
 static_assert(
   kReducedPassivePosition == CRANE_MPC_OCP_SOFT_PASSIVE_POSITION,
@@ -93,7 +116,8 @@ struct Backend
 {
   crane_ocp::AcadosBackend acados{};
 
-  crane_ocp::AcadosFunction ode{nullptr};
+  /// acados' implicit residual `f_impl = xdot - f(x, u, p)`. See `explicit_ode`.
+  crane_ocp::AcadosFunction implicit_ode{nullptr};
   crane_ocp::AcadosFunction residual{nullptr};
   crane_ocp::AcadosFunction terminal{nullptr};
   crane_ocp::AcadosFunction constraint{nullptr};
@@ -108,12 +132,35 @@ Backend pzs100_backend()
 {
   Backend backend;
   backend.acados = CRANE_OCP_ACADOS_BACKEND(crane_mpc_pzs100);
-  backend.ode = &crane_mpc_pzs100_expl_ode_fun;
+  backend.implicit_ode = &crane_mpc_pzs100_impl_dae_fun;
   backend.residual = &crane_mpc_pzs100_cost_y_fun;
   backend.terminal = &crane_mpc_pzs100_cost_y_e_fun;
   backend.constraint = &crane_mpc_pzs100_constr_h_fun;
   backend.output = &crane_mpc_pzs100_output;
   return backend;
+}
+
+/// `f(x, u, p)` out of acados' implicit residual, for the callers off the solve path.
+/**
+ * C3 is stiff at `T_s` and the horizon is integrated with IRK, which generates
+ * `f_impl = xdot - f(x, u, p)` and **no** explicit entry point. The explicit
+ * right-hand side is therefore that residual at `xdot = 0`, negated. Only
+ * `Ocp::dynamics` and `Ocp::propagate` read it; acados integrates the horizon
+ * itself and never comes through here.
+ */
+bool explicit_ode(
+  const Backend & backend, const double * x, const double * u, const double * p, double * result)
+{
+  static const std::array<double, static_cast<std::size_t>(kNx)> rest{};
+  if (!crane_ocp::evaluate(
+      backend.implicit_ode, {x, rest.data(), u, nullptr, nullptr, p}, result))
+  {
+    return false;
+  }
+  for (int row = 0; row < kNx; ++row) {
+    result[static_cast<std::size_t>(row)] = -result[static_cast<std::size_t>(row)];
+  }
+  return true;
 }
 
 double pinned_tool(const crane_model::State & x)
@@ -181,9 +228,69 @@ Status check_payload(const crane_model::Payload & payload)
   return Status{};
 }
 
-std::vector<double> reduce(const crane_model::State & x)
+// I_a and I_u in canonical indices, the same rows `crane_model`'s `kActuatedRows`
+// and `kPassiveRows` name. Needed here because `crane_model::State` orders the
+// coordinates actuated-then-passive and `crane_model::Q` orders them canonically.
+constexpr std::array<std::size_t, crane_model::kActuatedDof> kActuatedCanonical{
+  {0, 1, 2, 3, 6, 7}};
+constexpr std::array<std::size_t, crane_model::kPassiveDof> kPassiveCanonical{{4, 5}};
+
+/// Where C3's two actuator states start when nothing has carried them forward.
+/**
+ * There is no force measurement anywhere in the stack, so the force state has to
+ * be seeded from the model: `h_eff` of `wiki/robot_model.md` §3.4 is the force
+ * that holds the machine still at this configuration, which is what the machine
+ * is doing when a horizon is first posed. Seeding it at zero would start every
+ * prediction with the hydraulics switched off and the boom in free fall. The
+ * lagged command is seeded at the measured velocity, the PT1's own steady state.
+ */
+ActuatorState seed_actuator(
+  const crane_model::Model & model, const crane_model::State & x,
+  const crane_model::Payload & payload, ActuatorState seeded)
+{
+  crane_model::Q q = crane_model::Q::Zero();
+  crane_model::DQ dq = crane_model::DQ::Zero();
+  for (std::size_t row = 0; row < crane_model::kActuatedDof; ++row) {
+    q[static_cast<Eigen::Index>(kActuatedCanonical[row])] =
+      x[static_cast<Eigen::Index>(kStateActuatedPosition + row)];
+    dq[static_cast<Eigen::Index>(kActuatedCanonical[row])] =
+      x[static_cast<Eigen::Index>(kStateActuatedVelocity + row)];
+  }
+  for (std::size_t row = 0; row < crane_model::kPassiveDof; ++row) {
+    q[static_cast<Eigen::Index>(kPassiveCanonical[row])] =
+      x[static_cast<Eigen::Index>(kStatePassivePosition + row)];
+    dq[static_cast<Eigen::Index>(kPassiveCanonical[row])] =
+      x[static_cast<Eigen::Index>(kStatePassiveVelocity + row)];
+  }
+  for (std::size_t row = 0; row < kPlannedDof; ++row) {
+    seeded.command_lag[row] = x[static_cast<Eigen::Index>(kStateActuatedVelocity + row)];
+  }
+  const auto reduced =
+    model.reduced_actuated_dynamics(q, dq, crane_model::Input::Zero(), payload);
+  if (reduced.ok()) {
+    for (std::size_t row = 0; row < kPlannedDof; ++row) {
+      seeded.force[row] = reduced.value().bias_eff[static_cast<Eigen::Index>(row)];
+    }
+  }
+  return seeded;
+}
+
+/// The canonical state, the actuator state, and the OCP vector that holds both.
+/**
+ * Three categories, not two: `crane_model::State` is the model API contract's
+ * fixed sixteen and has no slot for `u_f` or `tau_a`, so those arrive here
+ * separately rather than by widening a contract the planner and the collision
+ * model also read.
+ */
+std::vector<double> reduce(const crane_model::State & x, const ActuatorState & actuator)
 {
   std::vector<double> rows(static_cast<std::size_t>(kNx), 0.0);
+  for (std::size_t slot = 0; slot < kOcpCommandLagDof; ++slot) {
+    rows[kReducedCommandLag + slot] = actuator.command_lag[kCommandLagAxes[slot]];
+  }
+  for (std::size_t row = 0; row < kPlannedDof; ++row) {
+    rows[kReducedActuatedForce + row] = actuator.force[row];
+  }
   for (std::size_t row = 0; row < kPlannedDof; ++row) {
     rows[kReducedActuatedPosition + row] =
       x[static_cast<Eigen::Index>(kStateActuatedPosition + row)];
@@ -197,6 +304,22 @@ std::vector<double> reduce(const crane_model::State & x)
       x[static_cast<Eigen::Index>(kStatePassiveVelocity + row)];
   }
   return rows;
+}
+
+/// The actuator half of an OCP vector, for the axes that have no lag state `u`.
+ActuatorState expand_actuator(const std::vector<double> & rows, const std::vector<double> & u)
+{
+  ActuatorState actuator;
+  for (std::size_t row = 0; row < kPlannedDof; ++row) {
+    // No lag state means the pole is at infinity, so the lagged command is the
+    // command. Overwritten below for the axes that do carry one.
+    actuator.command_lag[row] = u.empty() ? 0.0 : u[row];
+    actuator.force[row] = rows[kReducedActuatedForce + row];
+  }
+  for (std::size_t slot = 0; slot < kOcpCommandLagDof; ++slot) {
+    actuator.command_lag[kCommandLagAxes[slot]] = rows[kReducedCommandLag + slot];
+  }
+  return actuator;
 }
 
 crane_model::State expand(const std::vector<double> & rows, double q_tool)
@@ -382,6 +505,13 @@ struct Ocp::Impl
     crane_model::Payload payload{};
   bool payload_changed{false};
 
+    /// Kept for one thing only: seeding C3's force state, which needs `h_eff`.
+  std::optional<crane_model::Model> model;
+
+    /// The OCP-only actuator state at `x_0`, carried from the last solve.
+  ActuatorState actuator{};
+  bool actuator_seeded{false};
+
   std::array<CylinderForceLimit, crane_model::kActuatedDof> cylinder_force_max{};
   double flow_max{};
   std::vector<double> constraint_scale{};
@@ -516,6 +646,7 @@ Result<std::unique_ptr<Ocp>> Ocp::create(
   auto impl = std::make_unique<Impl>();
   impl->settings = settings;
   impl->payload = payload;
+  impl->model.emplace(std::move(model).value());
   impl->backend = pzs100_backend();
   impl->cylinder_force_max = force_limits.value();
   impl->flow_max =
@@ -665,12 +796,12 @@ Result<crane_model::State> Ocp::dynamics(
     return Result<crane_model::State>::failure(
       failure(ErrorCode::NonFiniteInput, "the state and the input must both be finite"));
   }
-  const std::vector<double> state = reduce(x);
+  const std::vector<double> state = reduce(x, impl_->actuator);
   const std::vector<double> input = reduce_input(u);
   const ParameterVector parameter = parameter_vector(x, impl_->payload);
   std::vector<double> rows(static_cast<std::size_t>(kNx), 0.0);
-  if (!crane_ocp::evaluate(
-      impl_->backend.ode, {state.data(), input.data(), parameter.data()}, rows.data()))
+  if (!explicit_ode(
+      impl_->backend, state.data(), input.data(), parameter.data(), rows.data()))
   {
     return Result<crane_model::State>::failure(
       failure(
@@ -710,7 +841,7 @@ Result<crane_model::Vector6> Ocp::output_block(
     return Result<crane_model::Vector6>::failure(
       failure(ErrorCode::NonFiniteInput, "the state and the input must both be finite"));
   }
-  const std::vector<double> state = reduce(x);
+  const std::vector<double> state = reduce(x, impl_->actuator);
   const std::vector<double> input = reduce_input(u);
   const ParameterVector parameter = parameter_vector(x, impl_->payload);
   std::vector<double> rows(kOutputDof, 0.0);
@@ -736,7 +867,7 @@ Result<std::vector<double>> Ocp::nonlinear_constraint(
     return Result<std::vector<double>>::failure(
       failure(ErrorCode::NonFiniteInput, "the state and the input must both be finite"));
   }
-  const std::vector<double> state = reduce(x);
+  const std::vector<double> state = reduce(x, impl_->actuator);
   const std::vector<double> input = reduce_input(u);
   const ParameterVector parameter = parameter_vector(x, impl_->payload);
   std::vector<double> rows(static_cast<std::size_t>(kNh), 0.0);
@@ -780,7 +911,7 @@ double Ocp::pump_flow_max() const noexcept
 Result<std::vector<double>> Ocp::stage_residual(
   const crane_model::State & x, const crane_model::Input & u) const
 {
-  const std::vector<double> state = reduce(x);
+  const std::vector<double> state = reduce(x, impl_->actuator);
   const std::vector<double> input = reduce_input(u);
   const ParameterVector parameter = parameter_vector(x, impl_->payload);
   const double time = 0.0;
@@ -798,7 +929,7 @@ Result<std::vector<double>> Ocp::stage_residual(
 
 Result<std::vector<double>> Ocp::terminal_residual(const crane_model::State & x) const
 {
-  const std::vector<double> state = reduce(x);
+  const std::vector<double> state = reduce(x, impl_->actuator);
   const ParameterVector parameter = parameter_vector(x, impl_->payload);
   const double time = 0.0;
   std::vector<double> rows(static_cast<std::size_t>(kNyTerminal), 0.0);
@@ -915,6 +1046,16 @@ InitialGuess shifted(const OcpSolution & previous)
     guess.inputs[stage] = previous.inputs[stage + 1U];
   }
   guess.inputs.back() = previous.inputs.back();
+
+  // The OCP-only rows shift with the states they belong to; leaving them out
+  // would hand the next solve a warm start that is cold on the actuator alone.
+  if (previous.actuator.size() == nodes) {
+    guess.actuator.resize(nodes);
+    for (std::size_t stage = 0; stage + 1U < nodes; ++stage) {
+      guess.actuator[stage] = previous.actuator[stage + 1U];
+    }
+    guess.actuator.back() = previous.actuator.back();
+  }
   return guess;
 }
 
@@ -945,7 +1086,21 @@ Result<OcpSolution> Ocp::solve(
 
   const double q_tool = pinned_tool(x0);
   ParameterVector parameter = parameter_vector(x0, impl_->payload);
-  const std::vector<double> reduced_x0 = reduce(x0);
+
+  // C3's two actuator states are **not measured**, and this is the one decision
+  // about them: they are seeded from the model on the first solve and on a
+  // payload change, and carried forward from the previous solution's stage 1
+  // after that. Carrying forward is what makes them a state rather than a
+  // quantity re-derived every cycle -- the force state is real and persists --
+  // and re-seeding on a payload change is because `h_eff` moves discontinuously
+  // at a grasp, which is the same reason the warm start is dropped there.
+  if (!impl_->actuator_seeded || impl_->payload_changed) {
+    if (impl_->model.has_value()) {
+      impl_->actuator = seed_actuator(*impl_->model, x0, impl_->payload, impl_->actuator);
+    }
+    impl_->actuator_seeded = true;
+  }
+  const std::vector<double> reduced_x0 = reduce(x0, impl_->actuator);
 
   for (int stage = 0; stage <= intervals; ++stage) {
     const OcpStage & node = stages[static_cast<std::size_t>(stage)];
@@ -981,6 +1136,15 @@ Result<OcpSolution> Ocp::solve(
         impl_->upper_state[kReducedPassivePosition + row] = node.q_eq[row] + limits.q_u_max[row];
         impl_->lower_state[kReducedPassiveVelocity + row] = -limits.dq_u_max[row];
         impl_->upper_state[kReducedPassiveVelocity + row] = limits.dq_u_max[row];
+      }
+      // `u_f` is a filtered `u`, so it gets `u`'s own box. The force states are
+      // not boxed at all and stop the array one block short of `x` -- acados
+      // reads `nbx` entries off these pointers, which is why one buffer serves
+      // both the pinned stage 0 and the boxed stages after it.
+      for (std::size_t slot = 0; slot < kOcpCommandLagDof; ++slot) {
+        const std::size_t axis = kCommandLagAxes[slot];
+        impl_->lower_state[kReducedCommandLag + slot] = -limits.u_max[axis];
+        impl_->upper_state[kReducedCommandLag + slot] = limits.u_max[axis];
       }
     }
     impl_->acados->set_constraint(stage, "lbx", impl_->lower_state.data());
@@ -1020,7 +1184,10 @@ Result<OcpSolution> Ocp::solve(
   std::vector<double> rest(static_cast<std::size_t>(kNu), 0.0);
   for (int stage = 0; stage <= intervals; ++stage) {
     const OcpStage & node = stages[static_cast<std::size_t>(stage)];
-    impl_->guess = reduce(initial_state[static_cast<std::size_t>(stage)]);
+    const ActuatorState & guessed =
+      guess.actuator.size() == nodes ? guess.actuator[static_cast<std::size_t>(stage)]
+      : impl_->actuator;
+    impl_->guess = reduce(initial_state[static_cast<std::size_t>(stage)], guessed);
     if (stage < intervals) {
       const std::vector<double> applied =
         reduce_input(initial_input[static_cast<std::size_t>(stage)]);
@@ -1044,6 +1211,11 @@ Result<OcpSolution> Ocp::solve(
         impl_->guess[kReducedPassiveVelocity + row] = std::clamp(
           impl_->guess[kReducedPassiveVelocity + row], -limits.dq_u_max[row],
           limits.dq_u_max[row]);
+      }
+      for (std::size_t slot = 0; slot < kOcpCommandLagDof; ++slot) {
+        const std::size_t axis = kCommandLagAxes[slot];
+        impl_->guess[kReducedCommandLag + slot] = std::clamp(
+          impl_->guess[kReducedCommandLag + slot], -limits.u_max[axis], limits.u_max[axis]);
       }
     }
     impl_->acados->set_iterate(stage, "x", impl_->guess.data());
@@ -1073,16 +1245,23 @@ Result<OcpSolution> Ocp::solve(
   solution.budget_exceeded = solution.solve_time_s > impl_->settings.solve_budget_s;
 
   solution.states.resize(static_cast<std::size_t>(intervals) + 1U);
-  std::vector<double> row(static_cast<std::size_t>(kNx), 0.0);
-  for (int stage = 0; stage <= intervals; ++stage) {
-    impl_->acados->get_iterate(stage, "x", row.data());
-    solution.states[static_cast<std::size_t>(stage)] = expand(row, q_tool);
-  }
+  solution.actuator.resize(static_cast<std::size_t>(intervals) + 1U);
   solution.inputs.resize(static_cast<std::size_t>(intervals));
+  std::vector<double> row(static_cast<std::size_t>(kNx), 0.0);
   std::vector<double> input(static_cast<std::size_t>(kNu), 0.0);
   for (int stage = 0; stage < intervals; ++stage) {
     impl_->acados->get_iterate(stage, "u", input.data());
     solution.inputs[static_cast<std::size_t>(stage)] = expand_input(input);
+  }
+  for (int stage = 0; stage <= intervals; ++stage) {
+    impl_->acados->get_iterate(stage, "x", row.data());
+    solution.states[static_cast<std::size_t>(stage)] = expand(row, q_tool);
+    // The terminal node has no input, so the axes without a lag state take the
+    // last one applied; nothing reads that entry there.
+    const std::size_t applied =
+      static_cast<std::size_t>(stage < intervals ? stage : intervals - 1);
+    impl_->acados->get_iterate(static_cast<int>(applied), "u", input.data());
+    solution.actuator[static_cast<std::size_t>(stage)] = expand_actuator(row, input);
   }
   solution.u0 = solution.inputs.front();
 
@@ -1164,6 +1343,20 @@ Result<OcpSolution> Ocp::solve(
     solution.outcome = SolveOutcome::BudgetExceeded;
   } else {
     solution.outcome = SolveOutcome::Converged;
+  }
+
+  // Carry the actuator state one interval forward, which is where the next cycle
+  // starts. A failed solve leaves the previous estimate in place rather than
+  // adopting a horizon nobody accepted.
+  if (solution.outcome != SolveOutcome::Failed && solution.actuator.size() > 1U) {
+    const ActuatorState & next = solution.actuator[1];
+    const auto usable = [](const std::array<double, kPlannedDof> & values) {
+        return std::all_of(
+          values.begin(), values.end(), [](double value) {return std::isfinite(value);});
+      };
+    if (usable(next.command_lag) && usable(next.force)) {
+      impl_->actuator = next;
+    }
   }
 
   return Result<OcpSolution>::success(std::move(solution));

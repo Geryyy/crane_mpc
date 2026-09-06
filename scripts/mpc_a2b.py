@@ -165,9 +165,13 @@ def positive(value: float, name: str, allow_zero: bool = False) -> None:
 
 def load_settings(arguments: argparse.Namespace) -> tuple[dict, dict]:
     """Load deployment YAML and apply command-line tuning overrides."""
-    parameters = export_ocp.read_parameters(PACKAGE / "config" / "crane_mpc.yaml")
-    hydraulics = export_ocp.read_parameters(
-        PACKAGE / "config" / "hydraulic_limits.yaml"
+    # Same two reads `export_ocp.generate` makes, through the same helper, so the
+    # harness cannot drift from the exporter about what a deployment is.
+    parameters = export_ocp.ox.read_ros_parameters(
+        PACKAGE / "config" / "crane_mpc.yaml", "crane_mpc"
+    )
+    hydraulics = export_ocp.ox.read_ros_parameters(
+        PACKAGE / "config" / "hydraulic_limits.yaml", "crane_mpc"
     )["hydraulics"]
     # Deep-copy through YAML because the source mapping is nested and is also
     # used to form the cache signature below.
@@ -257,6 +261,10 @@ def solver_signature(parameters: dict, hydraulics: dict, description: Path) -> s
     digest.update(json.dumps(hydraulics, sort_keys=True, default=str).encode())
     digest.update(description.read_bytes())
     digest.update((PACKAGE / "scripts" / "export_ocp.py").read_bytes())
+    # C3 is folded in as constants, so the model and the fit are generated code
+    # here exactly as the exporter is.
+    digest.update(Path(cs.__file__).read_bytes())
+    digest.update(Path(cs.default_actuator_path()).read_bytes())
     return digest.hexdigest()[:16]
 
 
@@ -286,7 +294,9 @@ def create_solver(
             verbose=arguments.verbose_build,
         )
         # The symbolic model is still needed for plant integration and plots.
-        model = cs.CraneSymbolicModel(description.read_text(), export_ocp.TOOL)
+        model = cs.CraneSymbolicModel(
+            description.read_text(), export_ocp.TOOL, actuator=cs.load_actuator_fit()
+        )
         scale = export_ocp.constraint_scale(model, hydraulics)
         return solver, model, scale
 
@@ -359,12 +369,24 @@ def reference_at(
 
 def make_numeric_functions(
     model: object,
-) -> tuple[ca.Function, ca.Function, ca.Function]:
-    """Create numeric dynamics, equilibrium, and output-map functions."""
+) -> tuple[ca.Function, ca.Function, ca.Function, ca.Function]:
+    """Create numeric dynamics, equilibrium, output-map and static-force functions."""
     dynamics = ca.Function("a2b_dynamics", [model.x, model.u, model.p], [model.xdot])
     bias_u = ca.Function("a2b_passive_bias", [model.x, model.p], [model.bias_u])
     outputs = ca.Function("a2b_outputs", [model.x, model.u, model.p], [model.z])
-    return dynamics, bias_u, outputs
+    static = ca.Function(
+        "a2b_static_force", [model.x, model.p], [model.actuated_force_static]
+    )
+    return dynamics, bias_u, outputs, static
+
+
+#: ERK4 substeps per control sample in the plant. C3 is stiff at `T_s`: the
+#: fastest eigenvalue of the linearised plant is `|lambda| T_s = 8.5` at an
+#: ordinary pose -- the telescope's `k = 3.5e6 N/m` against its effective mass --
+#: and ERK4 is stable only to about 2.8, so a single explicit step diverges in
+#: three samples and hands the solver a NaN guess. The solver itself is IRK and
+#: does not need this; the plant here is explicit and does.
+PLANT_SUBSTEPS = 10
 
 
 def rk4_step(
@@ -374,26 +396,19 @@ def rk4_step(
     parameter: np.ndarray,
     dt: float,
 ) -> np.ndarray:
-    """Integrate one model-matched plant sample with ERK4."""
+    """Integrate one model-matched plant sample with substepped ERK4."""
 
     def evaluate(value: np.ndarray) -> np.ndarray:
         return np.asarray(dynamics(value, control, parameter)).reshape(-1)
 
-    k1 = evaluate(state)
-    k2 = evaluate(state + 0.5 * dt * k1)
-    k3 = evaluate(state + 0.5 * dt * k2)
-    k4 = evaluate(state + dt * k3)
-    return state + (dt / 6.0) * (k1 + 2.0 * k2 + 2.0 * k3 + k4)
-
-
-def integrate_acceleration(
-    control: np.ndarray, dt: float, initial_velocity: np.ndarray
-) -> np.ndarray:
-    """Integrate the applied acceleration command into a velocity trajectory."""
-    velocity = np.zeros((control.shape[0] + 1, control.shape[1]))
-    velocity[0] = initial_velocity
-    velocity[1:] = initial_velocity + dt * np.cumsum(control, axis=0)
-    return velocity
+    step = dt / PLANT_SUBSTEPS
+    for _ in range(PLANT_SUBSTEPS):
+        k1 = evaluate(state)
+        k2 = evaluate(state + 0.5 * step * k1)
+        k3 = evaluate(state + 0.5 * step * k2)
+        k4 = evaluate(state + step * k3)
+        state = state + (step / 6.0) * (k1 + 2.0 * k2 + 2.0 * k3 + k4)
+    return state
 
 
 def equilibrium_table(
@@ -531,12 +546,18 @@ def state_bounds(
 ) -> tuple[np.ndarray, np.ndarray]:
     """Build one stage's state box around its passive equilibrium."""
     limits = parameters["limits"]
+    u_max = np.asarray(limits["u_max"][: cs.K_PLANNED_DOF], dtype=float)
+    # The boxed rows are the rigid state and the lagged command; the force states
+    # are bounded by constraint 6 and carry no box (`export_ocp.py`). `u_f` is a
+    # filtered `u`, so it gets `u`'s own box.
+    lag = u_max[list(cs.K_LAG_AXES)]
     lower = np.concatenate(
         [
             np.asarray(limits["q_a_lower"][: cs.K_PLANNED_DOF], dtype=float),
             equilibrium - np.asarray(limits["q_u_max"], dtype=float),
             -np.asarray(limits["dq_a_max"][: cs.K_PLANNED_DOF], dtype=float),
             -np.asarray(limits["dq_u_max"], dtype=float),
+            -lag,
         ]
     )
     upper = np.concatenate(
@@ -545,6 +566,7 @@ def state_bounds(
             equilibrium + np.asarray(limits["q_u_max"], dtype=float),
             np.asarray(limits["dq_a_max"][: cs.K_PLANNED_DOF], dtype=float),
             np.asarray(limits["dq_u_max"], dtype=float),
+            lag,
         ]
     )
     return lower, upper
@@ -599,7 +621,7 @@ def simulate(
     intervals = export_ocp.shooting_intervals(parameters)
     steps = int(math.ceil((arguments.move_duration + arguments.settle_duration) / dt))
     parameter = parameter_vector(arguments)
-    dynamics, bias_u, outputs = make_numeric_functions(model)
+    dynamics, bias_u, outputs, static_force = make_numeric_functions(model)
     q_ref_all, dq_ref_all, q_eq_all = equilibrium_table(
         bias_u, parameter, a, b, arguments.move_duration, dt, steps + intervals + 1
     )
@@ -612,6 +634,12 @@ def simulate(
     state[cs.X_PASSIVE_POSITION : cs.X_PASSIVE_POSITION + cs.K_PASSIVE_DOF] = q_eq_all[
         0
     ]
+    # C3 block 3 starts where the machine starts: holding its own weight. There
+    # is no force measurement in the stack, so h_eff at the initial pose is the
+    # seed, and zero would start the run with the hydraulics switched off.
+    state[cs.X_ACTUATED_FORCE : cs.X_ACTUATED_FORCE + cs.K_PLANNED_DOF] = np.asarray(
+        static_force(state, parameter)
+    ).reshape(-1)
 
     states = np.zeros((steps + 1, cs.NX))
     controls = np.zeros((steps, cs.NU))
@@ -664,7 +692,10 @@ def simulate(
                 value = state.copy()
             else:
                 lower, upper = state_bounds(parameters, q_eq_all[step + stage])
-                value = np.clip(value, lower, upper)
+                # Only the boxed prefix has bounds; the force states are held by
+                # constraint 6 and are left as the rollout produced them.
+                boxed = lower.size
+                value[:boxed] = np.clip(value[:boxed], lower, upper)
             solver.set(stage, "x", value)
             if stage < intervals:
                 solver.set(stage, "u", np.clip(guess_u[stage], -u_max, u_max))
@@ -719,10 +750,13 @@ def simulate(
                 f"solve={1e3 * solve_time:7.2f} ms  |q-qref|={error:.4f}"
             )
 
-    desired_velocity = integrate_acceleration(
-        controls,
-        dt,
-        states[0, cs.X_PLANNED_VELOCITY : cs.X_PLANNED_VELOCITY + cs.K_PLANNED_DOF],
+    # `u` is a joint velocity at Psi's input under C3, not an acceleration, so
+    # the desired velocity is the command and nothing is integrated to get it.
+    desired_velocity = np.vstack(
+        [
+            states[0, cs.X_PLANNED_VELOCITY : cs.X_PLANNED_VELOCITY + cs.K_PLANNED_DOF],
+            controls,
+        ]
     )
     flow_limit = float(hydraulics["pump_flow_planning_factor"]) * float(
         hydraulics["pump_flow_max"]

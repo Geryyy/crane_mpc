@@ -24,9 +24,51 @@ inline constexpr std::size_t kToolRow = crane_model::kActuatedDof - 1U;
 
 inline constexpr std::size_t kPlannedDof = crane_model::kActuatedDof - 1U;
 
-inline constexpr std::size_t kOcpStateDof = 2U * kPlannedDof + 2U * crane_model::kPassiveDof;
+/// The rigid-body half of the OCP state: what it was before C3.
+inline constexpr std::size_t kOcpRigidStateDof =
+  2U * kPlannedDof + 2U * crane_model::kPassiveDof;
+
+/// How many axes carry C3's PT1 command-lag state.
+/**
+ * The arm's fitted `tau_v` is zero, which is a pole at infinity, so it has no
+ * lag state and its `u_f` is `u`. The generated header carries the axis list and
+ * `ocp_solver.cpp` asserts this number against it, so a refit that gives the arm
+ * a lag fails to compile rather than shifting every offset silently.
+ */
+inline constexpr std::size_t kOcpCommandLagDof = 4U;
+
+/// The boxed rows of the OCP state: the rigid state and the lagged command.
+/**
+ * The force states are deliberately not boxed. Constraint 6 is
+ * `|tau_a,i| <= J_c,ii(q) F_i^max` and `J_c,ii` is not a constant, so no constant
+ * box is that constraint; the nonlinear row is what bounds the force state.
+ */
+inline constexpr std::size_t kOcpBoxedStateDof = kOcpRigidStateDof + kOcpCommandLagDof;
+
+inline constexpr std::size_t kOcpStateDof = kOcpBoxedStateDof + kPlannedDof;
 
 inline constexpr std::size_t kOcpInputDof = kPlannedDof;
+
+/// C3's two actuator states, which the canonical `crane_model::State` has no slot for.
+/**
+ * `wiki/hydraulic_actuator_model.md` §1 blocks 2 and 3. These are **OCP-only**:
+ * `crane_model::State` is the model API contract's fixed sixteen and is read by
+ * the planner and the collision model, so it is not widened for them. They are
+ * therefore the third category `reduce` and `expand` marshal -- alongside the
+ * planned and the passive rows -- rather than a part of either.
+ *
+ * `command_lag` is kept one entry per planned axis for symmetry with everything
+ * else here; only the entries `kCommandLagAxes` names reach the solver, and the
+ * arm's is ignored because its `u_f` is `u`.
+ */
+struct ActuatorState
+{
+  /// `u_f`, the lagged velocity command, rad/s (m/s on the telescope).
+  std::array<double, kPlannedDof> command_lag{};
+
+  /// `tau_a`, the force state, N m (N on the telescope).
+  std::array<double, kPlannedDof> force{};
+};
 
 inline constexpr double kSlackNoticeable = 1.0e-6;
 
@@ -53,7 +95,11 @@ struct BoxLimits
     {0.802, 0.326, 0.344, 0.630, 2.122, 0.5}};
   std::array<double, crane_model::kPassiveDof> q_u_max{{0.2, 0.2}};
   std::array<double, crane_model::kPassiveDof> dq_u_max{{1.0, 0.5}};
-  std::array<double, crane_model::kActuatedDof> u_max{{0.5, 0.7, 0.5, 1.0, 6.0, 2.0}};
+  /// `u` is a **joint velocity** in rad/s at Psi's input under C3, not an
+  /// acceleration, so this box is dimensionally a velocity. Seeded from
+  /// `dq_a_max`; issue 117 is the retune.
+  std::array<double, crane_model::kActuatedDof> u_max{
+    {0.802, 0.326, 0.344, 0.630, 2.122, 0.5}};
 };
 
 /// `F_i^max` per direction, and it is the model's answer rather than this one.
@@ -115,6 +161,10 @@ struct InitialGuess
   std::vector<crane_model::State> states;
   std::vector<crane_model::Input> inputs;
 
+  /// The OCP-only actuator rows per node. Empty means "seed them"; a warm start
+  /// that carries them is what keeps the force state out of the guess's blind spot.
+  std::vector<ActuatorState> actuator;
+
     [[nodiscard]] bool warm() const noexcept
   {
     return !states.empty() && states.size() == inputs.size() + 1U;
@@ -175,6 +225,9 @@ struct SolveTiming
 struct OcpSolution
 {
     std::vector<crane_model::State> states;
+
+    /// The OCP-only actuator rows per node, in step with `states`.
+  std::vector<ActuatorState> actuator;
 
     crane_model::Input u0{crane_model::Input::Zero()};
 

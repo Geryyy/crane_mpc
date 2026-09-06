@@ -36,13 +36,13 @@
 #include "acados_c/ocp_nlp_interface.h"
 #include "acados_c/external_function_interface.h"
 
-#define CRANE_MPC_PZS100_NX     14
+#define CRANE_MPC_PZS100_NX     23
 #define CRANE_MPC_PZS100_NZ     0
 #define CRANE_MPC_PZS100_NU     5
 #define CRANE_MPC_PZS100_NP     11
 #define CRANE_MPC_PZS100_NP_GLOBAL     0
-#define CRANE_MPC_PZS100_NBX    14
-#define CRANE_MPC_PZS100_NBX0   14
+#define CRANE_MPC_PZS100_NBX    18
+#define CRANE_MPC_PZS100_NBX0   23
 #define CRANE_MPC_PZS100_NBU    5
 #define CRANE_MPC_PZS100_NSBX   4
 #define CRANE_MPC_PZS100_NSBU   0
@@ -59,7 +59,7 @@
 #define CRANE_MPC_PZS100_NS0    6
 #define CRANE_MPC_PZS100_NSN    4
 #define CRANE_MPC_PZS100_NG     0
-#define CRANE_MPC_PZS100_NBXN   14
+#define CRANE_MPC_PZS100_NBXN   18
 #define CRANE_MPC_PZS100_NGN    0
 #define CRANE_MPC_PZS100_NY0    24
 #define CRANE_MPC_PZS100_NY     24
@@ -98,9 +98,9 @@ typedef struct crane_mpc_pzs100_solver_capsule
 
     // dynamics
 
-    external_function_external_param_casadi *expl_vde_forw;
-    external_function_external_param_casadi *expl_ode_fun;
-    external_function_external_param_casadi *expl_vde_adj;
+    external_function_external_param_casadi *impl_dae_fun;
+    external_function_external_param_casadi *impl_dae_fun_jac_x_xdot_z;
+    external_function_external_param_casadi *impl_dae_jac_x_xdot_u_z;
 
 
 

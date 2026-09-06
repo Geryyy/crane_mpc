@@ -32,6 +32,36 @@
 // with the axes of K8, which is the URDF `<inertial>` convention.
 #define CRANE_MPC_OCP_PARAMETER_INERTIA_ENTRIES {{0, 0}, {0, 1}, {0, 2}, {1, 1}, {1, 2}, {2, 2}}
 
+// The blocks of `x`. C3 (`wiki/hydraulic_actuator_model.md` §1) adds two
+// actuator blocks after the rigid-body state: the PT1 lagged command on
+// the axes whose fitted `tau_v` is positive -- the arm's is zero, which is
+// a pole at infinity, so it has no lag state and its `u_f` is `u` -- and
+// then the force state on every planned axis. Neither has a counterpart in
+// `crane_model::State`, so both are OCP-only rows.
+#define CRANE_MPC_OCP_STATE_PLANNED_POSITION 0
+#define CRANE_MPC_OCP_STATE_PASSIVE_POSITION 5
+#define CRANE_MPC_OCP_STATE_PLANNED_VELOCITY 7
+#define CRANE_MPC_OCP_STATE_PASSIVE_VELOCITY 12
+#define CRANE_MPC_OCP_STATE_COMMAND_LAG 14
+#define CRANE_MPC_OCP_STATE_COMMAND_LAG_DOF 4
+#define CRANE_MPC_OCP_STATE_COMMAND_LAG_AXES {0, 1, 3, 4}
+#define CRANE_MPC_OCP_STATE_ACTUATED_FORCE 18
+
+// The boxed rows of `x`: the rigid-body state and the lagged command, a
+// contiguous prefix. The force states are left out on purpose -- see
+// `export_ocp.py`; constraint 6 is the nonlinear row and not a box.
+#define CRANE_MPC_OCP_BOXED_STATE_DOF 18
+
+// C3's fitted numbers as they were folded into the dynamics, per planned
+// axis, from `crane_model/config/c3_full_model.json`. Here so the C++ and
+// the node can *say* which fit is in the artifact rather than assume one.
+// The dead time is C3 block 1 and is **not** in the model: it belongs to
+// the node's predictor, and a second copy inside the horizon double-counts
+// it (`docs/features/mpc-full-authority/brief.md` §2.2).
+#define CRANE_MPC_OCP_ACTUATOR_STIFFNESS {319074.22754530463, 1834000.0, 578000.0, 3500000.0, 7296.0}
+#define CRANE_MPC_OCP_ACTUATOR_COMMAND_LAG_S {0.1, 0.025, 0.0, 0.075, 0.125}
+#define CRANE_MPC_OCP_ACTUATOR_DEAD_TIME_S 0.06
+
 // The blocks of the stage residual `y = [q_a, dq_a, q_u, dq_u, tau_a, u]`.
 // The order is §2's -- tracking, sway, effort, smoothness -- and not the
 // state's, and everything that has to agree with `W` reads it from here.
