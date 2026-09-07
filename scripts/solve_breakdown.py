@@ -11,6 +11,20 @@ which part that is, by reading the timing breakdown it already keeps beside
 It reuses `mpc_a2b.py`'s own solver construction, so the problem being timed is the
 deployed one. It does not simulate: it re-solves from one pinned state, which is
 what isolates per-solve cost from trajectory-dependent behaviour.
+
+**INCOMPLETE, and the missing piece is named so nobody rediscovers it.** Pinning
+`x_0` is not enough to pose a solvable problem: the per-stage `yref` and the box
+bounds are left at their defaults, so the tracking cost asks a mid-move machine to
+be at the origin and the sway box is centred on zero rather than on `q_eq`. HPIPM
+gets a long way in and then answers status 3 at QP iteration 38. Two seeding traps
+are already fixed here and are worth keeping whatever comes next: a synthesised
+zero state is outside the sway box, and a zero force state starts the problem with
+the hydraulics switched off.
+
+Finishing this means either copying `mpc_a2b.simulate`'s per-stage setup, which is
+most of that function, or -- better -- adding `time_lin`, `time_sim`, `time_qp` and
+`time_qp_xcond` as columns to the harness CSV and reading them off a real run.
+The second is a few lines and gives the breakdown on a feasible problem. Do that.
 """
 
 from __future__ import annotations
@@ -20,6 +34,7 @@ import statistics
 import sys
 from pathlib import Path
 
+import casadi as ca
 import numpy as np
 
 PACKAGE = Path(__file__).resolve().parent.parent
@@ -49,8 +64,17 @@ def harness_defaults() -> argparse.Namespace:
         sys.argv = saved
 
 
-def seed_state(path: Path) -> np.ndarray:
-    """Lift one mid-run state out of a harness CSV, in the OCP's own layout."""
+def seed_state(path: Path, model, payload: np.ndarray) -> np.ndarray:
+    """
+    Build a pinned state from a harness CSV, in the OCP's own layout.
+
+    The CSV predates C3 and carries only the rigid rows, so the actuator rows are
+    filled the way the harness fills them: the lagged command at the measured
+    velocity, which is the PT1's steady state, and the force state at `h_eff`, the
+    force that holds the machine still here. **Zero is not a neutral seed** -- it
+    starts the problem with the hydraulics switched off, and HPIPM refuses it with
+    status 3 rather than solving something meaningless.
+    """
     import csv
 
     rows = list(csv.DictReader(path.open()))
@@ -64,6 +88,14 @@ def seed_state(path: Path) -> np.ndarray:
     for index, name in enumerate(passive):
         state[cs.X_PASSIVE_POSITION + index] = float(row[f"q_{name}"])
         state[cs.X_PASSIVE_VELOCITY + index] = float(row[f"dq_{name}"])
+    for slot, axis in enumerate(cs.K_LAG_AXES):
+        state[cs.X_COMMAND_LAG + slot] = state[cs.X_PLANNED_VELOCITY + axis]
+    static = ca.Function(
+        "breakdown_static", [model.x, model.p], [model.actuated_force_static]
+    )
+    state[cs.X_ACTUATED_FORCE : cs.X_ACTUATED_FORCE + cs.K_PLANNED_DOF] = np.asarray(
+        static(state, payload)
+    ).reshape(-1)
     return state
 
 
@@ -99,16 +131,14 @@ def main() -> int:
             namespace.dt = cli.dt
 
         parameters, hydraulics = mpc_a2b.load_settings(namespace)
-        solver, _model, _scale = mpc_a2b.create_solver(
-            namespace, parameters, hydraulics
-        )
+        solver, model, _scale = mpc_a2b.create_solver(namespace, parameters, hydraulics)
 
         # One pinned state, the same every repeat, taken from a real run rather than
         # synthesised: a zero state is outside the sway box and HPIPM refuses it with
         # status 3, which measures nothing.
         intervals = export_ocp.shooting_intervals(parameters)
-        state = seed_state(cli.seed)
         payload = mpc_a2b.parameter_vector(namespace)
+        state = seed_state(cli.seed, model, payload)
         for stage in range(intervals + 1):
             solver.set(stage, "p", payload)
         solver.set(0, "lbx", state)
