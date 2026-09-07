@@ -15,6 +15,7 @@ import csv
 import hashlib
 import json
 import math
+import os
 import shutil
 import sys
 import warnings
@@ -42,6 +43,16 @@ import export_ocp  # noqa: E402
 cs = export_ocp.cs
 
 AXIS_NAMES = ("slew", "boom", "arm", "telescope", "rotator")
+# acados' own split of `time_tot`, plus the QP iteration count, per cycle. Issue
+# 129: `time_tot` alone cannot say which part of a cycle is expensive, and
+# `time_lin` versus `time_qp` is what decides whether the model or the QP is the
+# thing to attack. Seconds, except `qp_iter`.
+#
+# `time_sim` is the one that is not per-cycle: acados accumulates it over the
+# life of the solver, so it is differenced below and the column carries the
+# increment like the others. It is the integrator's share of `time_lin`.
+TIMING_FIELDS = ("time_lin", "time_sim", "time_qp", "time_qp_xcond", "qp_iter")
+CUMULATIVE_FIELDS = ("time_sim",)
 PASSIVE_NAMES = ("sway 1", "sway 2")
 DEFAULT_A = np.array([0.0, 0.30, 0.80, 0.60, 0.0])
 DEFAULT_B = np.array([0.60, 0.60, 1.20, 1.00, 0.50])
@@ -67,6 +78,8 @@ class RunData:
     solve_time: np.ndarray
     status: np.ndarray
     fallback: np.ndarray
+    #: One array per `TIMING_FIELDS` key, same length as `solve_time`.
+    timing: dict[str, np.ndarray]
 
 
 def parse_arguments() -> argparse.Namespace:
@@ -143,6 +156,12 @@ def parse_arguments() -> argparse.Namespace:
         default=None,
         help="absolute regularisation; defaults to deployment YAML",
     )
+    parser.add_argument(
+        "--qp-cond-n",
+        type=int,
+        default=None,
+        help="HPIPM partial-condensing block count; defaults to acados' own default",
+    )
 
     parser.add_argument(
         "--enforce-budget",
@@ -197,6 +216,8 @@ def load_settings(arguments: argparse.Namespace) -> tuple[dict, dict]:
         parameters["weights"]["terminal_scale"] = arguments.terminal_scale
     if arguments.levenberg_marquardt is not None:
         parameters["levenberg_marquardt"] = arguments.levenberg_marquardt
+    if arguments.qp_cond_n is not None:
+        parameters["qp_solver_cond_N"] = arguments.qp_cond_n
 
     scales = {
         "q_a": arguments.q_scale,
@@ -277,6 +298,7 @@ def solver_signature(parameters: dict, hydraulics: dict, description: Path) -> s
         "Ts": parameters["Ts"],
         "horizon_length": parameters["horizon_length"],
         "levenberg_marquardt": parameters["levenberg_marquardt"],
+        "qp_solver_cond_N": parameters.get("qp_solver_cond_N"),
     }
     digest.update(json.dumps(generated_settings, sort_keys=True, default=str).encode())
     digest.update(json.dumps(hydraulics, sort_keys=True, default=str).encode())
@@ -326,6 +348,11 @@ def create_solver(
     ocp, scale, model = export_ocp.build_ocp(
         description.read_text(), parameters, hydraulics
     )
+    # Issue 129's sweep, kept reproducible without giving a deployment a knob it
+    # must never turn: acados' default block count is `N` and is the fastest one
+    # measured. `None` leaves the exporter's choice alone.
+    if parameters.get("qp_solver_cond_N") is not None:
+        ocp.solver_options.qp_solver_cond_N = int(parameters["qp_solver_cond_N"])
     ocp.code_export_directory = str(cache / "code")
     # The devcontainer keeps the acados source (and t_renderer) under /opt but
     # installs the headers and libraries under /usr/local.  acados_template
@@ -365,6 +392,16 @@ def create_solver(
         verbose=arguments.verbose_build,
     )
     return solver, model, scale
+
+
+def solver_stat(solver: AcadosOcpSolver, field: str) -> float:
+    """
+    One acados statistic per solve, as a scalar.
+
+    `qp_iter` comes back per SQP iteration, which under RTI is one entry; summing
+    keeps the column meaningful if that ever stops being true.
+    """
+    return float(np.sum(np.asarray(solver.get_stats(field), dtype=float)))
 
 
 def minimum_jerk(time: float, duration: float) -> tuple[float, float, float]:
@@ -777,6 +814,8 @@ def simulate(
     controls = np.zeros((steps, cs.NU_PROGRESS))
     hydraulics_used = np.zeros((steps, cs.NU + 1))
     solve_times = np.zeros(steps)
+    timings = {field: np.full(steps, math.nan) for field in TIMING_FIELDS}
+    cumulative = {field: 0.0 for field in CUMULATIVE_FIELDS}
     statuses = np.zeros(steps, dtype=int)
     fallback = np.zeros(steps, dtype=bool)
     q_ref_log = np.zeros((steps + 1, cs.K_PLANNED_DOF))
@@ -878,6 +917,11 @@ def simulate(
         solve_time = float(solver.get_stats("time_tot"))
         statuses[step] = status
         solve_times[step] = solve_time
+        for field in TIMING_FIELDS:
+            value = solver_stat(solver, field)
+            if field in CUMULATIVE_FIELDS:
+                value, cumulative[field] = value - cumulative[field], value
+            timings[field][step] = value
         candidate_x = [
             np.asarray(solver.get(stage, "x")).copy() for stage in range(intervals + 1)
         ]
@@ -973,6 +1017,7 @@ def simulate(
         solve_time=solve_times,
         status=statuses,
         fallback=fallback,
+        timing=timings,
     )
 
 
@@ -991,6 +1036,7 @@ def write_csv(path: Path, data: RunData) -> None:
     headings += [f"u_{name}" for name in AXIS_NAMES]
     headings += [f"force_use_{name}" for name in AXIS_NAMES]
     headings += ["pump_use", "pump_flow_m3_s", "solve_time_s", "status", "fallback"]
+    headings += list(TIMING_FIELDS)
     headings += ["virtual_time_s", "progress_rate", "progress_accel"]
 
     with path.open("w", newline="") as stream:
@@ -1024,6 +1070,7 @@ def write_csv(path: Path, data: RunData) -> None:
                     int(data.status[index]),
                     int(data.fallback[index]),
                 ]
+                row += [data.timing[field][index] for field in TIMING_FIELDS]
                 row += [
                     data.virtual_time[index],
                     state[cs.X_PROGRESS_RATE],
@@ -1032,6 +1079,7 @@ def write_csv(path: Path, data: RunData) -> None:
             else:
                 row += [math.nan] * (cs.NU + cs.NU + 2)
                 row += [math.nan, 0, 0]
+                row += [math.nan] * len(TIMING_FIELDS)
                 row += [data.virtual_time[index], state[cs.X_PROGRESS_RATE], math.nan]
             writer.writerow(row)
 
@@ -1326,6 +1374,18 @@ def print_summary(data: RunData, parameters: dict) -> None:
     print(f"  peak hydraulic use:   {np.max(data.hydraulic_use, axis=0)}")
     print(
         f"  solve time median/max:{1e3 * np.median(data.solve_time):.2f}/{1e3 * np.max(data.solve_time):.2f} ms"
+    )
+    split = "  ".join(
+        f"{field[5:]}={1e3 * np.nanmedian(data.timing[field]):.2f}"
+        for field in TIMING_FIELDS
+        if field.startswith("time_")
+    )
+    print(f"  acados median ms:     {split}")
+    print(f"  qp iterations median: {np.nanmedian(data.timing['qp_iter']):.0f}")
+    # This box is shared and the same solver has measured 12.6 ms at idle and 73
+    # at load 7.9, so a timing without its load is not a measurement.
+    print(
+        f"  load average 1/5 min: {os.getloadavg()[0]:.2f} / {os.getloadavg()[1]:.2f}"
     )
     print(
         f"  nonzero statuses:     {np.count_nonzero(data.status)} / {data.status.size}"

@@ -17,6 +17,7 @@ import argparse
 import csv
 import json
 import math
+import os
 import statistics
 import subprocess
 import sys
@@ -34,6 +35,19 @@ SWAY_PERIOD_S = 2.0
 # `config/crane_mpc.yaml`. Read rather than hardcoded would be better, but the
 # budget is the one number a caller most often wants to override per run.
 DEFAULT_BUDGET_S = 0.03
+
+
+def median_column(rows: list[dict], column: str) -> float:
+    """Median of one CSV column over the finite cycles, NaN if there are none."""
+    values = []
+    for row in rows:
+        try:
+            value = float(row.get(column, ""))
+        except ValueError:
+            continue
+        if math.isfinite(value):
+            values.append(value)
+    return statistics.median(values) if values else math.nan
 
 
 def run_cell(knots: int, dt: float, extra: list[str]) -> dict | None:
@@ -54,6 +68,10 @@ def run_cell(knots: int, dt: float, extra: list[str]) -> dict | None:
         *extra,
     ]
     completed = subprocess.run(command, capture_output=True, text=True)
+    # Sampled while this cell was the load: the box is shared and the same solver
+    # has measured 12.6 ms idle against 73 at load 7.9, so the number without its
+    # load says nothing.
+    load = os.getloadavg()[0]
     if completed.returncode != 0:
         tail = (completed.stderr or completed.stdout).strip().splitlines()
         return {
@@ -83,7 +101,17 @@ def run_cell(knots: int, dt: float, extra: list[str]) -> dict | None:
     fallbacks = sum(
         1 for row in rows if row.get("fallback", "").lower() in ("1", "true")
     )
+    # acados' own split, whatever of it the harness wrote. Read off the header so
+    # the two files cannot disagree about the column set.
+    breakdown = {
+        f"{column}_ms": 1e3 * median_column(rows, column)
+        for column in rows[0]
+        if column.startswith("time_")
+    }
     return {
+        "load_1min": load,
+        **breakdown,
+        "qp_iter_median": median_column(rows, "qp_iter"),
         "cycles": len(times),
         "median_ms": 1e3 * statistics.median(times),
         "p90_ms": 1e3 * times[min(len(times) - 1, int(0.9 * len(times)))],
@@ -132,20 +160,27 @@ def main() -> int:
 
     print()
     print(
-        "| knots | dt | horizon s | covers sway | median ms | p90 ms | max ms | !conv | fallback | non-finite |"
+        "| knots | dt | horizon s | covers sway | median ms | p90 ms | max ms | "
+        "lin ms | sim ms | qp ms | qp it | load | !conv | fallback | non-finite |"
     )
-    print("|---|---|---|---|---|---|---|---|---|---|")
+    print("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|")
     for cell in results:
         if "failed" in cell:
             print(
                 f"| {cell['knots']} | {cell['dt']} | {cell['horizon_s']:.2f} | "
-                f"{'yes' if cell['covers_sway'] else 'no'} | FAILED: {cell['failed']} | | | | | |"
+                f"{'yes' if cell['covers_sway'] else 'no'} | FAILED: {cell['failed']} |"
+                + " |"
+                * 10
             )
             continue
         print(
             f"| {cell['knots']} | {cell['dt']} | {cell['horizon_s']:.2f} | "
             f"{'yes' if cell['covers_sway'] else 'no'} | {cell['median_ms']:.2f} | "
             f"{cell['p90_ms']:.2f} | {cell['max_ms']:.2f} | "
+            f"{cell.get('time_lin_ms', float('nan')):.2f} | "
+            f"{cell.get('time_sim_ms', float('nan')):.2f} | "
+            f"{cell.get('time_qp_ms', float('nan')):.2f} | "
+            f"{cell['qp_iter_median']:.0f} | {cell['load_1min']:.2f} | "
             f"{cell['not_converged']} | {cell['fallbacks']} | {cell['non_finite']} |"
         )
 

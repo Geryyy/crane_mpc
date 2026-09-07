@@ -563,6 +563,9 @@ def build_ocp(description_xml: str, parameters: dict, hydraulics: dict) -> tuple
     # and A-stable, so the step size stops being a stability question at all.
     ocp.solver_options.nlp_solver_type = "SQP_RTI"
     ocp.solver_options.qp_solver = "PARTIAL_CONDENSING_HPIPM"
+    # No `qp_solver_cond_N`: acados' default is `N`, and issue 129 measured every
+    # smaller block size to be worse -- 10.3 ms of QP at `N`, 61-81 ms at 1. The
+    # harness can still override it per run; nothing deployed should.
     ocp.solver_options.hessian_approx = "GAUSS_NEWTON"
     ocp.solver_options.integrator_type = "IRK"
     ocp.solver_options.sim_method_num_stages = 2
