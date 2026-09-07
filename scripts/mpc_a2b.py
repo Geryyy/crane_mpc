@@ -541,19 +541,37 @@ def configure_fixed_data(
     return u_max, extend, retract
 
 
+def position_box(
+    parameters: dict, measured: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Apply `q_a_margin` to constraint 1's box, never excluding `measured`.
+
+    `ocp_solver.cpp`'s `position_box`, and it has to stay that: a margin that
+    excluded the pose the machine is in would make stage 1 chase a position no
+    input reaches in one interval.
+    """
+    limits = parameters["limits"]
+    margin = np.asarray(limits["q_a_margin"][: cs.K_PLANNED_DOF], dtype=float)
+    lower = np.asarray(limits["q_a_lower"][: cs.K_PLANNED_DOF], dtype=float) + margin
+    upper = np.asarray(limits["q_a_upper"][: cs.K_PLANNED_DOF], dtype=float) - margin
+    return np.minimum(lower, measured), np.maximum(upper, measured)
+
+
 def state_bounds(
-    parameters: dict, equilibrium: np.ndarray
+    parameters: dict, equilibrium: np.ndarray, measured: np.ndarray
 ) -> tuple[np.ndarray, np.ndarray]:
     """Build one stage's state box around its passive equilibrium."""
     limits = parameters["limits"]
     u_max = np.asarray(limits["u_max"][: cs.K_PLANNED_DOF], dtype=float)
+    q_lower, q_upper = position_box(parameters, measured)
     # The boxed rows are the rigid state and the lagged command; the force states
     # are bounded by constraint 6 and carry no box (`export_ocp.py`). `u_f` is a
     # filtered `u`, so it gets `u`'s own box.
     lag = u_max[list(cs.K_LAG_AXES)]
     lower = np.concatenate(
         [
-            np.asarray(limits["q_a_lower"][: cs.K_PLANNED_DOF], dtype=float),
+            q_lower,
             equilibrium - np.asarray(limits["q_u_max"], dtype=float),
             -np.asarray(limits["dq_a_max"][: cs.K_PLANNED_DOF], dtype=float),
             -np.asarray(limits["dq_u_max"], dtype=float),
@@ -562,7 +580,7 @@ def state_bounds(
     )
     upper = np.concatenate(
         [
-            np.asarray(limits["q_a_upper"][: cs.K_PLANNED_DOF], dtype=float),
+            q_upper,
             equilibrium + np.asarray(limits["q_u_max"], dtype=float),
             np.asarray(limits["dq_a_max"][: cs.K_PLANNED_DOF], dtype=float),
             np.asarray(limits["dq_u_max"], dtype=float),
@@ -573,13 +591,24 @@ def state_bounds(
 
 
 def stage_reference(
-    q_ref: np.ndarray, dq_ref: np.ndarray, q_eq: np.ndarray, terminal: bool
+    q_ref: np.ndarray,
+    dq_ref: np.ndarray,
+    q_eq: np.ndarray,
+    tau_ref: np.ndarray,
+    terminal: bool,
 ) -> np.ndarray:
-    """Build an acados stage or terminal residual reference."""
+    """
+    Build an acados stage or terminal residual reference.
+
+    `tau_ref` is `h_eff`, and the effort term of `wiki/mpc.md` §2 references it
+    rather than zero: `tau_a = M_eff ddq_a + h_eff`, so a zero reference prices
+    the machine holding its own weight and the optimizer buys droop (issue 117).
+    The smoothness row still references zero -- `u` is a command, not a force.
+    """
     base = np.concatenate([q_ref, dq_ref, q_eq, np.zeros(cs.K_PASSIVE_DOF)])
     if terminal:
         return base
-    return np.concatenate([base, np.zeros(2 * cs.K_PLANNED_DOF)])
+    return np.concatenate([base, tau_ref, np.zeros(cs.K_PLANNED_DOF)])
 
 
 def hydraulic_utilisation(
@@ -654,6 +683,10 @@ def simulate(
     budget = float(parameters["solve_budget"])
 
     for step in range(steps):
+        # One evaluation per cycle at the measured state, held across the
+        # horizon -- what `ocp_solver.cpp` does, and the trade `mpc_node.cpp`
+        # already makes for `q_eq`.
+        tau_hold = np.asarray(static_force(state, parameter)).reshape(-1)
         solver.reset(reset_qp_solver_mem=1)
         for stage in range(intervals + 1):
             index = step + stage
@@ -665,13 +698,16 @@ def simulate(
                     q_ref_all[index],
                     dq_ref_all[index],
                     q_eq_all[index],
+                    tau_hold,
                     stage == intervals,
                 ),
             )
             if stage == 0:
                 lower = upper = state
             else:
-                lower, upper = state_bounds(parameters, q_eq_all[index])
+                lower, upper = state_bounds(
+                    parameters, q_eq_all[index], state[: cs.K_PLANNED_DOF]
+                )
             solver.constraints_set(stage, "lbx", lower)
             solver.constraints_set(stage, "ubx", upper)
 
@@ -691,7 +727,9 @@ def simulate(
             if stage == 0:
                 value = state.copy()
             else:
-                lower, upper = state_bounds(parameters, q_eq_all[step + stage])
+                lower, upper = state_bounds(
+                    parameters, q_eq_all[step + stage], state[: cs.K_PLANNED_DOF]
+                )
                 # Only the boxed prefix has bounds; the force states are held by
                 # constraint 6 and are left as the rollout produced them.
                 boxed = lower.size

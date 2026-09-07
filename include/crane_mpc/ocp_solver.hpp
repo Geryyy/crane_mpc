@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "crane_model/model.hpp"
@@ -95,12 +96,37 @@ struct BoxLimits
     {0.802, 0.326, 0.344, 0.630, 2.122, 0.5}};
   std::array<double, crane_model::kPassiveDof> q_u_max{{0.2, 0.2}};
   std::array<double, crane_model::kPassiveDof> dq_u_max{{1.0, 0.5}};
-  /// `u` is a **joint velocity** in rad/s at Psi's input under C3, not an
-  /// acceleration, so this box is dimensionally a velocity. Seeded from
-  /// `dq_a_max`; issue 117 is the retune.
+  /// `u` is a **joint velocity** at Psi's input under C3, not an acceleration.
+  /// Per axis the smaller of Psi's own identified domain and `dq_a_max`; the
+  /// derivation is in `src/crane_mpc_parameters.yaml`.
   std::array<double, crane_model::kActuatedDof> u_max{
-    {0.802, 0.326, 0.344, 0.630, 2.122, 0.5}};
+    {0.802, 0.288, 0.305, 0.555, 2.122, 0.5}};
+  /// Constraint 1's safety margin per axis: `q_a_lower + margin` and
+  /// `q_a_upper - margin` are what the box carries. `dq_a_max` times the
+  /// transport dead time -- the travel the axis cannot react within.
+  std::array<double, crane_model::kActuatedDof> q_a_margin{
+    {0.048, 0.020, 0.021, 0.038, 0.127, 0.030}};
 };
+
+/// Constraint 1's box on one planned row, with the margin applied.
+/**
+ * `margin` tightens both ends, and **never past the pose the machine is in**:
+ * a margin that excludes `measured` makes stage 1 chase a position the
+ * optimizer cannot reach in one interval, and the whole problem is then
+ * infeasible for a state the machine is legitimately parked in -- a fully
+ * retracted telescope sits exactly on `q_a_lower`. A zero margin returns
+ * `{lower, upper}` unchanged, bit for bit; `ocp_solver.cpp` asserts that at
+ * compile time so the margin cannot silently drift into the untightened case.
+ */
+[[nodiscard]] constexpr std::pair<double, double> position_box(
+  double lower, double upper, double margin, double measured) noexcept
+{
+  const double tightened_lower = lower + margin;
+  const double tightened_upper = upper - margin;
+  return {
+    tightened_lower < measured ? tightened_lower : measured,
+    tightened_upper > measured ? tightened_upper : measured};
+}
 
 /// `F_i^max` per direction, and it is the model's answer rather than this one.
 /**

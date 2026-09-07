@@ -244,9 +244,17 @@ constexpr std::array<std::size_t, crane_model::kPassiveDof> kPassiveCanonical{{4
  * prediction with the hydraulics switched off and the boom in free fall. The
  * lagged command is seeded at the measured velocity, the PT1's own steady state.
  */
-ActuatorState seed_actuator(
+/// `h_eff` at `x`: the actuated force that holds the machine still there.
+/**
+ * `robot_model.md` 3.4. Two consumers, and they want the same number for the
+ * same reason -- there is no force measurement anywhere in the stack, so the
+ * model is what says what holding still costs: it seeds C3's force state, and
+ * it is the **reference** the effort term of `wiki/mpc.md` 2 prices `tau_a`
+ * against. `fallback` is returned unchanged where the model refuses.
+ */
+std::array<double, kPlannedDof> static_hold_force(
   const crane_model::Model & model, const crane_model::State & x,
-  const crane_model::Payload & payload, ActuatorState seeded)
+  const crane_model::Payload & payload, std::array<double, kPlannedDof> fallback)
 {
   crane_model::Q q = crane_model::Q::Zero();
   crane_model::DQ dq = crane_model::DQ::Zero();
@@ -262,16 +270,24 @@ ActuatorState seed_actuator(
     dq[static_cast<Eigen::Index>(kPassiveCanonical[row])] =
       x[static_cast<Eigen::Index>(kStatePassiveVelocity + row)];
   }
-  for (std::size_t row = 0; row < kPlannedDof; ++row) {
-    seeded.command_lag[row] = x[static_cast<Eigen::Index>(kStateActuatedVelocity + row)];
-  }
   const auto reduced =
     model.reduced_actuated_dynamics(q, dq, crane_model::Input::Zero(), payload);
   if (reduced.ok()) {
     for (std::size_t row = 0; row < kPlannedDof; ++row) {
-      seeded.force[row] = reduced.value().bias_eff[static_cast<Eigen::Index>(row)];
+      fallback[row] = reduced.value().bias_eff[static_cast<Eigen::Index>(row)];
     }
   }
+  return fallback;
+}
+
+ActuatorState seed_actuator(
+  const crane_model::Model & model, const crane_model::State & x,
+  const crane_model::Payload & payload, ActuatorState seeded)
+{
+  for (std::size_t row = 0; row < kPlannedDof; ++row) {
+    seeded.command_lag[row] = x[static_cast<Eigen::Index>(kStateActuatedVelocity + row)];
+  }
+  seeded.force = static_hold_force(model, x, payload, seeded.force);
   return seeded;
 }
 
@@ -456,6 +472,23 @@ Status check_settings(const OcpSettings & settings)
       "constraints 2 to 5 of mpc 3 each need a finite positive bound; an invented or absent one is "
       "the silent stub the model API contract 5 exists to prevent");
   }
+  if (!all_non_negative(limits.q_a_margin)) {
+    return failure(
+      ErrorCode::InvalidArgument,
+      "constraint 1's safety margin must be finite and >= 0 on every row; zero is legal and means "
+      "the bound is the control-safe limit itself");
+  }
+  for (std::size_t row = 0; row < crane_model::kActuatedDof; ++row) {
+    if (!(limits.q_a_lower[row] + limits.q_a_margin[row] <
+      limits.q_a_upper[row] - limits.q_a_margin[row]))
+    {
+      return failure(
+        ErrorCode::InvalidArgument,
+        "actuated row " + std::to_string(row) +
+        "'s safety margin closes its own control-safe range; a margin is a tightening, not a "
+        "replacement for the limit");
+    }
+  }
   const HydraulicLimits & hydraulics = settings.hydraulics;
   if (!std::isfinite(hydraulics.pump_flow_max) || hydraulics.pump_flow_max <= 0.0) {
     return failure(
@@ -505,12 +538,15 @@ struct Ocp::Impl
     crane_model::Payload payload{};
   bool payload_changed{false};
 
-    /// Kept for one thing only: seeding C3's force state, which needs `h_eff`.
+    /// Kept for `h_eff`: C3's force-state seed and the effort term's reference.
   std::optional<crane_model::Model> model;
 
     /// The OCP-only actuator state at `x_0`, carried from the last solve.
   ActuatorState actuator{};
   bool actuator_seeded{false};
+
+    /// `h_eff` at `x_0`, the effort term's reference. See `Ocp::solve`.
+  std::array<double, kPlannedDof> force_reference{};
 
   std::array<CylinderForceLimit, crane_model::kActuatedDof> cylinder_force_max{};
   double flow_max{};
@@ -551,6 +587,24 @@ struct Ocp::Impl
     return static_cast<int>(settings.horizon_length);
   }
 };
+
+// `position_box`'s three properties, at compile time. There is no test target in
+// this package -- issue 104 stripped it to the offline harness deliberately --
+// and these are the assertions that harness cannot make, because a run only ever
+// exercises the margin it was configured with.
+static_assert(
+  position_box(-1.2, 1.563, 0.0, 0.0) == std::pair<double, double>{-1.2, 1.563},
+  "a zero margin has to reproduce the untightened bound exactly, or the margin "
+  "can drift without anything noticing");
+static_assert(
+  position_box(-1.0, 1.5, 0.25, 0.0) == std::pair<double, double>{-0.75, 1.25},
+  "a margin tightens both ends of constraint 1's box");
+static_assert(
+  position_box(0.0, 2.0, 0.25, 0.0) == std::pair<double, double>{0.0, 1.75},
+  "a margin may not exclude the pose the machine is in: a fully retracted "
+  "telescope sits exactly on q_a_lower[3] = 0 and the problem stays feasible "
+  "there. The numbers are binary-exact so the assertion is about the rule and "
+  "not about rounding");
 
 double ConstraintSlack::worst() const noexcept
 {
@@ -1100,6 +1154,24 @@ Result<OcpSolution> Ocp::solve(
     }
     impl_->actuator_seeded = true;
   }
+
+  // **The effort term of `wiki/mpc.md` 2 references `h_eff`, not zero** (issue
+  // 117). 2 prices `tau_a` rather than `u` so that the price of an acceleration
+  // carries the effective inertia, and `tau_a = M_eff ddq_a + h_eff`: against a
+  // zero reference the residual is the whole force, so the cost prices the
+  // machine holding its own weight and the optimizer buys droop to avoid paying
+  // -- measured at 0.53 rad of final error on the offline A2B, with the sway box
+  // saturating as a consequence. Against `h_eff` the residual is `M_eff ddq_a`,
+  // which is the quantity 2 says it is pricing, and the same move finishes at
+  // 0.14 rad.
+  //
+  // One evaluation per cycle, at `x_0`, held across the horizon -- the trade
+  // `mpc_node.cpp` already makes for `q_eq`. Per-stage exactness was measured
+  // and buys nothing: 0.15 rad against 0.14.
+  if (impl_->model.has_value()) {
+    impl_->force_reference =
+      static_hold_force(*impl_->model, x0, impl_->payload, impl_->force_reference);
+  }
   const std::vector<double> reduced_x0 = reduce(x0, impl_->actuator);
 
   for (int stage = 0; stage <= intervals; ++stage) {
@@ -1114,6 +1186,11 @@ Result<OcpSolution> Ocp::solve(
       reference[kResidualActuatedPosition + row] = node.q_a_ref[row];
       reference[kResidualActuatedVelocity + row] = node.dq_a_ref[row];
     }
+    if (stage < intervals) {
+      for (std::size_t row = 0; row < kPlannedDof; ++row) {
+        reference[kResidualActuatedForce + row] = impl_->force_reference[row];
+      }
+    }
     for (std::size_t row = 0; row < crane_model::kPassiveDof; ++row) {
       reference[kResidualPassivePosition + row] = node.q_eq[row];
     }
@@ -1126,8 +1203,14 @@ Result<OcpSolution> Ocp::solve(
       }
     } else {
       for (std::size_t row = 0; row < kPlannedDof; ++row) {
-        impl_->lower_state[kReducedActuatedPosition + row] = limits.q_a_lower[row];
-        impl_->upper_state[kReducedActuatedPosition + row] = limits.q_a_upper[row];
+        // Constraint 1, `q_a_margin` already subtracted. The margin is the
+        // iLQR's `joint_limit.safety_thresh` (issue 117): there it started a
+        // penalty biting early, here it tightens a bound that is kept exactly.
+        const auto box = position_box(
+          limits.q_a_lower[row], limits.q_a_upper[row], limits.q_a_margin[row],
+          reduced_x0[kReducedActuatedPosition + row]);
+        impl_->lower_state[kReducedActuatedPosition + row] = box.first;
+        impl_->upper_state[kReducedActuatedPosition + row] = box.second;
         impl_->lower_state[kReducedActuatedVelocity + row] = -limits.dq_a_max[row];
         impl_->upper_state[kReducedActuatedVelocity + row] = limits.dq_a_max[row];
       }
@@ -1197,9 +1280,11 @@ Result<OcpSolution> Ocp::solve(
     }
     if (stage > 0) {
       for (std::size_t row = 0; row < kPlannedDof; ++row) {
-        impl_->guess[kReducedActuatedPosition + row] = std::clamp(
-          impl_->guess[kReducedActuatedPosition + row], limits.q_a_lower[row],
-          limits.q_a_upper[row]);
+        const auto box = position_box(
+          limits.q_a_lower[row], limits.q_a_upper[row], limits.q_a_margin[row],
+          reduced_x0[kReducedActuatedPosition + row]);
+        impl_->guess[kReducedActuatedPosition + row] =
+          std::clamp(impl_->guess[kReducedActuatedPosition + row], box.first, box.second);
         impl_->guess[kReducedActuatedVelocity + row] = std::clamp(
           impl_->guess[kReducedActuatedVelocity + row], -limits.dq_a_max[row],
           limits.dq_a_max[row]);
@@ -1406,7 +1491,8 @@ Result<CostTerms> Ocp::cost_terms(
         weights[kResidualActuatedVelocity + index], row[kResidualActuatedVelocity + index],
         node.dq_a_ref[index]);
       terms.tau_a += add(
-        weights[kResidualActuatedForce + index], row[kResidualActuatedForce + index], 0.0);
+        weights[kResidualActuatedForce + index], row[kResidualActuatedForce + index],
+        impl_->force_reference[index]);
       terms.u += add(weights[kResidualInput + index], row[kResidualInput + index], 0.0);
     }
     for (std::size_t index = 0; index < crane_model::kPassiveDof; ++index) {

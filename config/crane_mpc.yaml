@@ -25,6 +25,8 @@ crane_mpc:
       dq_a: [0.4, 0.4, 0.4, 0.4, 0.1, 0.1]
       q_u: [0.0, 0.0]
       dq_u: [4.0, 4.0]
+      # Priced against h_eff and not against zero -- see the parameter
+      # description; a zero reference prices holding the machine's own weight.
       tau_a: [1.0e-8, 1.0e-8, 1.0e-8, 1.0e-8, 1.0e-8, 1.0e-8]
       u: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
       terminal_scale: 10.0
@@ -33,13 +35,18 @@ crane_mpc:
       q_a_lower: [-3.71, -1.2, -0.91, 0.0, -12.566370614359172, 0.2]
       q_a_upper: [3.71, 1.563, 4.6, 2.236, 12.566370614359172, 0.7]
       dq_a_max: [0.802, 0.326, 0.344, 0.630, 2.122, 0.5]
+      # Marc's `joint_limit.safety_thresh`, as a tightening of constraint 1's
+      # bound rather than the point a penalty starts biting. dq_a_max times the
+      # 60 ms transport dead time: the travel the axis cannot react within.
+      q_a_margin: [0.048, 0.020, 0.021, 0.038, 0.127, 0.030]
       q_u_max: [0.2, 0.2]
       dq_u_max: [1.0, 0.5]
-      # `u` is a **joint velocity** in rad/s at Psi's input under C3, not an
-      # acceleration, so this box is dimensionally a velocity now. Seeded from
-      # dq_a_max, which is the only rate limit in this file with provenance;
-      # issue 117 is the retune.
-      u_max: [0.802, 0.326, 0.344, 0.630, 2.122, 0.5]
+      # `u` is a **joint velocity** at Psi's input under C3, not an acceleration.
+      # Per axis the smaller of Psi's own identified domain (compensator_map 3;
+      # sw 0.9357, ha 0.2880, ka 0.3059, sa 0.5551, ro 2.3969) and dq_a_max, so
+      # the boom, arm and telescope are bounded by the fit's domain and the slew
+      # and rotator by the control-safe velocity.
+      u_max: [0.802, 0.288, 0.305, 0.555, 2.122, 0.5]
 
     slack:
       q_u: [1.0e3, 1.0e3]

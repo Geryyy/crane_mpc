@@ -260,7 +260,19 @@ crane_mpc:
         loop; a plain input penalty cannot express it and `u` below is not a
         substitute. Small in absolute terms only because tau_a is in newton metres
         and newtons and runs to 1e4-1e5 on the boom while the tracking residuals
-        are radians -- the weight is what puts the two on one scale. Not tuned."
+        are radians -- the weight is what puts the two on one scale. Not tuned.
+        **The reference is h_eff and not zero** (issue 117). tau_a is a state
+        under C3 and tau_a = M_eff ddq_a + h_eff, so against a zero reference this
+        term prices the machine holding its own weight and the optimizer buys
+        droop to avoid paying: the offline A2B finished 0.53 rad from the goal,
+        boom -0.30 and telescope -0.42, with the sway box saturating at its 0.2
+        bound as a consequence of that position error. Against h_eff the residual
+        is M_eff ddq_a, which is the quantity this paragraph says is priced, and
+        the same move finishes at 0.14 rad. A zero weight was the other candidate:
+        it is worse (0.18 rad) and it discards the effective-inertia property
+        outright. ocp_solver.cpp evaluates h_eff once per cycle at x_0 and holds
+        it across the horizon, the trade mpc_node.cpp already makes for q_eq;
+        per-stage exactness was measured at 0.15 rad and buys nothing."
       validation:
         fixed_size<>: [6]
         lower_element_bounds<>: [0.0]
@@ -306,6 +318,31 @@ crane_mpc:
       description: "Constraint 1 of 3, upper end. See q_a_lower."
       validation:
         fixed_size<>: [6]
+    q_a_margin:
+      type: double_array
+      default_value: [0.048, 0.020, 0.021, 0.038, 0.127, 0.030]
+      read_only: true
+      description: "Constraint 1's safety margin per axis, rad (m on the
+        telescope): the box carries q_a_lower + margin and q_a_upper - margin.
+        This is Marc's `constraints.joint_limit.safety_thresh` (0.05 rad on every
+        axis), and it is the knob of his that changes meaning on the way across --
+        there it set where a quadratic penalty started biting, here the bound is
+        kept exactly, so the margin buys distance rather than gradient. His number
+        is **not** copied. This is dq_a_max times the 60 ms transport dead time of
+        C3 block 1: the travel an axis can put in before the loop can react to
+        anything, which is the smallest margin that means something on a bound the
+        optimizer already never crosses. Zero is legal and reproduces the
+        untightened bound exactly.
+        A margin **never excludes the pose the machine is in** (`position_box` in
+        ocp_solver.hpp). One that did would make the problem infeasible for states
+        the machine is legitimately parked in -- a fully retracted telescope sits
+        exactly on q_a_lower[3] = 0 -- and the fallback would then fire on every
+        cycle forever. Softening the row instead is not available: constraint 1 is
+        hard on purpose and crane_msgs/SolverHealth has no violation slot for it,
+        so Marc's `joint_limit.weight` has no home here at all."
+      validation:
+        fixed_size<>: [6]
+        lower_element_bounds<>: [0.0]
     dq_a_max:
       type: double_array
       default_value: [0.802, 0.326, 0.344, 0.630, 2.122, 0.5]
@@ -347,12 +384,32 @@ crane_mpc:
         lower_element_bounds<>: [0.0]
     u_max:
       type: double_array
-      default_value: [0.5, 0.7, 0.5, 1.0, 6.0, 2.0]
+      default_value: [0.802, 0.288, 0.305, 0.555, 2.122, 0.5]
       read_only: true
-      description: "Constraint 5 of 3, |u| <= u^+. The input is ddq_a, so this is
-        the acceleration limit of parameters.md 3 -- measured and then made
-        conservative -- projected onto the six actuated rows of the canonical
-        eight."
+      description: "Constraint 5 of 3, |u| <= u^+. **u is a joint velocity in
+        rad/s (m/s on the telescope) at Psi's input**, not an acceleration: C3
+        made it one and issue 116 changed the state layout to match, so the
+        acceleration limit of parameters.md 3 that used to be here bounds nothing
+        this problem has. Two things bound a velocity command, and this default is
+        the smaller of them per axis (issue 117).
+        **Psi's identified domain.** The deployed inner loop already saturates its
+        total command to the fit's own domain [X_i^min, X_i^max] scaled by
+        command_authority (control_architecture.md 2.1, compensator_map.md 3),
+        because commanding outside it extrapolates a spline past its data. The
+        domain is asymmetric per direction; the symmetric magnitude
+        min(|X^min|, X^max) is sw 0.9357, ha 0.2880 (the 2-D surface's first
+        axis; its 1-D fallback is 0.2977), ka 0.3059, sa 0.5551, ro 2.3969, and
+        the gripper's Psi is the identity with a 0.5 rad/s limit.
+        **dq_a_max.** The C3 chain has unit DC gain from u to dq_a, so a u above
+        the control-safe velocity asks in steady state for a velocity constraint
+        2 forbids -- an input box wider than the state box it drives is an
+        infeasibility waiting for a step reference.
+        The element-wise minimum, rounded inward, is this default: Psi's domain
+        binds on the boom, arm and telescope, dq_a_max on the slew and rotator.
+        Marc's `acceleration.limit_scale` has no separate home -- there it scaled
+        limits that came from the model, here both arrays it would scale are
+        themselves deployment parameters, so a global multiplier would be a
+        second way to write the same number."
       validation:
         fixed_size<>: [6]
         lower_element_bounds<>: [0.0]

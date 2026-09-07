@@ -190,6 +190,7 @@ MpcNode::MpcNode(const rclcpp::NodeOptions & options)
   ocp_settings_.weights.terminal_scale = parameters.weights.terminal_scale;
   copy_rows(parameters.limits.q_a_lower, ocp_settings_.limits.q_a_lower);
   copy_rows(parameters.limits.q_a_upper, ocp_settings_.limits.q_a_upper);
+  copy_rows(parameters.limits.q_a_margin, ocp_settings_.limits.q_a_margin);
   copy_rows(parameters.limits.dq_a_max, ocp_settings_.limits.dq_a_max);
   copy_rows(parameters.limits.q_u_max, ocp_settings_.limits.q_u_max);
   copy_rows(parameters.limits.dq_u_max, ocp_settings_.limits.dq_u_max);
@@ -473,11 +474,18 @@ crane_model::Input MpcNode::follower_input(const FollowerCommand & follower) con
   if (!follower.complete) {
     return input;
   }
+  // **The follower's command is the input, and is not differenced into one.**
+  // Under C3 `u` is the joint velocity at Psi's input (issue 116), so what the
+  // follower is commanding *is* what this problem calls `u`. This differenced
+  // `(v_follower - v_measured) / T_s` and read as an acceleration, which is what
+  // `u` meant before C3; left as it was it would hand `propagate` a number two
+  // orders out and clipped against a bound in the wrong unit, so `x_0` would be
+  // carried across the 60 ms dead time under an input the machine is not
+  // applying.
   for (std::size_t row = 0; row < crane_model::kActuatedDof; ++row) {
     const auto entry = static_cast<Eigen::Index>(row);
-    const double implied = (follower.velocity[row] - dq_a_measured_[row]) / grid_.Ts;
     const double bound = ocp_settings_.limits.u_max[row];
-    input[entry] = std::max(-bound, std::min(bound, implied));
+    input[entry] = std::max(-bound, std::min(bound, follower.velocity[row]));
   }
   return input;
 }
