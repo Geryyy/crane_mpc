@@ -34,7 +34,6 @@ extern "C" {
 #define casadi_s1 CASADI_PREFIX(s1)
 #define casadi_s2 CASADI_PREFIX(s2)
 #define casadi_s3 CASADI_PREFIX(s3)
-#define casadi_s4 CASADI_PREFIX(s4)
 #define casadi_sq CASADI_PREFIX(sq)
 
 /* Symbol visibility in DLLs */
@@ -54,23 +53,22 @@ extern "C" {
 
 casadi_real casadi_sq(casadi_real x) { return x*x;}
 
-static const casadi_int casadi_s0[3] = {23, 1, 1};
-static const casadi_int casadi_s1[3] = {5, 1, 1};
+static const casadi_int casadi_s0[3] = {25, 1, 1};
+static const casadi_int casadi_s1[3] = {6, 1, 1};
 static const casadi_int casadi_s2[3] = {0, 0, 1};
-static const casadi_int casadi_s3[3] = {11, 1, 1};
-static const casadi_int casadi_s4[3] = {6, 1, 1};
+static const casadi_int casadi_s3[3] = {27, 1, 1};
 
-/* crane_mpc_pzs100_constr_h_0_fun:(i0[23],i1[5],i2[],i3[11])->(o0[6]) */
+/* crane_mpc_pzs100_constr_h_0_fun:(i0[25],i1[6],i2[],i3[27])->(o0[6]) */
 static int casadi_f0(const casadi_real** arg, casadi_real** res, casadi_int* iw, casadi_real* w, int mem) {
   casadi_real a00, a01, a02, a03, a04, a05, a06, a07, a08, a09, a10, a11;
   casadi_real a12, a13, a14, a15, a16, a17, a18;
-  a00=arg[0]? arg[0][18] : 0;
+  a00=arg[0]? arg[0][20] : 0;
   a01=1.0000000000000001e-01;
   a00=(a00/a01);
   a02=318100.;
   a00=(a00/a02);
   if (res[0]!=0) res[0][0]=a00;
-  a00=arg[0]? arg[0][19] : 0;
+  a00=arg[0]? arg[0][21] : 0;
   a03=-1.2000000000000000e-01;
   a04=3.0952399999999997e-01;
   a05=4.5387999999999984e-01;
@@ -158,7 +156,7 @@ static int casadi_f0(const casadi_real** arg, casadi_real** res, casadi_int* iw,
   a03=384850.;
   a00=(a00/a03);
   if (res[0]!=0) res[0][1]=a00;
-  a00=arg[0]? arg[0][20] : 0;
+  a00=arg[0]? arg[0][22] : 0;
   a03=-1.1801100000000003e-01;
   a09=arg[0]? arg[0][2] : 0;
   a15=sin(a09);
@@ -185,11 +183,11 @@ static int casadi_f0(const casadi_real** arg, casadi_real** res, casadi_int* iw,
   a00=(a00/a18);
   a00=(a00/a02);
   if (res[0]!=0) res[0][2]=a00;
-  a00=arg[0]? arg[0][21] : 0;
+  a00=arg[0]? arg[0][23] : 0;
   a02=9.6212500000000000e+04;
   a00=(a00/a02);
   if (res[0]!=0) res[0][3]=a00;
-  a00=arg[0]? arg[0][22] : 0;
+  a00=arg[0]? arg[0][24] : 0;
   a02=3.5809999999999995e+03;
   a00=(a00/a02);
   if (res[0]!=0) res[0][4]=a00;
@@ -320,7 +318,7 @@ CASADI_SYMBOL_EXPORT const casadi_int* crane_mpc_pzs100_constr_h_0_fun_sparsity_
 
 CASADI_SYMBOL_EXPORT const casadi_int* crane_mpc_pzs100_constr_h_0_fun_sparsity_out(casadi_int i) {
   switch (i) {
-    case 0: return casadi_s4;
+    case 0: return casadi_s1;
     default: return 0;
   }
 }

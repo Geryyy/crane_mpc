@@ -21,11 +21,23 @@
 // **order**, so this is where `ocp_solver.cpp` reads the packing rather than
 // inventing a second one. Both halves are set on every stage before every
 // solve, so neither is a property of the artifact (issue 072).
-#define CRANE_MPC_OCP_PARAMETER_DOF 11
+#define CRANE_MPC_OCP_PARAMETER_DOF 27
 #define CRANE_MPC_OCP_PARAMETER_TOOL_POSITION 0
 #define CRANE_MPC_OCP_PARAMETER_PAYLOAD_MASS 1
 #define CRANE_MPC_OCP_PARAMETER_PAYLOAD_COM 2
 #define CRANE_MPC_OCP_PARAMETER_PAYLOAD_INERTIA 5
+
+// The rest of `p` is this OCP's own and is written per stage before every
+// solve: the stage's nominal virtual time, then the second-order expansion
+// of its reference about it -- value, d/ds, d^2/ds^2, per planned axis. The
+// progress state is virtual time, so the cost compares against
+// `q_a,ref(s)`; a spline cannot be baked into a generated solver, and this
+// local model is what carries both derivatives into the gradient and the
+// Hessian. At `s = s_nom` it is today's time-indexed reference exactly.
+#define CRANE_MPC_OCP_PARAMETER_PROGRESS_NOMINAL 11
+#define CRANE_MPC_OCP_PARAMETER_REFERENCE_POSITION 12
+#define CRANE_MPC_OCP_PARAMETER_REFERENCE_FIRST 17
+#define CRANE_MPC_OCP_PARAMETER_REFERENCE_SECOND 22
 
 // The (row, column) of each of those six entries, in the order they are
 // packed. Theta_L is symmetric and about the payload's own centre of mass
@@ -45,12 +57,26 @@
 #define CRANE_MPC_OCP_STATE_COMMAND_LAG 14
 #define CRANE_MPC_OCP_STATE_COMMAND_LAG_DOF 4
 #define CRANE_MPC_OCP_STATE_COMMAND_LAG_AXES {0, 1, 3, 4}
-#define CRANE_MPC_OCP_STATE_ACTUATED_FORCE 18
 
-// The boxed rows of `x`: the rigid-body state and the lagged command, a
-// contiguous prefix. The force states are left out on purpose -- see
-// `export_ocp.py`; constraint 6 is the nonlinear row and not a box.
-#define CRANE_MPC_OCP_BOXED_STATE_DOF 18
+// The progress pair of `docs/features/mpc-full-authority/brief.md` §2.1:
+// `s`, virtual time in seconds of nominal plan, and `v_s`, how fast the
+// plan is being spent. `v_s = 1` is exactly time-indexed tracking. The
+// sixth input is the progress **acceleration**, one order above Marc's
+// `s_dot`-as-input, so the plan's speed cannot step between cycles. They
+// sit before the force state because `v_s >= 0` is a box and the force
+// states carry none: the boxed rows have to stay a contiguous prefix.
+#define CRANE_MPC_OCP_STATE_PROGRESS 18
+#define CRANE_MPC_OCP_STATE_PROGRESS_RATE 19
+#define CRANE_MPC_OCP_INPUT_PLANNED_DOF 5
+#define CRANE_MPC_OCP_INPUT_PROGRESS_ACCEL 5
+
+#define CRANE_MPC_OCP_STATE_ACTUATED_FORCE 20
+
+// The boxed rows of `x`: the rigid-body state, the lagged command and the
+// progress pair, a contiguous prefix. The force states are left out on
+// purpose -- see `export_ocp.py`; constraint 6 is the nonlinear row and not
+// a box.
+#define CRANE_MPC_OCP_BOXED_STATE_DOF 20
 
 // C3's fitted numbers as they were folded into the dynamics, per planned
 // axis, from `crane_model/config/c3_full_model.json`. Here so the C++ and
@@ -62,15 +88,35 @@
 #define CRANE_MPC_OCP_ACTUATOR_COMMAND_LAG_S {0.1, 0.025, 0.0, 0.075, 0.125}
 #define CRANE_MPC_OCP_ACTUATOR_DEAD_TIME_S 0.06
 
-// The blocks of the stage residual `y = [q_a, dq_a, q_u, dq_u, tau_a, u]`.
-// The order is §2's -- tracking, sway, effort, smoothness -- and not the
-// state's, and everything that has to agree with `W` reads it from here.
+// The blocks of the stage residual
+// `y = [q_a, dq_a, q_u, dq_u, lag, v_s, tau_a, u]`. The order is §2's --
+// tracking, sway, lag, progress, effort, smoothness -- and not the state's,
+// and everything that has to agree with `W` reads it from here. The
+// terminal residual is the **prefix** up to and including the progress row,
+// so one set of offsets addresses both.
+//
+// The tracking rows carry their own reference and their `yref` is zero:
+// `q_a,ref(s)` is a function of a decision variable and acados subtracts
+// `yref` as a constant. The progress row's `yref` is the one below.
 #define CRANE_MPC_OCP_RESIDUAL_PLANNED_POSITION 0
 #define CRANE_MPC_OCP_RESIDUAL_PLANNED_VELOCITY 5
 #define CRANE_MPC_OCP_RESIDUAL_PASSIVE_POSITION 10
 #define CRANE_MPC_OCP_RESIDUAL_PASSIVE_VELOCITY 12
-#define CRANE_MPC_OCP_RESIDUAL_ACTUATED_FORCE 14
-#define CRANE_MPC_OCP_RESIDUAL_INPUT 19
+#define CRANE_MPC_OCP_RESIDUAL_LAG 14
+#define CRANE_MPC_OCP_RESIDUAL_PROGRESS_RATE 15
+#define CRANE_MPC_OCP_RESIDUAL_ACTUATED_FORCE 16
+#define CRANE_MPC_OCP_RESIDUAL_INPUT 21
+#define CRANE_MPC_OCP_RESIDUAL_TERMINAL_DOF 16
+
+// The axis the lag row is written on, and the progress row's reference.
+// The lag row is Marc's 1-D projection on the slewing joint reproduced and
+// not generalised: five planned coordinates carry four radians and one
+// metre, so the unit tangent a single scalar projection needs is a norm
+// over mixed units. `export_ocp.py` carries the argument.
+#define CRANE_MPC_OCP_LAG_AXIS 0
+// One second of plan per second of wall clock. A **constant**: any other
+// value is a reference that is not the plan.
+#define CRANE_MPC_OCP_PROGRESS_RATE_REFERENCE 1.0
 
 // The rows of `h`: constraint 6 once per planned axis, then constraint 7.
 #define CRANE_MPC_OCP_CONSTRAINT_CYLINDER_FORCE 0

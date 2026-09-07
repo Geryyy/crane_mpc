@@ -36,14 +36,14 @@
 #include "acados_c/ocp_nlp_interface.h"
 #include "acados_c/external_function_interface.h"
 
-#define CRANE_MPC_PZS100_NX     23
+#define CRANE_MPC_PZS100_NX     25
 #define CRANE_MPC_PZS100_NZ     0
-#define CRANE_MPC_PZS100_NU     5
-#define CRANE_MPC_PZS100_NP     11
+#define CRANE_MPC_PZS100_NU     6
+#define CRANE_MPC_PZS100_NP     27
 #define CRANE_MPC_PZS100_NP_GLOBAL     0
-#define CRANE_MPC_PZS100_NBX    18
-#define CRANE_MPC_PZS100_NBX0   23
-#define CRANE_MPC_PZS100_NBU    5
+#define CRANE_MPC_PZS100_NBX    20
+#define CRANE_MPC_PZS100_NBX0   25
+#define CRANE_MPC_PZS100_NBU    6
 #define CRANE_MPC_PZS100_NSBX   4
 #define CRANE_MPC_PZS100_NSBU   0
 #define CRANE_MPC_PZS100_NSH    6
@@ -59,11 +59,11 @@
 #define CRANE_MPC_PZS100_NS0    6
 #define CRANE_MPC_PZS100_NSN    4
 #define CRANE_MPC_PZS100_NG     0
-#define CRANE_MPC_PZS100_NBXN   18
+#define CRANE_MPC_PZS100_NBXN   20
 #define CRANE_MPC_PZS100_NGN    0
-#define CRANE_MPC_PZS100_NY0    24
-#define CRANE_MPC_PZS100_NY     24
-#define CRANE_MPC_PZS100_NYN    14
+#define CRANE_MPC_PZS100_NY0    27
+#define CRANE_MPC_PZS100_NY     27
+#define CRANE_MPC_PZS100_NYN    16
 #define CRANE_MPC_PZS100_N      49
 #define CRANE_MPC_PZS100_NH     6
 #define CRANE_MPC_PZS100_NHN    0

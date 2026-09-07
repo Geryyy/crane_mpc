@@ -54,12 +54,18 @@ static_assert(
   CRANE_MPC_PZS100_NBX == kNbx && CRANE_MPC_PZS100_NBXN == kNbx,
   "the boxed rows are the rigid state and the lagged command; the force states are held by "
   "constraint 6 and carry no box");
-static_assert(CRANE_MPC_PZS100_NBX0 == kNx, "x_0 pins every row, actuator states included");
-static_assert(CRANE_MPC_PZS100_NU == kNu, "nu = 5 after ");
+static_assert(CRANE_MPC_PZS100_NBX0 == kNx, "x_0 pins every row, OCP-only states included");
+static_assert(
+  CRANE_MPC_PZS100_NU == kNu,
+  "nu is the five joint commands and the progress acceleration");
 static_assert(
   CRANE_MPC_PZS100_NP == kNp, "p is the pinned tool coordinate and the payload body ()");
-static_assert(CRANE_MPC_PZS100_NY == kNy, "y = [q_a, dq_a, q_u, dq_u, tau_a, u]");
+static_assert(CRANE_MPC_PZS100_NY == kNy, "y = [q_a, dq_a, q_u, dq_u, lag, v_s, tau_a, u]");
 static_assert(CRANE_MPC_PZS100_NYN == kNyTerminal, "the terminal cost has no input rows");
+static_assert(
+  CRANE_MPC_OCP_RESIDUAL_TERMINAL_DOF == kNyTerminal,
+  "the terminal residual is the leading prefix of the stage one, so one set of offsets "
+  "addresses both");
 static_assert(CRANE_MPC_PZS100_NH == kNh, "constraint 6 five times, then constraint 7");
 static_assert(CRANE_MPC_PZS100_NHN == 0, "no input at the terminal node, so no tau_a");
 static_assert(CRANE_MPC_PZS100_NSBX == kNsbx, "constraints 3 and 4 are the soft box rows");
@@ -75,7 +81,25 @@ constexpr std::size_t kReducedPassiveVelocity = CRANE_MPC_OCP_STATE_PASSIVE_VELO
 // C3's two actuator blocks. `kCommandLagAxes` is the export's own list, derived
 // there from the fit; the arm is missing from it because its `tau_v` is zero.
 constexpr std::size_t kReducedCommandLag = CRANE_MPC_OCP_STATE_COMMAND_LAG;
+constexpr std::size_t kReducedProgress = CRANE_MPC_OCP_STATE_PROGRESS;
+constexpr std::size_t kReducedProgressRate = CRANE_MPC_OCP_STATE_PROGRESS_RATE;
 constexpr std::size_t kReducedActuatedForce = CRANE_MPC_OCP_STATE_ACTUATED_FORCE;
+constexpr std::size_t kInputProgressAccel = CRANE_MPC_OCP_INPUT_PROGRESS_ACCEL;
+
+// The axis the lag row of `wiki/mpc.md` 2 is written on, and the rate the
+// progress row regulates toward. Both are the export's, and both are decisions
+// rather than tuning -- see `scripts/export_ocp.py`.
+constexpr std::size_t kLagAxis = CRANE_MPC_OCP_LAG_AXIS;
+constexpr double kProgressRateReference = CRANE_MPC_OCP_PROGRESS_RATE_REFERENCE;
+
+static_assert(
+  kReducedProgress + 1U == kReducedProgressRate &&
+  kReducedProgressRate + 1U == kReducedActuatedForce,
+  "the progress pair sits between the lagged command and the force state, so the boxed rows "
+  "stay a contiguous prefix and v_s can carry a box at all");
+static_assert(
+  kInputProgressAccel == kOcpPlannedInputDof,
+  "the progress acceleration is the sixth input, after the five joint commands");
 constexpr std::array<std::size_t, kOcpCommandLagDof> kCommandLagAxes =
   CRANE_MPC_OCP_STATE_COMMAND_LAG_AXES;
 
@@ -97,6 +121,8 @@ constexpr std::size_t kResidualActuatedPosition = CRANE_MPC_OCP_RESIDUAL_PLANNED
 constexpr std::size_t kResidualActuatedVelocity = CRANE_MPC_OCP_RESIDUAL_PLANNED_VELOCITY;
 constexpr std::size_t kResidualPassivePosition = CRANE_MPC_OCP_RESIDUAL_PASSIVE_POSITION;
 constexpr std::size_t kResidualPassiveVelocity = CRANE_MPC_OCP_RESIDUAL_PASSIVE_VELOCITY;
+constexpr std::size_t kResidualLag = CRANE_MPC_OCP_RESIDUAL_LAG;
+constexpr std::size_t kResidualProgressRate = CRANE_MPC_OCP_RESIDUAL_PROGRESS_RATE;
 constexpr std::size_t kResidualActuatedForce = CRANE_MPC_OCP_RESIDUAL_ACTUATED_FORCE;
 constexpr std::size_t kResidualInput = CRANE_MPC_OCP_RESIDUAL_INPUT;
 
@@ -175,8 +201,29 @@ constexpr std::size_t kParameterPayloadMass = CRANE_MPC_OCP_PARAMETER_PAYLOAD_MA
 constexpr std::size_t kParameterPayloadCom = CRANE_MPC_OCP_PARAMETER_PAYLOAD_COM;
 constexpr std::size_t kParameterPayloadInertia = CRANE_MPC_OCP_PARAMETER_PAYLOAD_INERTIA;
 
+// This OCP's own half of `p`: the stage's nominal virtual time and the
+// second-order expansion of its reference about it. The cost evaluates the
+// reference at the progress state, and a spline cannot be baked into a
+// generated solver, so this local model is what carries `q_a,ref(s)` and both
+// of its derivatives into the gradient and the Gauss-Newton Hessian.
+constexpr std::size_t kParameterProgressNominal = CRANE_MPC_OCP_PARAMETER_PROGRESS_NOMINAL;
+constexpr std::size_t kParameterReferencePosition = CRANE_MPC_OCP_PARAMETER_REFERENCE_POSITION;
+constexpr std::size_t kParameterReferenceFirst = CRANE_MPC_OCP_PARAMETER_REFERENCE_FIRST;
+constexpr std::size_t kParameterReferenceSecond = CRANE_MPC_OCP_PARAMETER_REFERENCE_SECOND;
+
 constexpr std::array<std::array<int, 2>, 6> kInertiaEntries = {
   CRANE_MPC_OCP_PARAMETER_INERTIA_ENTRIES};
+
+/// Write one stage's reference expansion into `p`, in the export's own packing.
+void write_reference(ParameterVector & parameter, const OcpStage & stage)
+{
+  parameter[kParameterProgressNominal] = stage.progress_nominal;
+  for (std::size_t row = 0; row < kPlannedDof; ++row) {
+    parameter[kParameterReferencePosition + row] = stage.q_a_ref[row];
+    parameter[kParameterReferenceFirst + row] = stage.dq_a_ref[row];
+    parameter[kParameterReferenceSecond + row] = stage.ddq_a_ref[row];
+  }
+}
 
 ParameterVector parameter_vector(
   const crane_model::State & x, const crane_model::Payload & payload)
@@ -280,14 +327,19 @@ std::array<double, kPlannedDof> static_hold_force(
   return fallback;
 }
 
-ActuatorState seed_actuator(
+OcpOnlyState seed_ocp_only(
   const crane_model::Model & model, const crane_model::State & x,
-  const crane_model::Payload & payload, ActuatorState seeded)
+  const crane_model::Payload & payload, OcpOnlyState seeded)
 {
   for (std::size_t row = 0; row < kPlannedDof; ++row) {
     seeded.command_lag[row] = x[static_cast<Eigen::Index>(kStateActuatedVelocity + row)];
   }
   seeded.force = static_hold_force(model, x, payload, seeded.force);
+  // The plan is spent at nominal rate until a solve says otherwise: seeding the
+  // rate anywhere else would start every first horizon already behind or ahead
+  // of a plan nobody has yet decided to slow down.
+  seeded.progress = 0.0;
+  seeded.progress_rate = kProgressRateReference;
   return seeded;
 }
 
@@ -298,14 +350,16 @@ ActuatorState seed_actuator(
  * separately rather than by widening a contract the planner and the collision
  * model also read.
  */
-std::vector<double> reduce(const crane_model::State & x, const ActuatorState & actuator)
+std::vector<double> reduce(const crane_model::State & x, const OcpOnlyState & ocp_only)
 {
   std::vector<double> rows(static_cast<std::size_t>(kNx), 0.0);
   for (std::size_t slot = 0; slot < kOcpCommandLagDof; ++slot) {
-    rows[kReducedCommandLag + slot] = actuator.command_lag[kCommandLagAxes[slot]];
+    rows[kReducedCommandLag + slot] = ocp_only.command_lag[kCommandLagAxes[slot]];
   }
+  rows[kReducedProgress] = ocp_only.progress;
+  rows[kReducedProgressRate] = ocp_only.progress_rate;
   for (std::size_t row = 0; row < kPlannedDof; ++row) {
-    rows[kReducedActuatedForce + row] = actuator.force[row];
+    rows[kReducedActuatedForce + row] = ocp_only.force[row];
   }
   for (std::size_t row = 0; row < kPlannedDof; ++row) {
     rows[kReducedActuatedPosition + row] =
@@ -322,20 +376,22 @@ std::vector<double> reduce(const crane_model::State & x, const ActuatorState & a
   return rows;
 }
 
-/// The actuator half of an OCP vector, for the axes that have no lag state `u`.
-ActuatorState expand_actuator(const std::vector<double> & rows, const std::vector<double> & u)
+/// The OCP-only half of an OCP vector, for the axes that have no lag state `u`.
+OcpOnlyState expand_ocp_only(const std::vector<double> & rows, const std::vector<double> & u)
 {
-  ActuatorState actuator;
+  OcpOnlyState ocp_only;
   for (std::size_t row = 0; row < kPlannedDof; ++row) {
     // No lag state means the pole is at infinity, so the lagged command is the
     // command. Overwritten below for the axes that do carry one.
-    actuator.command_lag[row] = u.empty() ? 0.0 : u[row];
-    actuator.force[row] = rows[kReducedActuatedForce + row];
+    ocp_only.command_lag[row] = u.empty() ? 0.0 : u[row];
+    ocp_only.force[row] = rows[kReducedActuatedForce + row];
   }
   for (std::size_t slot = 0; slot < kOcpCommandLagDof; ++slot) {
-    actuator.command_lag[kCommandLagAxes[slot]] = rows[kReducedCommandLag + slot];
+    ocp_only.command_lag[kCommandLagAxes[slot]] = rows[kReducedCommandLag + slot];
   }
-  return actuator;
+  ocp_only.progress = rows[kReducedProgress];
+  ocp_only.progress_rate = rows[kReducedProgressRate];
+  return ocp_only;
 }
 
 crane_model::State expand(const std::vector<double> & rows, double q_tool)
@@ -358,12 +414,16 @@ crane_model::State expand(const std::vector<double> & rows, double q_tool)
   return x;
 }
 
-std::vector<double> reduce_input(const crane_model::Input & u)
+std::vector<double> reduce_input(const crane_model::Input & u, double progress_accel)
 {
   std::vector<double> rows(static_cast<std::size_t>(kNu), 0.0);
   for (std::size_t row = 0; row < kPlannedDof; ++row) {
     rows[row] = u[static_cast<Eigen::Index>(row)];
   }
+  // The progress acceleration is not an actuated axis, so it has no slot in
+  // `crane_model::Input`. Every caller off the solve path passes zero: it moves
+  // no joint and reaches neither the output map nor the constraint rows.
+  rows[kInputProgressAccel] = progress_accel;
   return rows;
 }
 
@@ -450,6 +510,21 @@ Status check_settings(const OcpSettings & settings)
   if (!std::isfinite(weights.terminal_scale) || weights.terminal_scale < 0.0) {
     return failure(ErrorCode::InvalidArgument, "the terminal weight scale must be finite and >= 0");
   }
+  if (!std::isfinite(weights.lag) || weights.lag < 0.0 ||
+    !std::isfinite(weights.progress_accel) || weights.progress_accel < 0.0)
+  {
+    return failure(
+      ErrorCode::InvalidArgument,
+      "the lag and progress-acceleration weights must be finite and >= 0, for the same reason "
+      "every other weight must: the Gauss-Newton Hessian is J' W J");
+  }
+  if (!std::isfinite(weights.progress_rate) || weights.progress_rate <= 0.0) {
+    return failure(
+      ErrorCode::InvalidArgument,
+      "the progress-rate weight must be finite and **positive**: it is the only price on spending "
+      "time, and at zero the optimizer stops the plan for free wherever tracking is hard, which "
+      "is a controller that never arrives rather than one that tracks time-indexed");
+  }
   const BoxLimits & limits = settings.limits;
   if (!all_finite(limits.q_a_lower) || !all_finite(limits.q_a_upper)) {
     return failure(
@@ -471,6 +546,21 @@ Status check_settings(const OcpSettings & settings)
       ErrorCode::InvalidArgument,
       "constraints 2 to 5 of mpc 3 each need a finite positive bound; an invented or absent one is "
       "the silent stub the model API contract 5 exists to prevent");
+  }
+  if (!std::isfinite(limits.progress_rate_max) ||
+    limits.progress_rate_max < kProgressRateReference)
+  {
+    return failure(
+      ErrorCode::InvalidArgument,
+      "the progress-rate ceiling must be finite and at least one; below one the reference could "
+      "never be spent at its own nominal rate, which is the behaviour every other page in the "
+      "wiki describes");
+  }
+  if (!std::isfinite(limits.progress_accel_max) || limits.progress_accel_max <= 0.0) {
+    return failure(
+      ErrorCode::InvalidArgument,
+      "the progress-acceleration bound must be finite and positive; at zero the progress rate is "
+      "frozen at whatever it was carried in with and the state is decoration");
   }
   if (!all_non_negative(limits.q_a_margin)) {
     return failure(
@@ -541,9 +631,9 @@ struct Ocp::Impl
     /// Kept for `h_eff`: C3's force-state seed and the effort term's reference.
   std::optional<crane_model::Model> model;
 
-    /// The OCP-only actuator state at `x_0`, carried from the last solve.
-  ActuatorState actuator{};
-  bool actuator_seeded{false};
+    /// The OCP-only state at `x_0`, carried from the last solve.
+  OcpOnlyState ocp_only{};
+  bool ocp_only_seeded{false};
 
     /// `h_eff` at `x_0`, the effort term's reference. See `Ocp::solve`.
   std::array<double, kPlannedDof> force_reference{};
@@ -622,7 +712,7 @@ double ConstraintViolation::worst() const noexcept
 
 double CostTerms::total() const noexcept
 {
-  return q_a + dq_a + q_u + dq_u + tau_a + u + terminal + slack;
+  return q_a + dq_a + q_u + dq_u + lag + progress + tau_a + u + terminal + slack;
 }
 
 const char * to_string(SolveOutcome outcome) noexcept
@@ -753,6 +843,15 @@ Result<std::unique_ptr<Ocp>> Ocp::create(
     impl->terminal_weight_diagonal[kResidualPassiveVelocity + row] =
       weights.terminal_scale * weights.dq_u[row];
   }
+  // The lag and progress rows are inside the terminal prefix, so they are priced
+  // at the terminal node too: a horizon that ends behind, or ends spending the
+  // plan at the wrong rate, pays for that beyond the horizon and not inside it.
+  impl->weight_diagonal[kResidualLag] = weights.lag;
+  impl->weight_diagonal[kResidualProgressRate] = weights.progress_rate;
+  impl->weight_diagonal[kResidualInput + kInputProgressAccel] = weights.progress_accel;
+  impl->terminal_weight_diagonal[kResidualLag] = weights.terminal_scale * weights.lag;
+  impl->terminal_weight_diagonal[kResidualProgressRate] =
+    weights.terminal_scale * weights.progress_rate;
   impl->weight_matrix.assign(static_cast<std::size_t>(kNy) * static_cast<std::size_t>(kNy), 0.0);
   for (std::size_t row = 0; row < impl->weight_diagonal.size(); ++row) {
     impl->weight_matrix[row * static_cast<std::size_t>(kNy) + row] = impl->weight_diagonal[row];
@@ -766,11 +865,12 @@ Result<std::unique_ptr<Ocp>> Ocp::create(
 
   impl->input_lower.resize(static_cast<std::size_t>(kNu));
   impl->input_upper.resize(static_cast<std::size_t>(kNu));
-  for (int row = 0; row < kNu; ++row) {
-    const std::size_t index = static_cast<std::size_t>(row);
+  for (std::size_t index = 0; index < kOcpPlannedInputDof; ++index) {
     impl->input_lower[index] = -settings.limits.u_max[index];
     impl->input_upper[index] = settings.limits.u_max[index];
   }
+  impl->input_lower[kInputProgressAccel] = -settings.limits.progress_accel_max;
+  impl->input_upper[kInputProgressAccel] = settings.limits.progress_accel_max;
   impl->reference.assign(static_cast<std::size_t>(kNy), 0.0);
   impl->terminal_reference.assign(static_cast<std::size_t>(kNyTerminal), 0.0);
   impl->lower_state.assign(static_cast<std::size_t>(kNx), 0.0);
@@ -850,8 +950,8 @@ Result<crane_model::State> Ocp::dynamics(
     return Result<crane_model::State>::failure(
       failure(ErrorCode::NonFiniteInput, "the state and the input must both be finite"));
   }
-  const std::vector<double> state = reduce(x, impl_->actuator);
-  const std::vector<double> input = reduce_input(u);
+  const std::vector<double> state = reduce(x, impl_->ocp_only);
+  const std::vector<double> input = reduce_input(u, 0.0);
   const ParameterVector parameter = parameter_vector(x, impl_->payload);
   std::vector<double> rows(static_cast<std::size_t>(kNx), 0.0);
   if (!explicit_ode(
@@ -895,8 +995,8 @@ Result<crane_model::Vector6> Ocp::output_block(
     return Result<crane_model::Vector6>::failure(
       failure(ErrorCode::NonFiniteInput, "the state and the input must both be finite"));
   }
-  const std::vector<double> state = reduce(x, impl_->actuator);
-  const std::vector<double> input = reduce_input(u);
+  const std::vector<double> state = reduce(x, impl_->ocp_only);
+  const std::vector<double> input = reduce_input(u, 0.0);
   const ParameterVector parameter = parameter_vector(x, impl_->payload);
   std::vector<double> rows(kOutputDof, 0.0);
   if (!crane_ocp::evaluate(
@@ -921,8 +1021,8 @@ Result<std::vector<double>> Ocp::nonlinear_constraint(
     return Result<std::vector<double>>::failure(
       failure(ErrorCode::NonFiniteInput, "the state and the input must both be finite"));
   }
-  const std::vector<double> state = reduce(x, impl_->actuator);
-  const std::vector<double> input = reduce_input(u);
+  const std::vector<double> state = reduce(x, impl_->ocp_only);
+  const std::vector<double> input = reduce_input(u, 0.0);
   const ParameterVector parameter = parameter_vector(x, impl_->payload);
   std::vector<double> rows(static_cast<std::size_t>(kNh), 0.0);
   if (!crane_ocp::evaluate(
@@ -963,11 +1063,13 @@ double Ocp::pump_flow_max() const noexcept
 }
 
 Result<std::vector<double>> Ocp::stage_residual(
-  const crane_model::State & x, const crane_model::Input & u) const
+  const crane_model::State & x, const OcpOnlyState & ocp_only, const crane_model::Input & u,
+  double progress_accel, const OcpStage & stage) const
 {
-  const std::vector<double> state = reduce(x, impl_->actuator);
-  const std::vector<double> input = reduce_input(u);
-  const ParameterVector parameter = parameter_vector(x, impl_->payload);
+  const std::vector<double> state = reduce(x, ocp_only);
+  const std::vector<double> input = reduce_input(u, progress_accel);
+  ParameterVector parameter = parameter_vector(x, impl_->payload);
+  write_reference(parameter, stage);
   const double time = 0.0;
   std::vector<double> rows(static_cast<std::size_t>(kNy), 0.0);
   if (!crane_ocp::evaluate(
@@ -981,10 +1083,12 @@ Result<std::vector<double>> Ocp::stage_residual(
   return Result<std::vector<double>>::success(std::move(rows));
 }
 
-Result<std::vector<double>> Ocp::terminal_residual(const crane_model::State & x) const
+Result<std::vector<double>> Ocp::terminal_residual(
+  const crane_model::State & x, const OcpOnlyState & ocp_only, const OcpStage & stage) const
 {
-  const std::vector<double> state = reduce(x, impl_->actuator);
-  const ParameterVector parameter = parameter_vector(x, impl_->payload);
+  const std::vector<double> state = reduce(x, ocp_only);
+  ParameterVector parameter = parameter_vector(x, impl_->payload);
+  write_reference(parameter, stage);
   const double time = 0.0;
   std::vector<double> rows(static_cast<std::size_t>(kNyTerminal), 0.0);
   if (!crane_ocp::evaluate(
@@ -1103,12 +1207,26 @@ InitialGuess shifted(const OcpSolution & previous)
 
   // The OCP-only rows shift with the states they belong to; leaving them out
   // would hand the next solve a warm start that is cold on the actuator alone.
-  if (previous.actuator.size() == nodes) {
-    guess.actuator.resize(nodes);
+  if (previous.ocp_only.size() == nodes) {
+    guess.ocp_only.resize(nodes);
     for (std::size_t stage = 0; stage + 1U < nodes; ++stage) {
-      guess.actuator[stage] = previous.actuator[stage + 1U];
+      guess.ocp_only[stage] = previous.ocp_only[stage + 1U];
     }
-    guess.actuator.back() = previous.actuator.back();
+    guess.ocp_only.back() = previous.ocp_only.back();
+    // `s` restarts at zero every cycle and the caller advances the reference
+    // origin by `progress_advance` instead, so the carried plan has to be
+    // re-expressed against the new origin or the warm start would be a horizon
+    // whose progress rows all sit one interval in the past.
+    for (OcpOnlyState & node : guess.ocp_only) {
+      node.progress = std::max(0.0, node.progress - previous.progress_advance);
+    }
+  }
+  if (previous.progress_accel.size() == intervals) {
+    guess.progress_accel.resize(intervals);
+    for (std::size_t stage = 0; stage + 1U < intervals; ++stage) {
+      guess.progress_accel[stage] = previous.progress_accel[stage + 1U];
+    }
+    guess.progress_accel.back() = previous.progress_accel.back();
   }
   return guess;
 }
@@ -1130,9 +1248,20 @@ Result<OcpSolution> Ocp::solve(
       failure(ErrorCode::NonFiniteInput, "x_0 is not finite"));
   }
   for (const OcpStage & stage : stages) {
-    if (!all_finite(stage.q_a_ref) || !all_finite(stage.dq_a_ref) || !all_finite(stage.q_eq)) {
+    // `ddq_a_ref` and `progress_nominal` are checked here for the same reason the
+    // other three are, and it is sharper for the curvature: it is the one row in
+    // the chain a short reference segment can destroy -- the resample's Hermite
+    // second derivative carries `1/dt^2` in the *incoming* knot spacing, which
+    // nothing bounds from below -- and it reaches every stage of the horizon
+    // through `p`, multiplied by `ds^2`, into a Gauss-Newton Hessian.
+    if (!all_finite(stage.q_a_ref) || !all_finite(stage.dq_a_ref) ||
+      !all_finite(stage.ddq_a_ref) || !all_finite(stage.q_eq) ||
+      !std::isfinite(stage.progress_nominal))
+    {
       return Result<OcpSolution>::failure(
-        failure(ErrorCode::NonFiniteInput, "the reference or an equilibrium is not finite"));
+        failure(
+          ErrorCode::NonFiniteInput,
+          "the reference, its curvature, its expansion point or an equilibrium is not finite"));
     }
   }
 
@@ -1148,12 +1277,21 @@ Result<OcpSolution> Ocp::solve(
   // quantity re-derived every cycle -- the force state is real and persists --
   // and re-seeding on a payload change is because `h_eff` moves discontinuously
   // at a grasp, which is the same reason the warm start is dropped there.
-  if (!impl_->actuator_seeded || impl_->payload_changed) {
+  if (!impl_->ocp_only_seeded || impl_->payload_changed) {
     if (impl_->model.has_value()) {
-      impl_->actuator = seed_actuator(*impl_->model, x0, impl_->payload, impl_->actuator);
+      impl_->ocp_only = seed_ocp_only(*impl_->model, x0, impl_->payload, impl_->ocp_only);
     }
-    impl_->actuator_seeded = true;
+    impl_->ocp_only_seeded = true;
   }
+
+  // **The progress restart** (`timber_crane_mpc.cpp:173-181`). `s` is pinned at
+  // zero at stage 0 on every cycle; what the last cycle bought is carried by the
+  // caller advancing the reference origin by `progress_advance` instead. Letting
+  // `s` accumulate would make the expansion point of every stage's reference
+  // drift away from zero over a long move for no gain in what is expressed.
+  // The **rate** is carried forward, because it is the real state here: it is
+  // what says how fast the plan is currently being spent.
+  impl_->ocp_only.progress = 0.0;
 
   // **The effort term of `wiki/mpc.md` 2 references `h_eff`, not zero** (issue
   // 117). 2 prices `tau_a` rather than `u` so that the price of an acceleration
@@ -1172,20 +1310,26 @@ Result<OcpSolution> Ocp::solve(
     impl_->force_reference =
       static_hold_force(*impl_->model, x0, impl_->payload, impl_->force_reference);
   }
-  const std::vector<double> reduced_x0 = reduce(x0, impl_->actuator);
+  const std::vector<double> reduced_x0 = reduce(x0, impl_->ocp_only);
 
   for (int stage = 0; stage <= intervals; ++stage) {
     const OcpStage & node = stages[static_cast<std::size_t>(stage)];
 
+    // The reference travels in `p`, not in `yref`. `q_a,ref(s)` is a function of
+    // the progress state and acados subtracts `yref` as a constant, so the
+    // tracking rows carry their own reference inside the residual and their
+    // `yref` is zero. That also leaves exactly one home for the reference.
+    write_reference(parameter, node);
     static_cast<void>(impl_->acados->set_parameters(stage, parameter.data(), kNp));
 
     std::vector<double> & reference =
       stage < intervals ? impl_->reference : impl_->terminal_reference;
     std::fill(reference.begin(), reference.end(), 0.0);
-    for (std::size_t row = 0; row < kPlannedDof; ++row) {
-      reference[kResidualActuatedPosition + row] = node.q_a_ref[row];
-      reference[kResidualActuatedVelocity + row] = node.dq_a_ref[row];
-    }
+    // The progress row is a regulator toward one second of plan per second of
+    // wall clock -- a quadratic on the rate, not a linear reward on progress.
+    // That is what makes the nominal behaviour exactly time-indexed tracking and
+    // deviation something the optimizer has to buy.
+    reference[kResidualProgressRate] = kProgressRateReference;
     if (stage < intervals) {
       for (std::size_t row = 0; row < kPlannedDof; ++row) {
         reference[kResidualActuatedForce + row] = impl_->force_reference[row];
@@ -1229,6 +1373,19 @@ Result<OcpSolution> Ocp::solve(
         impl_->lower_state[kReducedCommandLag + slot] = -limits.u_max[axis];
         impl_->upper_state[kReducedCommandLag + slot] = limits.u_max[axis];
       }
+      // The progress pair. The rate's floor is zero because the machine does not
+      // run the plan backwards; the parameter's own box follows from that floor
+      // and the ceiling and is not a second knob. It is **per stage** and it is
+      // the exactly reachable set: `s` starts each cycle at zero, so by stage `k`
+      // it cannot have outrun `k T_s` spent at the fastest rate allowed. A single
+      // horizon-wide bound would leave the early stages free to place `s` far
+      // from their own expansion point, where the second-order model of the
+      // reference is a curve that was never planned.
+      impl_->lower_state[kReducedProgress] = 0.0;
+      impl_->upper_state[kReducedProgress] =
+        static_cast<double>(stage) * impl_->settings.sample_time_s * limits.progress_rate_max;
+      impl_->lower_state[kReducedProgressRate] = 0.0;
+      impl_->upper_state[kReducedProgressRate] = limits.progress_rate_max;
     }
     impl_->acados->set_constraint(stage, "lbx", impl_->lower_state.data());
     impl_->acados->set_constraint(stage, "ubx", impl_->upper_state.data());
@@ -1267,16 +1424,21 @@ Result<OcpSolution> Ocp::solve(
   std::vector<double> rest(static_cast<std::size_t>(kNu), 0.0);
   for (int stage = 0; stage <= intervals; ++stage) {
     const OcpStage & node = stages[static_cast<std::size_t>(stage)];
-    const ActuatorState & guessed =
-      guess.actuator.size() == nodes ? guess.actuator[static_cast<std::size_t>(stage)]
-      : impl_->actuator;
+    const OcpOnlyState & guessed =
+      guess.ocp_only.size() == nodes ? guess.ocp_only[static_cast<std::size_t>(stage)]
+      : impl_->ocp_only;
     impl_->guess = reduce(initial_state[static_cast<std::size_t>(stage)], guessed);
     if (stage < intervals) {
+      const double accel = guess.progress_accel.size() == static_cast<std::size_t>(intervals) ?
+        guess.progress_accel[static_cast<std::size_t>(stage)] : 0.0;
       const std::vector<double> applied =
-        reduce_input(initial_input[static_cast<std::size_t>(stage)]);
-      for (std::size_t row = 0; row < kOcpInputDof; ++row) {
+        reduce_input(initial_input[static_cast<std::size_t>(stage)], accel);
+      for (std::size_t row = 0; row < kOcpPlannedInputDof; ++row) {
         rest[row] = std::clamp(applied[row], -limits.u_max[row], limits.u_max[row]);
       }
+      rest[kInputProgressAccel] = std::clamp(
+        std::isfinite(applied[kInputProgressAccel]) ? applied[kInputProgressAccel] : 0.0,
+        -limits.progress_accel_max, limits.progress_accel_max);
     }
     if (stage > 0) {
       for (std::size_t row = 0; row < kPlannedDof; ++row) {
@@ -1302,6 +1464,12 @@ Result<OcpSolution> Ocp::solve(
         impl_->guess[kReducedCommandLag + slot] = std::clamp(
           impl_->guess[kReducedCommandLag + slot], -limits.u_max[axis], limits.u_max[axis]);
       }
+      impl_->guess[kReducedProgress] = std::clamp(
+        impl_->guess[kReducedProgress], 0.0,
+        static_cast<double>(stage) * impl_->settings.sample_time_s *
+        limits.progress_rate_max);
+      impl_->guess[kReducedProgressRate] =
+        std::clamp(impl_->guess[kReducedProgressRate], 0.0, limits.progress_rate_max);
     }
     impl_->acados->set_iterate(stage, "x", impl_->guess.data());
     if (stage < intervals) {
@@ -1330,13 +1498,15 @@ Result<OcpSolution> Ocp::solve(
   solution.budget_exceeded = solution.solve_time_s > impl_->settings.solve_budget_s;
 
   solution.states.resize(static_cast<std::size_t>(intervals) + 1U);
-  solution.actuator.resize(static_cast<std::size_t>(intervals) + 1U);
+  solution.ocp_only.resize(static_cast<std::size_t>(intervals) + 1U);
   solution.inputs.resize(static_cast<std::size_t>(intervals));
+  solution.progress_accel.resize(static_cast<std::size_t>(intervals));
   std::vector<double> row(static_cast<std::size_t>(kNx), 0.0);
   std::vector<double> input(static_cast<std::size_t>(kNu), 0.0);
   for (int stage = 0; stage < intervals; ++stage) {
     impl_->acados->get_iterate(stage, "u", input.data());
     solution.inputs[static_cast<std::size_t>(stage)] = expand_input(input);
+    solution.progress_accel[static_cast<std::size_t>(stage)] = input[kInputProgressAccel];
   }
   for (int stage = 0; stage <= intervals; ++stage) {
     impl_->acados->get_iterate(stage, "x", row.data());
@@ -1346,9 +1516,24 @@ Result<OcpSolution> Ocp::solve(
     const std::size_t applied =
       static_cast<std::size_t>(stage < intervals ? stage : intervals - 1);
     impl_->acados->get_iterate(static_cast<int>(applied), "u", input.data());
-    solution.actuator[static_cast<std::size_t>(stage)] = expand_actuator(row, input);
+    solution.ocp_only[static_cast<std::size_t>(stage)] = expand_ocp_only(row, input);
   }
   solution.u0 = solution.inputs.front();
+  // How far this horizon spends the plan over the interval that is about to be
+  // applied. `T_s` at nominal rate, less when the optimizer has bought time.
+  //
+  // **Clamped, and not because the number is untrusted in principle.** Under RTI
+  // this is the QP's own iterate at node one, so it satisfies the *linearised*
+  // dynamics rather than the integrated ones; a badly conditioned step can put it
+  // outside what `0 <= v_s <= v_s^max` makes reachable over one interval. The
+  // consumer advances the reference origin by it, and an origin that jumped would
+  // skip plan the machine never tracked -- a silent one, since every state stays
+  // finite. The clamp is the same two numbers the box carries and adds no knob.
+  const double advance =
+    solution.ocp_only.size() > 1U ? solution.ocp_only[1].progress : 0.0;
+  const double advance_ceiling = impl_->settings.sample_time_s * limits.progress_rate_max;
+  solution.progress_advance =
+    std::isfinite(advance) ? std::clamp(advance, 0.0, advance_ceiling) : 0.0;
 
   solution.slack.assign(static_cast<std::size_t>(intervals) + 1U, ConstraintSlack{});
   std::vector<double> lower_slack(impl_->slack_rest.size(), 0.0);
@@ -1433,14 +1618,16 @@ Result<OcpSolution> Ocp::solve(
   // Carry the actuator state one interval forward, which is where the next cycle
   // starts. A failed solve leaves the previous estimate in place rather than
   // adopting a horizon nobody accepted.
-  if (solution.outcome != SolveOutcome::Failed && solution.actuator.size() > 1U) {
-    const ActuatorState & next = solution.actuator[1];
+  if (solution.outcome != SolveOutcome::Failed && solution.ocp_only.size() > 1U) {
+    const OcpOnlyState & next = solution.ocp_only[1];
     const auto usable = [](const std::array<double, kPlannedDof> & values) {
         return std::all_of(
           values.begin(), values.end(), [](double value) {return std::isfinite(value);});
       };
-    if (usable(next.command_lag) && usable(next.force)) {
-      impl_->actuator = next;
+    if (usable(next.command_lag) && usable(next.force) && std::isfinite(next.progress) &&
+      std::isfinite(next.progress_rate))
+    {
+      impl_->ocp_only = next;
     }
   }
 
@@ -1470,8 +1657,21 @@ Result<CostTerms> Ocp::cost_terms(
       return 0.5 * weight * error * error;
     };
 
+  const bool carried = solution.ocp_only.size() == intervals + 1U &&
+    solution.progress_accel.size() == intervals;
+  if (!carried) {
+    return Result<CostTerms>::failure(
+      failure(
+        ErrorCode::InvalidArgument,
+        "the cost of mpc 2 needs the solution's OCP-only rows and its progress input: the "
+        "reference is evaluated at the progress state, so a residual re-evaluated without them "
+        "would price a different problem than the solver minimised"));
+  }
+
   for (std::size_t stage = 0; stage < intervals; ++stage) {
-    auto y = stage_residual(solution.states[stage], solution.inputs[stage]);
+    auto y = stage_residual(
+      solution.states[stage], solution.ocp_only[stage], solution.inputs[stage],
+      solution.progress_accel[stage], stages[stage]);
     if (!y.ok()) {
       return Result<CostTerms>::failure(y.status());
     }
@@ -1483,18 +1683,26 @@ Result<CostTerms> Ocp::cost_terms(
           "the stage residual of mpc 2 came back the wrong length"));
     }
     const OcpStage & node = stages[stage];
+    // The tracking rows carry their own reference, so their `yref` is zero here
+    // exactly as it is in the solve. Pricing them against `q_a_ref` a second
+    // time would double-count the reference and report a term the solver never
+    // minimised.
     for (std::size_t index = 0; index < kPlannedDof; ++index) {
       terms.q_a += add(
-        weights[kResidualActuatedPosition + index], row[kResidualActuatedPosition + index],
-        node.q_a_ref[index]);
+        weights[kResidualActuatedPosition + index], row[kResidualActuatedPosition + index], 0.0);
       terms.dq_a += add(
-        weights[kResidualActuatedVelocity + index], row[kResidualActuatedVelocity + index],
-        node.dq_a_ref[index]);
+        weights[kResidualActuatedVelocity + index], row[kResidualActuatedVelocity + index], 0.0);
       terms.tau_a += add(
         weights[kResidualActuatedForce + index], row[kResidualActuatedForce + index],
         impl_->force_reference[index]);
       terms.u += add(weights[kResidualInput + index], row[kResidualInput + index], 0.0);
     }
+    terms.u += add(
+      weights[kResidualInput + kInputProgressAccel], row[kResidualInput + kInputProgressAccel],
+      0.0);
+    terms.lag += add(weights[kResidualLag], row[kResidualLag], 0.0);
+    terms.progress += add(
+      weights[kResidualProgressRate], row[kResidualProgressRate], kProgressRateReference);
     for (std::size_t index = 0; index < crane_model::kPassiveDof; ++index) {
       terms.q_u += add(
         weights[kResidualPassivePosition + index], row[kResidualPassivePosition + index],
@@ -1504,7 +1712,8 @@ Result<CostTerms> Ocp::cost_terms(
     }
   }
 
-  auto terminal_row = terminal_residual(solution.states[intervals]);
+  auto terminal_row = terminal_residual(
+    solution.states[intervals], solution.ocp_only[intervals], stages[intervals]);
   if (!terminal_row.ok()) {
     return Result<CostTerms>::failure(terminal_row.status());
   }
@@ -1518,11 +1727,16 @@ Result<CostTerms> Ocp::cost_terms(
   for (std::size_t index = 0; index < kPlannedDof; ++index) {
     terms.terminal += add(
       terminal[kResidualActuatedPosition + index],
-      terminal_row.value()[kResidualActuatedPosition + index], last.q_a_ref[index]);
+      terminal_row.value()[kResidualActuatedPosition + index], 0.0);
     terms.terminal += add(
       terminal[kResidualActuatedVelocity + index],
-      terminal_row.value()[kResidualActuatedVelocity + index], last.dq_a_ref[index]);
+      terminal_row.value()[kResidualActuatedVelocity + index], 0.0);
   }
+  terms.terminal += add(
+    terminal[kResidualLag], terminal_row.value()[kResidualLag], 0.0);
+  terms.terminal += add(
+    terminal[kResidualProgressRate], terminal_row.value()[kResidualProgressRate],
+    kProgressRateReference);
   for (std::size_t index = 0; index < crane_model::kPassiveDof; ++index) {
     terms.terminal += add(
       terminal[kResidualPassivePosition + index],

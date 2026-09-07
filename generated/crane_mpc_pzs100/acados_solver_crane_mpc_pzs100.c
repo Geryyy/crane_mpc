@@ -244,7 +244,7 @@ static ocp_nlp_dims* crane_mpc_pzs100_acados_create_setup_dimensions(crane_mpc_p
     nbx[0] = NBX0;
     nsbx[0] = 0;
     ns[0] = NS0;
-    nbxe[0] = 23;
+    nbxe[0] = 25;
     ny[0] = NY0;
     nh[0] = NH0;
     nsh[0] = NSH0;
@@ -551,6 +551,9 @@ void crane_mpc_pzs100_acados_setup_nlp_in(crane_mpc_pzs100_solver_capsule* capsu
     W_0[21+(NY0) * 21] = 1;
     W_0[22+(NY0) * 22] = 1;
     W_0[23+(NY0) * 23] = 1;
+    W_0[24+(NY0) * 24] = 1;
+    W_0[25+(NY0) * 25] = 1;
+    W_0[26+(NY0) * 26] = 1;
     ocp_nlp_cost_model_set(nlp_config, nlp_dims, nlp_in, 0, "W", W_0);
     free(W_0);
     double* yref = calloc(NY, sizeof(double));
@@ -587,6 +590,9 @@ void crane_mpc_pzs100_acados_setup_nlp_in(crane_mpc_pzs100_solver_capsule* capsu
     W[21+(NY) * 21] = 1;
     W[22+(NY) * 22] = 1;
     W[23+(NY) * 23] = 1;
+    W[24+(NY) * 24] = 1;
+    W[25+(NY) * 25] = 1;
+    W[26+(NY) * 26] = 1;
 
     for (int i = 1; i < N; i++)
     {
@@ -614,6 +620,8 @@ void crane_mpc_pzs100_acados_setup_nlp_in(crane_mpc_pzs100_solver_capsule* capsu
     W_e[11+(NYN) * 11] = 1;
     W_e[12+(NYN) * 12] = 1;
     W_e[13+(NYN) * 13] = 1;
+    W_e[14+(NYN) * 14] = 1;
+    W_e[15+(NYN) * 15] = 1;
     ocp_nlp_cost_model_set(nlp_config, nlp_dims, nlp_in, N, "W", W_e);
     free(W_e);
     ocp_nlp_cost_model_set_external_param_fun(nlp_config, nlp_dims, nlp_in, 0, "nls_y_fun", &capsule->cost_y_0_fun);
@@ -743,6 +751,8 @@ void crane_mpc_pzs100_acados_setup_nlp_in(crane_mpc_pzs100_solver_capsule* capsu
     idxbx0[20] = 20;
     idxbx0[21] = 21;
     idxbx0[22] = 22;
+    idxbx0[23] = 23;
+    idxbx0[24] = 24;
 
     double* lubx0 = calloc(2*NBX0, sizeof(double));
     double* lbx0 = lubx0;
@@ -755,7 +765,7 @@ void crane_mpc_pzs100_acados_setup_nlp_in(crane_mpc_pzs100_solver_capsule* capsu
     free(idxbx0);
     free(lubx0);
     // idxbxe_0
-    int* idxbxe_0 = malloc(23 * sizeof(int));
+    int* idxbxe_0 = malloc(25 * sizeof(int));
     idxbxe_0[0] = 0;
     idxbxe_0[1] = 1;
     idxbxe_0[2] = 2;
@@ -779,6 +789,8 @@ void crane_mpc_pzs100_acados_setup_nlp_in(crane_mpc_pzs100_solver_capsule* capsu
     idxbxe_0[20] = 20;
     idxbxe_0[21] = 21;
     idxbxe_0[22] = 22;
+    idxbxe_0[23] = 23;
+    idxbxe_0[24] = 24;
     ocp_nlp_constraints_model_set(nlp_config, nlp_dims, nlp_in, 0, "idxbxe", idxbxe_0);
     free(idxbxe_0);
 
@@ -862,6 +874,7 @@ void crane_mpc_pzs100_acados_setup_nlp_in(crane_mpc_pzs100_solver_capsule* capsu
     idxbu[2] = 2;
     idxbu[3] = 3;
     idxbu[4] = 4;
+    idxbu[5] = 5;
     double* lubu = calloc(2*NBU, sizeof(double));
     double* lbu = lubu;
     double* ubu = lubu + NBU;
@@ -875,6 +888,8 @@ void crane_mpc_pzs100_acados_setup_nlp_in(crane_mpc_pzs100_solver_capsule* capsu
     ubu[3] = 1;
     lbu[4] = -1;
     ubu[4] = 1;
+    lbu[5] = -1;
+    ubu[5] = 1;
 
     for (int i = 0; i < N; i++)
     {
@@ -932,6 +947,8 @@ void crane_mpc_pzs100_acados_setup_nlp_in(crane_mpc_pzs100_solver_capsule* capsu
     idxbx[15] = 15;
     idxbx[16] = 16;
     idxbx[17] = 17;
+    idxbx[18] = 18;
+    idxbx[19] = 19;
     double* lubx = calloc(2*NBX, sizeof(double));
     double* lbx = lubx;
     double* ubx = lubx + NBX;
@@ -971,6 +988,10 @@ void crane_mpc_pzs100_acados_setup_nlp_in(crane_mpc_pzs100_solver_capsule* capsu
     ubx[16] = 1;
     lbx[17] = -1;
     ubx[17] = 1;
+    lbx[18] = -1;
+    ubx[18] = 1;
+    lbx[19] = -1;
+    ubx[19] = 1;
 
     for (int i = 1; i < N; i++)
     {
@@ -1039,6 +1060,8 @@ void crane_mpc_pzs100_acados_setup_nlp_in(crane_mpc_pzs100_solver_capsule* capsu
     idxbx_e[15] = 15;
     idxbx_e[16] = 16;
     idxbx_e[17] = 17;
+    idxbx_e[18] = 18;
+    idxbx_e[19] = 19;
     double* lubx_e = calloc(2*NBXN, sizeof(double));
     double* lbx_e = lubx_e;
     double* ubx_e = lubx_e + NBXN;
@@ -1078,6 +1101,10 @@ void crane_mpc_pzs100_acados_setup_nlp_in(crane_mpc_pzs100_solver_capsule* capsu
     ubx_e[16] = 1;
     lbx_e[17] = -1;
     ubx_e[17] = 1;
+    lbx_e[18] = -1;
+    ubx_e[18] = 1;
+    lbx_e[19] = -1;
+    ubx_e[19] = 1;
     ocp_nlp_constraints_model_set(nlp_config, nlp_dims, nlp_in, N, "idxbx", idxbx_e);
     ocp_nlp_constraints_model_set(nlp_config, nlp_dims, nlp_in, N, "lbx", lbx_e);
     ocp_nlp_constraints_model_set(nlp_config, nlp_dims, nlp_in, N, "ubx", ubx_e);
@@ -1400,7 +1427,7 @@ int crane_mpc_pzs100_acados_update_params(crane_mpc_pzs100_solver_capsule* capsu
 {
     int solver_status = 0;
 
-    int casadi_np = 11;
+    int casadi_np = 27;
     if (casadi_np != np) {
         printf("acados_update_params: trying to set %i parameters for external functions."
             " External function has %i parameters. Exiting.\n", np, casadi_np);

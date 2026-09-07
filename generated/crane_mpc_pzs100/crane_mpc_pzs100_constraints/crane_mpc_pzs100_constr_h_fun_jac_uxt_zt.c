@@ -36,7 +36,6 @@ extern "C" {
 #define casadi_s3 CASADI_PREFIX(s3)
 #define casadi_s4 CASADI_PREFIX(s4)
 #define casadi_s5 CASADI_PREFIX(s5)
-#define casadi_s6 CASADI_PREFIX(s6)
 #define casadi_sq CASADI_PREFIX(sq)
 
 /* Symbol visibility in DLLs */
@@ -56,18 +55,17 @@ extern "C" {
 
 casadi_real casadi_sq(casadi_real x) { return x*x;}
 
-static const casadi_int casadi_s0[3] = {23, 1, 1};
-static const casadi_int casadi_s1[3] = {5, 1, 1};
+static const casadi_int casadi_s0[3] = {25, 1, 1};
+static const casadi_int casadi_s1[3] = {6, 1, 1};
 static const casadi_int casadi_s2[3] = {0, 0, 1};
-static const casadi_int casadi_s3[3] = {11, 1, 1};
-static const casadi_int casadi_s4[3] = {6, 1, 1};
-static const casadi_int casadi_s5[23] =
-  {28, 6, 0, 1, 3, 5, 6, 7,
-  14, 23, 6, 24, 7, 25, 26, 27,
-  6, 7, 12, 13, 14, 15, 16};
-static const casadi_int casadi_s6[3] = {6, 0, 1};
+static const casadi_int casadi_s3[3] = {27, 1, 1};
+static const casadi_int casadi_s4[23] =
+  {31, 6, 0, 1, 3, 5, 6, 7,
+  14, 26, 7, 27, 8, 28, 29, 30,
+  7, 8, 13, 14, 15, 16, 17};
+static const casadi_int casadi_s5[3] = {6, 0, 1};
 
-/* crane_mpc_pzs100_constr_h_fun_jac_uxt_zt:(i0[23],i1[5],i2[],i3[11])->(o0[6],o1[28x6,14nz],o2[6x0]) */
+/* crane_mpc_pzs100_constr_h_fun_jac_uxt_zt:(i0[25],i1[6],i2[],i3[27])->(o0[6],o1[31x6,14nz],o2[6x0]) */
 static int casadi_f0(const casadi_real** arg, casadi_real** res, casadi_int* iw, casadi_real* w, int mem) {
   casadi_real a00, a01, a02, a03, a04, a05, a06, a07, a08, a09, a10, a11;
   casadi_real a12, a13, a14, a15, a16, a17, a18, a19, a20, a21, a22, a23;
@@ -77,13 +75,13 @@ static int casadi_f0(const casadi_real** arg, casadi_real** res, casadi_int* iw,
   casadi_real a60, a61, a62, a63, a64, a65, a66, a67, a68, a69, a70, a71;
   casadi_real a72, a73, a74, a75, a76, a77, a78, a79, a80, a81, a82, a83;
   casadi_real a84, a85, a86;
-  a00=arg[0]? arg[0][18] : 0;
+  a00=arg[0]? arg[0][20] : 0;
   a01=1.0000000000000001e-01;
   a00=(a00/a01);
   a02=318100.;
   a00=(a00/a02);
   if (res[0]!=0) res[0][0]=a00;
-  a00=arg[0]? arg[0][19] : 0;
+  a00=arg[0]? arg[0][21] : 0;
   a03=-1.2000000000000000e-01;
   a04=3.0952399999999997e-01;
   a05=4.5387999999999984e-01;
@@ -171,7 +169,7 @@ static int casadi_f0(const casadi_real** arg, casadi_real** res, casadi_int* iw,
   a36=384850.;
   a36=(a00/a36);
   if (res[0]!=0) res[0][1]=a36;
-  a36=arg[0]? arg[0][20] : 0;
+  a36=arg[0]? arg[0][22] : 0;
   a37=-1.1801100000000003e-01;
   a38=arg[0]? arg[0][2] : 0;
   a39=sin(a38);
@@ -198,11 +196,11 @@ static int casadi_f0(const casadi_real** arg, casadi_real** res, casadi_int* iw,
   a36=(a36/a44);
   a02=(a36/a02);
   if (res[0]!=0) res[0][2]=a02;
-  a02=arg[0]? arg[0][21] : 0;
+  a02=arg[0]? arg[0][23] : 0;
   a47=9.6212500000000000e+04;
   a02=(a02/a47);
   if (res[0]!=0) res[0][3]=a02;
-  a02=arg[0]? arg[0][22] : 0;
+  a02=arg[0]? arg[0][24] : 0;
   a47=3.5809999999999995e+03;
   a02=(a02/a47);
   if (res[0]!=0) res[0][4]=a02;
@@ -706,9 +704,9 @@ CASADI_SYMBOL_EXPORT const casadi_int* crane_mpc_pzs100_constr_h_fun_jac_uxt_zt_
 
 CASADI_SYMBOL_EXPORT const casadi_int* crane_mpc_pzs100_constr_h_fun_jac_uxt_zt_sparsity_out(casadi_int i) {
   switch (i) {
-    case 0: return casadi_s4;
-    case 1: return casadi_s5;
-    case 2: return casadi_s6;
+    case 0: return casadi_s1;
+    case 1: return casadi_s4;
+    case 2: return casadi_s5;
     default: return 0;
   }
 }

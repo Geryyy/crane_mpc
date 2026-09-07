@@ -90,6 +90,10 @@ def seed_state(path: Path, model, payload: np.ndarray) -> np.ndarray:
         state[cs.X_PASSIVE_VELOCITY + index] = float(row[f"dq_{name}"])
     for slot, axis in enumerate(cs.K_LAG_AXES):
         state[cs.X_COMMAND_LAG + slot] = state[cs.X_PLANNED_VELOCITY + axis]
+    # The plan is being spent at its nominal rate at the pinned state; a zero
+    # rate would be a machine that has stopped following, which is a different
+    # problem to time.
+    state[cs.X_PROGRESS_RATE] = export_ocp.K_PROGRESS_RATE_REFERENCE
     static = ca.Function(
         "breakdown_static", [model.x, model.p], [model.actuated_force_static]
     )
@@ -140,7 +144,23 @@ def main() -> int:
         payload = mpc_a2b.parameter_vector(namespace)
         state = seed_state(cli.seed, model, payload)
         for stage in range(intervals + 1):
-            solver.set(stage, "p", payload)
+            # `p` also carries the stage's local reference model now. This tool
+            # times one pinned state, so the reference is the state's own pose
+            # held still: a zero first and second derivative is a plan that is
+            # not moving, which is what a single-state timing probe means.
+            solver.set(
+                stage,
+                "p",
+                mpc_a2b.stage_parameters(
+                    payload,
+                    stage * float(namespace.dt or parameters["Ts"]),
+                    state[
+                        cs.X_PLANNED_POSITION : cs.X_PLANNED_POSITION + cs.K_PLANNED_DOF
+                    ],
+                    np.zeros(cs.K_PLANNED_DOF),
+                    np.zeros(cs.K_PLANNED_DOF),
+                ),
+            )
         solver.set(0, "lbx", state)
         solver.set(0, "ubx", state)
 

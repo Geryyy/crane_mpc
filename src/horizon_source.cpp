@@ -52,7 +52,8 @@ bool finite(const std::array<double, crane_model::kActuatedDof> & row)
 void hermite(
   const Knot & left, const Knot & right, double t,
   std::array<double, crane_model::kActuatedDof> & q_a_ref,
-  std::array<double, crane_model::kActuatedDof> & dq_a_ref)
+  std::array<double, crane_model::kActuatedDof> & dq_a_ref,
+  std::array<double, crane_model::kActuatedDof> & ddq_a_ref)
 {
   const double dt = right.t - left.t;
   const double s = (t - left.t) / dt;
@@ -69,6 +70,15 @@ void hermite(
   const double d01 = -6.0 * s2 + 6.0 * s;
   const double d11 = 3.0 * s2 - 2.0 * s;
 
+  // The same polynomial differentiated once more. The MPC evaluates the
+  // reference at its progress state, so it needs the curvature of the curve the
+  // resample is already drawing -- taken from the interpolant rather than from
+  // the message, which carries no accelerations.
+  const double e00 = 12.0 * s - 6.0;
+  const double e10 = 6.0 * s - 4.0;
+  const double e01 = -12.0 * s + 6.0;
+  const double e11 = 6.0 * s - 2.0;
+
   for (std::size_t axis = 0; axis < crane_model::kActuatedDof; ++axis) {
     const double q0 = left.q_a_ref[axis];
     const double q1 = right.q_a_ref[axis];
@@ -76,6 +86,7 @@ void hermite(
     const double v1 = right.dq_a_ref[axis];
     q_a_ref[axis] = h00 * q0 + h10 * dt * v0 + h01 * q1 + h11 * dt * v1;
     dq_a_ref[axis] = (d00 * q0 + d01 * q1) / dt + d10 * v0 + d11 * v1;
+    ddq_a_ref[axis] = (e00 * q0 + e01 * q1) / (dt * dt) + (e10 * v0 + e11 * v1) / dt;
   }
 }
 
@@ -137,6 +148,7 @@ ResampleRejection resample(
     if (t >= reference.back().t) {
       horizon[index].q_a_ref = reference.back().q_a_ref;
       horizon[index].dq_a_ref.fill(0.0);
+      horizon[index].ddq_a_ref.fill(0.0);
       continue;
     }
     while (segment + 2 < reference.size() && reference[segment + 1].t <= t) {
@@ -144,7 +156,7 @@ ResampleRejection resample(
     }
     hermite(
       reference[segment], reference[segment + 1], t, horizon[index].q_a_ref,
-      horizon[index].dq_a_ref);
+      horizon[index].dq_a_ref, horizon[index].ddq_a_ref);
   }
   return ResampleRejection::None;
 }

@@ -187,6 +187,9 @@ MpcNode::MpcNode(const rclcpp::NodeOptions & options)
   copy_rows(parameters.weights.dq_u, ocp_settings_.weights.dq_u);
   copy_rows(parameters.weights.tau_a, ocp_settings_.weights.tau_a);
   copy_rows(parameters.weights.u, ocp_settings_.weights.u);
+  ocp_settings_.weights.lag = parameters.weights.lag;
+  ocp_settings_.weights.progress_rate = parameters.weights.progress_rate;
+  ocp_settings_.weights.progress_accel = parameters.weights.progress_accel;
   ocp_settings_.weights.terminal_scale = parameters.weights.terminal_scale;
   copy_rows(parameters.limits.q_a_lower, ocp_settings_.limits.q_a_lower);
   copy_rows(parameters.limits.q_a_upper, ocp_settings_.limits.q_a_upper);
@@ -195,6 +198,8 @@ MpcNode::MpcNode(const rclcpp::NodeOptions & options)
   copy_rows(parameters.limits.q_u_max, ocp_settings_.limits.q_u_max);
   copy_rows(parameters.limits.dq_u_max, ocp_settings_.limits.dq_u_max);
   copy_rows(parameters.limits.u_max, ocp_settings_.limits.u_max);
+  ocp_settings_.limits.progress_rate_max = parameters.limits.progress_rate_max;
+  ocp_settings_.limits.progress_accel_max = parameters.limits.progress_accel_max;
   ocp_settings_.hydraulics.pump_flow_max = parameters.hydraulics.pump_flow_max;
   ocp_settings_.hydraulics.pump_flow_planning_factor =
     parameters.hydraulics.pump_flow_planning_factor;
@@ -747,11 +752,35 @@ void MpcNode::adopt_reference()
   reference_ = std::move(incoming);
   reference_stamp_ = rclcpp::Time(reference_message_->header.stamp, RCL_ROS_TIME);
   reference_message_.reset();
+  // A new plan starts where its stamp says it does. The progress carried from
+  // the previous one is virtual time into a curve that no longer exists.
+  reference_progress_anchored_ = false;
 }
 
 void MpcNode::stay_silent_after_failure(const std::string & why)
 {
   last_silence_ = why;
+  // **The origin never jumps; on a silent cycle it advances one nominal
+  // interval.** Two failure modes bracket this line and it is the only value
+  // that avoids both.
+  //
+  // Re-anchoring on the wall clock -- which is what an earlier version of this
+  // did -- would spend, in a single cycle, *everything* the MPC had banked since
+  // the plan started. A machine four seconds into a deliberate slow-down would
+  // find stage 0's reference a radian away and command every axis at its box
+  // toward it, from one missed state sample, with nothing non-finite anywhere.
+  //
+  // Leaving it alone would be worse in the other direction: this node is not
+  // controlling while it is silent, so no plan is being tracked and nothing
+  // would ever run the plan out. `max_reference_age` is measured in virtual time
+  // now, so a producer that died mid-plan would leave a stale reference that
+  // could be picked up and executed arbitrarily late.
+  //
+  // One interval is what the plan costs while nobody is spending it, which is
+  // what this node did on every cycle before the progress state existed.
+  if (reference_progress_anchored_) {
+    reference_progress_ += grid_.Ts;
+  }
   last_horizon_.clear();
   tcp_horizon_states_.clear();
   last_tcp_horizon_states_.clear();
@@ -1054,17 +1083,26 @@ void MpcNode::update()
     return;
   }
 
-  const rclcpp::Time plan_ends =
-    reference_stamp_ + rclcpp::Duration::from_seconds(reference_.back().t);
-  if ((now - plan_ends).seconds() > max_reference_age_) {
-    stay_silent("the reference's plan ended longer ago than max_reference_age");
+  // **The plan ends in virtual time, not in wall-clock time.** The MPC decides
+  // how fast the plan is spent, so a machine that deliberately fell behind has
+  // not finished, however long ago the stamped end passed. Testing the wall
+  // clock here would stop the publisher in the middle of exactly the move the
+  // progress state exists to allow. What the check is for -- a producer that
+  // stopped, `control_architecture` 3.3's expiry ramp -- survives, because a
+  // plan that is being tracked to its end still reaches its end.
+  if (reference_progress_anchored_ &&
+    reference_progress_ - reference_.back().t > max_reference_age_)
+  {
+    stay_silent("the reference's plan has been spent past its end by more than max_reference_age");
     RCLCPP_WARN_THROTTLE(
       get_logger(), *get_clock(), kWarnPeriodMs,
-      "The plan on %s ended %.3f s ago, which is past the %.3f s this node keeps holding its goal, "
+      "The plan on %s was spent past its end %.3f s ago in virtual time, which is past the %.3f s "
+      "this node keeps holding its goal, "
       "so nothing is published on %s. The receiver runs its expiry ramp, which is the defined "
       "behaviour for a producer that has stopped (control_architecture 3.3, the design documentation); a publisher "
       "that kept emitting a dead plan would defeat it.",
-      kReferenceTopic, (now - plan_ends).seconds(), max_reference_age_, kHorizonTopic);
+      kReferenceTopic, reference_progress_ - reference_.back().t, max_reference_age_,
+      kHorizonTopic);
     return;
   }
 
@@ -1076,12 +1114,19 @@ void MpcNode::update()
     cadence_anchored_ = true;
   }
 
-  double offset = (next_first_knot_ - reference_stamp_).seconds();
-  if (offset < reference_.front().t) {
-    offset = reference_.front().t;
+  // The horizon is sampled from the reference at the **progress** the MPC has
+  // actually spent, not at the wall-clock offset. Wall clock re-anchors it: on
+  // the first cycle of a plan, after a silence, and if it has somehow run behind
+  // the reference's own first point.
+  if (!reference_progress_anchored_) {
+    reference_progress_ = (next_first_knot_ - reference_stamp_).seconds();
+    reference_progress_anchored_ = true;
+  }
+  if (reference_progress_ < reference_.front().t) {
+    reference_progress_ = reference_.front().t;
   }
 
-  const ResampleRejection rejection = resample(reference_, offset, grid_, horizon_);
+  const ResampleRejection rejection = resample(reference_, reference_progress_, grid_, horizon_);
   if (rejection != ResampleRejection::None) {
     stay_silent(to_string(rejection));
     RCLCPP_WARN_THROTTLE(
@@ -1173,7 +1218,16 @@ void MpcNode::update()
     for (std::size_t row = 0; row < crane_model::kActuatedDof; ++row) {
       stages_[index].q_a_ref[row] = horizon_[index].q_a_ref[row];
       stages_[index].dq_a_ref[row] = horizon_[index].dq_a_ref[row];
+      stages_[index].ddq_a_ref[row] = horizon_[index].ddq_a_ref[row];
     }
+    // The expansion point of this stage's reference, in the same virtual time
+    // the progress state is measured in. `s` restarts at zero each cycle, so
+    // knot `k` is nominally at `k T_s` -- where it would be if nothing had
+    // slipped -- and the solver's `s - s_nom` is how far this horizon moves the
+    // plan away from the clock. Anchoring the expansion on the *previous
+    // solution's* progress instead was tried and measured worse; the notes for
+    // issue 119 carry the numbers.
+    stages_[index].progress_nominal = horizon_[index].t;
     stages_[index].q_eq[0] = q_eq_[0];
     stages_[index].q_eq[1] = q_eq_[1];
   }
@@ -1301,12 +1355,36 @@ void MpcNode::update()
   if (converged) {
     last_input_ = last_solution_->u0;
   } else {
+    // **`u` is a joint velocity at Psi's input under C3, not an acceleration**
+    // (116), so the command this cycle applies is the velocity the published
+    // plan carries and not a finite difference of it. The old expression was two
+    // orders out and changed sign under deceleration, and it feeds `propagate`
+    // across the 60 ms transport delay on the *normal* path -- every cycle that
+    // publishes a shifted plan. It is the sibling of the `follower_input` defect
+    // issue 117 fixed one function away, and it takes the same knot
+    // `shadow_command_` takes below.
     for (std::size_t row = 0; row < crane_model::kActuatedDof; ++row) {
-      last_input_[static_cast<Eigen::Index>(row)] =
-        (horizon_[1].dq_a_ref[row] - horizon_[0].dq_a_ref[row]) / grid_.Ts;
+      last_input_[static_cast<Eigen::Index>(row)] = horizon_[1].dq_a_ref[row];
     }
   }
   next_first_knot_ = next_first_knot_ + rclcpp::Duration::from_seconds(grid_.Ts);
+  // **The progress restart.** The reference origin advances by what this horizon
+  // decided its first interval is worth -- `T_s` at nominal rate, less when the
+  // optimizer bought time -- and the solver restarts `s` at zero. A cycle that
+  // published a shifted previous plan instead advanced no decision of its own,
+  // so it spends one nominal interval.
+  // It is `progress_advance` on **every solve that produced a usable iterate**,
+  // not only on a converged one, because `warm_start_` is `shifted()` under the
+  // same condition and `shifted()` re-expresses its progress rows by subtracting
+  // exactly this number. Advancing by anything else makes the two disagree, and
+  // that disagreement accumulates: an over-budget solve is a usable iterate
+  // (`wiki/mpc.md` 6) and the shipped configuration misses its budget often
+  // enough that "converged only" would leave the origin running at nominal rate
+  // on the machine while the optimizer was deciding otherwise -- the feature
+  // inert, and the reference running away exactly as before.
+  const double advance = last_solution_->outcome != SolveOutcome::Failed ?
+    last_solution_->progress_advance : grid_.Ts;
+  reference_progress_ += std::isfinite(advance) && advance >= 0.0 ? advance : grid_.Ts;
   last_silence_.clear();
   report_solver_health(&*last_solution_, verdict);
   if (mode_ == Mode::Shadow) {

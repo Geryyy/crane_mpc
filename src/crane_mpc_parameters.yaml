@@ -284,6 +284,71 @@ crane_mpc:
       validation:
         fixed_size<>: [6]
         lower_element_bounds<>: [0.0]
+    lag:
+      type: double
+      default_value: 40.0
+      read_only: true
+      description: "w_lag -- the lag term, the tracking error projected on the
+        reference's own direction of travel. **On the slewing joint only**, which
+        is Marc's `weights.weight_lag` reproduced rather than generalised
+        (timber_crane_cost_js_pfc_pt2.cpp:62-74). The reason is that the five
+        planned coordinates carry four radians and one metre, so the unit tangent
+        a single scalar projection over all of them needs is a norm over mixed
+        units and nothing states how many radians of slew a metre of telescope is
+        worth; and the per-axis form is not the generalisation either, because
+        e_i * q_ref,i'(s) is the tracking error times the local reference speed,
+        i.e. a speed-dependent reweighting of a term that already exists per axis.
+        Slewing is the axis the progress variable is there to buy time for. The
+        residual is the **unnormalised** projection, as the original's is, so this
+        weight absorbs the reference speed's scale. Marc runs 10.0 against a
+        weight_qA of 1.0; this is that ratio against q_a's 4.0. Not tuned."
+      validation:
+        gt_eq<>: [0.0]
+    progress_rate:
+      type: double
+      default_value: 160.0
+      read_only: true
+      description: "w_sDot -- the quadratic regulator on the progress rate toward
+        **one** second of plan per second of wall clock. This is the price of
+        spending time, and it is the whole mechanism: at nominal rate the problem
+        is exactly time-indexed tracking, and the optimizer buys a slower plan
+        only where tracking, limits or flow make paying this cheaper. It is a
+        **regulator and not a linear progress reward** -- the reward form belongs
+        to the spatial-corridor design of docs/features/corridor-mpc/brief.md 5.1,
+        which drops the tracking term altogether and is not this. Must be
+        positive: at zero the plan stops for free wherever tracking is hard, which
+        is a controller that never arrives.
+        **This is the one weight here that is measured rather than carried
+        across, and Marc's ratio is what it is measured against.** 0.2 against his
+        weight_qA of 1.0 would be 0.8 against this q_a of 4.0, and at 0.8 the
+        shipped A2B move -- which every axis can follow, the tightest at 43 % of
+        dq_a_max -- settles at a progress rate of 0.34 and spends 3.7 s of a 4 s
+        plan in 7 s of wall clock. The ratio does not transfer because the rest of
+        the cost is not Marc's: q_a is 4x his, `u` prices a velocity here at 1.0
+        where his weight_qADDot prices an acceleration at 0.25-0.5, and
+        terminal_scale has no counterpart there at all -- so moving is far more
+        expensive relative to tracking here than it is there, and a time price
+        calibrated to his cost buys dawdling. The requirement this number is set
+        by instead is the design property: **a reference the machine can follow
+        must run at rate one.** Measured on that move at 0.8 / 8 / 40 / 160, the
+        minimum rate is 0.32 / 0.66 / 0.87 / 0.95 and the final error is 0.170 /
+        0.134 / 0.137 / 0.137; at 160 the run reproduces issue 117's time-indexed
+        result (0.1375 against 0.1379) and the progress state costs nothing on a
+        followable plan. `scripts/cannot_follow.py` is the other half: on a
+        reference the machine cannot follow it still falls well below one."
+      validation:
+        gt<>: [0.0]
+    progress_accel:
+      type: double
+      default_value: 0.01
+      read_only: true
+      description: "Smoothness on the sixth input, the progress acceleration.
+        There is no counterpart in the original: Marc's s_dot **is** an input, so
+        weight_sDot prices it there, whereas here the rate is a state and its
+        acceleration is what the optimizer picks. A regulariser on that input, not
+        a tuning surface. Not tuned."
+      validation:
+        gt_eq<>: [0.0]
     terminal_scale:
       type: double
       default_value: 10.0
@@ -382,6 +447,32 @@ crane_mpc:
       validation:
         fixed_size<>: [2]
         lower_element_bounds<>: [0.0]
+    progress_rate_max:
+      type: double
+      default_value: 1.5
+      read_only: true
+      description: "The ceiling of the progress rate, in seconds of plan per
+        second of wall clock. The **floor is zero and is not a parameter**: the
+        machine does not run the plan backwards, and a negative rate would walk
+        the reference back down a spline that was planned forwards. The ceiling is
+        catch-up headroom after a slowdown and nothing more -- the plan was issued
+        feasible at rate one against these same limits
+        (wiki/trajectory_planning.md 5.3), so a horizon spending it much faster is
+        asking for something the planner already declared out of reach, and the
+        velocity, force and flow rows would refuse it anyway. Not tuned."
+      validation:
+        gt_eq<>: [1.0]
+    progress_accel_max:
+      type: double
+      default_value: 2.0
+      read_only: true
+      description: "|a_s| <= this, in 1/s: how fast the progress rate itself may
+        move. At 2.0 the plan's speed can go from stopped to nominal in half a
+        second, which is inside the horizon and well outside a control cycle. At
+        zero the rate would be frozen at whatever it was carried in with and the
+        progress state would be decoration. Not tuned."
+      validation:
+        gt<>: [0.0]
     u_max:
       type: double_array
       default_value: [0.802, 0.288, 0.305, 0.555, 2.122, 0.5]

@@ -289,6 +289,24 @@ private:
 
   std::vector<Knot> reference_;
   rclcpp::Time reference_stamp_{0, 0, RCL_ROS_TIME};
+
+  /// How far into the reference the MPC has actually spent the plan, in seconds.
+  /**
+   * The horizon is sampled from the reference **here** and not at the wall-clock
+   * offset. That is the whole point of the progress state: each converged solve
+   * says how much of the plan its first interval consumes, this advances by
+   * exactly that, and `s` restarts at zero -- Marc's spline-origin advance
+   * (`timber_crane_mpc.cpp:173-181`). Indexing by wall clock instead is what let
+   * the reference run away from a machine that had fallen behind, so that the
+   * tracking cost pulled harder the further behind it got.
+   *
+   * It is re-anchored to the wall clock whenever a new reference arrives, or
+   * after any cycle that published nothing: a plan whose origin is carried
+   * across a silence is a plan for a machine nobody was commanding.
+   */
+  double reference_progress_{0.0};
+  bool reference_progress_anchored_{false};
+
   trajectory_msgs::msg::JointTrajectory::ConstSharedPtr reference_message_;
 
   rclcpp::Time next_first_knot_{0, 0, RCL_ROS_TIME};

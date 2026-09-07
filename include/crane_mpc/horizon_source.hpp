@@ -27,6 +27,19 @@ struct Knot
   double t{};
   std::array<double, crane_model::kActuatedDof> q_a_ref{};
   std::array<double, crane_model::kActuatedDof> dq_a_ref{};
+  /// The reference's second derivative in its own time parameter.
+  /**
+   * The MPC evaluates the reference at its progress state rather than at knot
+   * time, so each stage needs a second-order expansion of its own reference and
+   * not just a value and a slope. The resample already interpolates with a cubic
+   * Hermite, so this is the second derivative of the polynomial it is already
+   * evaluating -- no new information and no new assumption about the reference.
+   *
+   * It is not read off the incoming message: `trajectory_msgs` carries an
+   * `accelerations` field and the planner does not populate it here, so a
+   * reference read from the wire would be second-order only by accident.
+   */
+  std::array<double, crane_model::kActuatedDof> ddq_a_ref{};
 };
 
 struct HorizonGrid

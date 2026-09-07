@@ -29,6 +29,17 @@ crane_mpc:
       # description; a zero reference prices holding the machine's own weight.
       tau_a: [1.0e-8, 1.0e-8, 1.0e-8, 1.0e-8, 1.0e-8, 1.0e-8]
       u: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+      # The progress rows. `lag` is the tracking error projected on the
+      # reference's direction of travel, on the slewing axis alone as in the
+      # original, at Marc's ratio against his weight_qA carried onto q_a's 4.0.
+      # `progress_rate` is the quadratic regulator toward one second of plan per
+      # second of wall clock -- what the MPC pays to spend time -- and it is
+      # **measured, not carried across**: at Marc's ratio (0.8) a move every axis
+      # can follow settles at a rate of 0.34, because the rest of this cost is
+      # not his. See the parameter description for the measurement.
+      lag: 40.0
+      progress_rate: 160.0
+      progress_accel: 0.01
       terminal_scale: 10.0
 
     limits:
@@ -47,6 +58,11 @@ crane_mpc:
       # the boom, arm and telescope are bounded by the fit's domain and the slew
       # and rotator by the control-safe velocity.
       u_max: [0.802, 0.288, 0.305, 0.555, 2.122, 0.5]
+      # `0 <= v_s <= progress_rate_max`. The floor is zero and structural: the
+      # machine does not run the plan backwards. The ceiling is catch-up
+      # headroom after a slowdown.
+      progress_rate_max: 1.5
+      progress_accel_max: 2.0
 
     slack:
       q_u: [1.0e3, 1.0e3]

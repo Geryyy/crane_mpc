@@ -119,6 +119,69 @@ SOLVER_PREFIX = "crane_mpc"
 # C++ would otherwise have to derive a second time.
 GENERATED_HEADER = "crane_mpc_ocp_generated.h"
 
+# --- the OCP's own parameters, appended to the model's eleven ------------------
+#
+# `crane_symbolic`'s `p` is the pinned tool coordinate and the payload body, and
+# it stays exactly that -- `crane_planning` builds the same module and a wider
+# model parameter vector would reach it. What is appended here belongs to *this*
+# problem: the local model of the reference each stage is tracking.
+#
+# The progress state `s` is virtual time, so the reference the cost compares
+# against is `q_a,ref(s)` and not `q_a,ref(k T_s)`. A spline cannot be baked into
+# a generated solver, so each stage carries a **second-order expansion of its own
+# reference about its nominal virtual time** -- the value, the first derivative
+# and the second, exactly the three quantities Marc's cost reads off the spline
+# at `s` (`timber_crane_cost_js_pfc_pt2.cpp:35-37`). Inside one stage's expansion
+# the residual is then an ordinary expression of `x` and `p`, and both derivatives
+# reach the Gauss-Newton gradient and Hessian through it.
+#
+# At `s = s_nom` and `v_s = 1` every residual below collapses to today's
+# time-indexed one, which is what "nominal behaviour is exactly time-indexed
+# tracking" means and is the property the offsets exist to keep checkable.
+P_PROGRESS_NOMINAL = cs.NP
+P_REFERENCE_POSITION = P_PROGRESS_NOMINAL + 1
+P_REFERENCE_FIRST = P_REFERENCE_POSITION + cs.K_PLANNED_DOF
+P_REFERENCE_SECOND = P_REFERENCE_FIRST + cs.K_PLANNED_DOF
+NP = P_REFERENCE_SECOND + cs.K_PLANNED_DOF
+
+# --- the residual blocks, `wiki/mpc.md` 2 -------------------------------------
+#
+# The terminal residual is the leading prefix of the stage one, so one set of
+# offsets addresses both. The lag and progress rows are inside that prefix and
+# the effort and smoothness rows -- which need an input -- are after it.
+Y_PLANNED_POSITION = 0
+Y_PLANNED_VELOCITY = cs.K_PLANNED_DOF
+Y_PASSIVE_POSITION = 2 * cs.K_PLANNED_DOF
+Y_PASSIVE_VELOCITY = Y_PASSIVE_POSITION + cs.K_PASSIVE_DOF
+Y_LAG = Y_PASSIVE_VELOCITY + cs.K_PASSIVE_DOF
+Y_PROGRESS_RATE = Y_LAG + 1
+NY_TERMINAL = Y_PROGRESS_RATE + 1
+Y_ACTUATED_FORCE = NY_TERMINAL
+Y_INPUT = Y_ACTUATED_FORCE + cs.K_PLANNED_DOF
+NY = Y_INPUT + cs.NU_PROGRESS
+
+# The axis the lag row is written on. **Marc's is the slewing joint alone**
+# (`timber_crane_cost_js_pfc_pt2.cpp:62-74`) where a textbook lag error sums the
+# tangential projection over every axis, and it is reproduced rather than
+# generalised. The reason is that there is no tangent to project onto: the five
+# planned coordinates carry four radians and one metre, so the unit tangent a
+# single scalar projection needs is a norm over mixed units and nothing in the
+# wiki says how many radians of slew a metre of telescope is worth. The
+# per-axis alternative is not the generalisation either -- `e_i * q_ref,i'(s)`
+# is the tracking error times the local reference speed, i.e. a speed-dependent
+# reweighting of a term that already exists per axis, so it would add a knob and
+# not a mechanism. Slewing is meanwhile the axis whose lag the progress variable
+# is there to buy time for: it is the slowest, it is the one that drives the
+# pendulum laterally, and it is the one Marc kept.
+K_LAG_AXIS = 0
+
+# `v_s = 1` is one second of plan per second of wall clock. It is a **constant**
+# and not a parameter: any other value is a reference that is not the plan, and
+# `wiki/trajectory_planning.md` 5.3's "a reference the MPC would reject is a
+# planner bug" is written about the plan as issued. Marc declares `sDot_ref` and
+# every deployed config sets it to 1.0.
+K_PROGRESS_RATE_REFERENCE = 1.0
+
 
 # ------------------------------------------------------------------ the numbers
 
@@ -233,11 +296,35 @@ def build_ocp(description_xml: str, parameters: dict, hydraulics: dict) -> tuple
     dq_a = x[cs.X_PLANNED_VELOCITY : cs.X_PLANNED_VELOCITY + cs.K_PLANNED_DOF]
     dq_u = x[cs.X_PASSIVE_VELOCITY : cs.X_PASSIVE_VELOCITY + cs.K_PASSIVE_DOF]
 
+    # The progress pair and the local reference model. `s` is virtual time and
+    # `s_nom` is the virtual time this stage would be at if nothing had slipped,
+    # so `ds` is how far the optimizer has moved the plan away from the clock.
+    progress = x[cs.X_PROGRESS]
+    progress_rate = x[cs.X_PROGRESS_RATE]
+    reference_parameters = ca.SX.sym("p_ref", NP - cs.NP)
+    parameter_vector = ca.vertcat(model.p, reference_parameters)
+
+    def block(offset):
+        return parameter_vector[offset : offset + cs.K_PLANNED_DOF]
+
+    ds = progress - parameter_vector[P_PROGRESS_NOMINAL]
+    reference_position = (
+        block(P_REFERENCE_POSITION)
+        + block(P_REFERENCE_FIRST) * ds
+        + 0.5 * block(P_REFERENCE_SECOND) * ds * ds
+    )
+    # d/ds of the line above, which is what the chain rule needs: the reference
+    # velocity the machine should hold is `q_ref'(s) * v_s`, so a horizon that
+    # spends the plan more slowly asks for a proportionally slower axis. Tracking
+    # `q_ref'(s_nom)` regardless would have the velocity term fighting the
+    # progress term, which is the defect that makes a progress state decoration.
+    reference_velocity = block(P_REFERENCE_FIRST) + block(P_REFERENCE_SECOND) * ds
+
     acados_model = AcadosModel()
     acados_model.name = f"{SOLVER_PREFIX}_{TOOL}"
     acados_model.x = x
     acados_model.u = u
-    acados_model.p = model.p
+    acados_model.p = parameter_vector
     acados_model.f_expl_expr = xdot
     # IRK reads `f_impl_expr` and errors on an empty one, ERK reads `f_expl_expr`;
     # both are set so the integrator stays a solver option rather than a re-model,
@@ -260,8 +347,35 @@ def build_ocp(description_xml: str, parameters: dict, hydraulics: dict) -> tuple
     # The four actuated blocks are the **planned** rows: there is no tool row to
     # track, because the tool follows the low-level controller and not this
     # reference, and none to price, because the optimizer cannot move it.
-    residual = ca.vertcat(q_a, dq_a, q_u, dq_u, tau_a[: cs.K_PLANNED_DOF], u)
-    terminal_residual = ca.vertcat(q_a, dq_a, q_u, dq_u)
+    #
+    # **The tracking rows carry their own reference and `yref` is zero on them.**
+    # `q_a,ref` is a function of the decision variable `s`, so it cannot live in
+    # `yref`, which acados subtracts as a constant. Moving it into the residual
+    # is what makes `s` a decision variable rather than decoration, and it leaves
+    # exactly one home for the reference instead of a copy in `yref` and a copy
+    # in `p`.
+    tracking = q_a - reference_position
+    #
+    # The lag row, `timber_crane_cost_js_pfc_pt2.cpp:62-74`: the tracking error
+    # projected on the reference's own direction of travel, on the slewing axis.
+    # Unnormalised, as the original is -- the weight absorbs the scale, and a
+    # unit tangent would need the mixed-unit norm `K_LAG_AXIS` exists to avoid.
+    lag = tracking[K_LAG_AXIS] * reference_velocity[K_LAG_AXIS]
+    #
+    # The progress row is a **quadratic regulator toward one**, not a linear
+    # progress reward: this is time-scaling. `yref` carries the one, so the row
+    # itself is just `v_s`.
+    residual = ca.vertcat(
+        tracking,
+        dq_a - reference_velocity * progress_rate,
+        q_u,
+        dq_u,
+        lag,
+        progress_rate,
+        tau_a[: cs.K_PLANNED_DOF],
+        u,
+    )
+    terminal_residual = residual[:NY_TERMINAL]
     acados_model.cost_y_expr_0 = residual
     acados_model.cost_y_expr = residual
     # §2's third deliberate property: the terminal condition is a raised-weight
@@ -301,7 +415,7 @@ def build_ocp(description_xml: str, parameters: dict, hydraulics: dict) -> tuple
 
     ocp = AcadosOcp()
     ocp.model = acados_model
-    ocp.parameter_values = np.zeros(cs.NP)
+    ocp.parameter_values = np.zeros(NP)
 
     # `horizon_length` counts **knots**, not shooting intervals: `mpc_node.cpp`
     # reads the same key and passes `horizon_length - 1` to the OCP, because the
@@ -314,7 +428,7 @@ def build_ocp(description_xml: str, parameters: dict, hydraulics: dict) -> tuple
     ocp.solver_options.tf = horizon * step
 
     nx = cs.NX
-    nu = cs.NU
+    nu = cs.NU_PROGRESS
     nh = cs.NU + 1
 
     # --- the cost data ---------------------------------------------------------
@@ -328,6 +442,11 @@ def build_ocp(description_xml: str, parameters: dict, hydraulics: dict) -> tuple
     ocp.cost.cost_type_e = "NONLINEAR_LS"
     ny = residual.shape[0]
     ny_e = terminal_residual.shape[0]
+    if ny != NY or ny_e != NY_TERMINAL:
+        raise ValueError(
+            f"the residual is {ny} rows against the offsets' {NY} and the terminal "
+            f"{ny_e} against {NY_TERMINAL}; the offsets are what the C++ reads"
+        )
     ocp.cost.W_0 = np.eye(ny)
     ocp.cost.W = np.eye(ny)
     ocp.cost.W_e = np.eye(ny_e)
@@ -337,9 +456,9 @@ def build_ocp(description_xml: str, parameters: dict, hydraulics: dict) -> tuple
 
     # --- §3's constraints 1 to 5, as the boxes acados takes natively ----------
     #
-    # `x0` is §1's initial condition and pins all fourteen rows at stage zero;
-    # `idxbx` boxes the same fourteen at every later stage, and `idxbu` the five
-    # inputs. The *values* arrive at runtime, because the control-safe limits of
+    # `x0` is 1's initial condition and pins every row at stage zero; `idxbx`
+    # boxes the rows up to the force state at every later stage, and `idxbu` the
+    # six inputs -- five joint commands and the progress acceleration. The *values* arrive at runtime, because the control-safe limits of
     # `wiki/implementation/parameters.md` §2 are ROS parameters and the sway box
     # of constraint 3 travels with each stage's own equilibrium.
     ocp.constraints.x0 = np.zeros(nx)
@@ -353,7 +472,7 @@ def build_ocp(description_xml: str, parameters: dict, hydraulics: dict) -> tuple
     # The boxed rows are therefore the rigid-body state plus the lagged command,
     # which is a **contiguous prefix** of `x`, so acados' `idxbx` positions and the
     # state rows still coincide and `idxsbx` below indexes the same numbers.
-    nbx = cs.NX_RIGID + cs.K_COMMAND_LAG_DOF
+    nbx = cs.NBX
     ocp.constraints.idxbx = np.arange(nbx)
     ocp.constraints.lbx = -np.ones(nbx)
     ocp.constraints.ubx = np.ones(nbx)
@@ -369,9 +488,9 @@ def build_ocp(description_xml: str, parameters: dict, hydraulics: dict) -> tuple
     # one-sided, because `Q` is a pump *draw* and not a signed force --
     # `wiki/hydraulics.md` §3 sums magnitudes and a negative total draw is not a
     # state the machine has.
-    ocp.constraints.lh_0 = np.concatenate([-np.ones(nu), [0.0]])
+    ocp.constraints.lh_0 = np.concatenate([-np.ones(cs.NU), [0.0]])
     ocp.constraints.uh_0 = np.ones(nh)
-    ocp.constraints.lh = np.concatenate([-np.ones(nu), [0.0]])
+    ocp.constraints.lh = np.concatenate([-np.ones(cs.NU), [0.0]])
     ocp.constraints.uh = np.ones(nh)
 
     # --- §3.2's softening, as dimensions --------------------------------------
@@ -505,11 +624,23 @@ def write_header(
         "// **order**, so this is where `ocp_solver.cpp` reads the packing rather than",
         "// inventing a second one. Both halves are set on every stage before every",
         "// solve, so neither is a property of the artifact (issue 072).",
-        f"#define CRANE_MPC_OCP_PARAMETER_DOF {cs.NP}",
+        f"#define CRANE_MPC_OCP_PARAMETER_DOF {NP}",
         f"#define CRANE_MPC_OCP_PARAMETER_TOOL_POSITION {cs.P_TOOL_POSITION}",
         f"#define CRANE_MPC_OCP_PARAMETER_PAYLOAD_MASS {cs.P_PAYLOAD_MASS}",
         f"#define CRANE_MPC_OCP_PARAMETER_PAYLOAD_COM {cs.P_PAYLOAD_COM}",
         f"#define CRANE_MPC_OCP_PARAMETER_PAYLOAD_INERTIA {cs.P_PAYLOAD_INERTIA}",
+        "",
+        "// The rest of `p` is this OCP's own and is written per stage before every",
+        "// solve: the stage's nominal virtual time, then the second-order expansion",
+        "// of its reference about it -- value, d/ds, d^2/ds^2, per planned axis. The",
+        "// progress state is virtual time, so the cost compares against",
+        "// `q_a,ref(s)`; a spline cannot be baked into a generated solver, and this",
+        "// local model is what carries both derivatives into the gradient and the",
+        "// Hessian. At `s = s_nom` it is today's time-indexed reference exactly.",
+        f"#define CRANE_MPC_OCP_PARAMETER_PROGRESS_NOMINAL {P_PROGRESS_NOMINAL}",
+        f"#define CRANE_MPC_OCP_PARAMETER_REFERENCE_POSITION {P_REFERENCE_POSITION}",
+        f"#define CRANE_MPC_OCP_PARAMETER_REFERENCE_FIRST {P_REFERENCE_FIRST}",
+        f"#define CRANE_MPC_OCP_PARAMETER_REFERENCE_SECOND {P_REFERENCE_SECOND}",
         "",
         "// The (row, column) of each of those six entries, in the order they are",
         "// packed. Theta_L is symmetric and about the payload's own centre of mass",
@@ -533,12 +664,26 @@ def write_header(
         "#define CRANE_MPC_OCP_STATE_COMMAND_LAG_AXES {"
         + ", ".join(str(axis) for axis in cs.K_LAG_AXES)
         + "}",
+        "",
+        "// The progress pair of `docs/features/mpc-full-authority/brief.md` §2.1:",
+        "// `s`, virtual time in seconds of nominal plan, and `v_s`, how fast the",
+        "// plan is being spent. `v_s = 1` is exactly time-indexed tracking. The",
+        "// sixth input is the progress **acceleration**, one order above Marc's",
+        "// `s_dot`-as-input, so the plan's speed cannot step between cycles. They",
+        "// sit before the force state because `v_s >= 0` is a box and the force",
+        "// states carry none: the boxed rows have to stay a contiguous prefix.",
+        f"#define CRANE_MPC_OCP_STATE_PROGRESS {cs.X_PROGRESS}",
+        f"#define CRANE_MPC_OCP_STATE_PROGRESS_RATE {cs.X_PROGRESS_RATE}",
+        f"#define CRANE_MPC_OCP_INPUT_PLANNED_DOF {cs.NU}",
+        f"#define CRANE_MPC_OCP_INPUT_PROGRESS_ACCEL {cs.U_PROGRESS_ACCEL}",
+        "",
         f"#define CRANE_MPC_OCP_STATE_ACTUATED_FORCE {cs.X_ACTUATED_FORCE}",
         "",
-        "// The boxed rows of `x`: the rigid-body state and the lagged command, a",
-        "// contiguous prefix. The force states are left out on purpose -- see",
-        "// `export_ocp.py`; constraint 6 is the nonlinear row and not a box.",
-        f"#define CRANE_MPC_OCP_BOXED_STATE_DOF {cs.NX_RIGID + cs.K_COMMAND_LAG_DOF}",
+        "// The boxed rows of `x`: the rigid-body state, the lagged command and the",
+        "// progress pair, a contiguous prefix. The force states are left out on",
+        "// purpose -- see `export_ocp.py`; constraint 6 is the nonlinear row and not",
+        "// a box.",
+        f"#define CRANE_MPC_OCP_BOXED_STATE_DOF {cs.NBX}",
         "",
         "// C3's fitted numbers as they were folded into the dynamics, per planned",
         "// axis, from `crane_model/config/c3_full_model.json`. Here so the C++ and",
@@ -554,22 +699,39 @@ def write_header(
         + "}",
         f"#define CRANE_MPC_OCP_ACTUATOR_DEAD_TIME_S {actuator.dead_time_s!r}",
         "",
-        "// The blocks of the stage residual `y = [q_a, dq_a, q_u, dq_u, tau_a, u]`.",
-        "// The order is §2's -- tracking, sway, effort, smoothness -- and not the",
-        "// state's, and everything that has to agree with `W` reads it from here.",
-        "#define CRANE_MPC_OCP_RESIDUAL_PLANNED_POSITION 0",
-        f"#define CRANE_MPC_OCP_RESIDUAL_PLANNED_VELOCITY {cs.K_PLANNED_DOF}",
-        f"#define CRANE_MPC_OCP_RESIDUAL_PASSIVE_POSITION {2 * cs.K_PLANNED_DOF}",
-        "#define CRANE_MPC_OCP_RESIDUAL_PASSIVE_VELOCITY "
-        f"{2 * cs.K_PLANNED_DOF + cs.K_PASSIVE_DOF}",
-        "#define CRANE_MPC_OCP_RESIDUAL_ACTUATED_FORCE "
-        f"{2 * cs.K_PLANNED_DOF + 2 * cs.K_PASSIVE_DOF}",
-        "#define CRANE_MPC_OCP_RESIDUAL_INPUT "
-        f"{3 * cs.K_PLANNED_DOF + 2 * cs.K_PASSIVE_DOF}",
+        "// The blocks of the stage residual",
+        "// `y = [q_a, dq_a, q_u, dq_u, lag, v_s, tau_a, u]`. The order is §2's --",
+        "// tracking, sway, lag, progress, effort, smoothness -- and not the state's,",
+        "// and everything that has to agree with `W` reads it from here. The",
+        "// terminal residual is the **prefix** up to and including the progress row,",
+        "// so one set of offsets addresses both.",
+        "//",
+        "// The tracking rows carry their own reference and their `yref` is zero:",
+        "// `q_a,ref(s)` is a function of a decision variable and acados subtracts",
+        "// `yref` as a constant. The progress row's `yref` is the one below.",
+        f"#define CRANE_MPC_OCP_RESIDUAL_PLANNED_POSITION {Y_PLANNED_POSITION}",
+        f"#define CRANE_MPC_OCP_RESIDUAL_PLANNED_VELOCITY {Y_PLANNED_VELOCITY}",
+        f"#define CRANE_MPC_OCP_RESIDUAL_PASSIVE_POSITION {Y_PASSIVE_POSITION}",
+        f"#define CRANE_MPC_OCP_RESIDUAL_PASSIVE_VELOCITY {Y_PASSIVE_VELOCITY}",
+        f"#define CRANE_MPC_OCP_RESIDUAL_LAG {Y_LAG}",
+        f"#define CRANE_MPC_OCP_RESIDUAL_PROGRESS_RATE {Y_PROGRESS_RATE}",
+        f"#define CRANE_MPC_OCP_RESIDUAL_ACTUATED_FORCE {Y_ACTUATED_FORCE}",
+        f"#define CRANE_MPC_OCP_RESIDUAL_INPUT {Y_INPUT}",
+        f"#define CRANE_MPC_OCP_RESIDUAL_TERMINAL_DOF {NY_TERMINAL}",
+        "",
+        "// The axis the lag row is written on, and the progress row's reference.",
+        "// The lag row is Marc's 1-D projection on the slewing joint reproduced and",
+        "// not generalised: five planned coordinates carry four radians and one",
+        "// metre, so the unit tangent a single scalar projection needs is a norm",
+        "// over mixed units. `export_ocp.py` carries the argument.",
+        f"#define CRANE_MPC_OCP_LAG_AXIS {K_LAG_AXIS}",
+        "// One second of plan per second of wall clock. A **constant**: any other",
+        "// value is a reference that is not the plan.",
+        f"#define CRANE_MPC_OCP_PROGRESS_RATE_REFERENCE {K_PROGRESS_RATE_REFERENCE!r}",
         "",
         "// The rows of `h`: constraint 6 once per planned axis, then constraint 7.",
         "#define CRANE_MPC_OCP_CONSTRAINT_CYLINDER_FORCE 0",
-        f"#define CRANE_MPC_OCP_CONSTRAINT_PUMP_FLOW {cs.NU}",
+        f"#define CRANE_MPC_OCP_CONSTRAINT_PUMP_FLOW {cs.K_PLANNED_DOF}",
         "",
         "// What each row of `h` was divided by, in that row's own physical unit:",
         "// newtons on the five force rows and m^3/s on the pump row. Conditioning",

@@ -52,6 +52,10 @@ class RunData:
     """Closed-loop samples, including the terminal sample at ``time[-1]``."""
 
     time: np.ndarray
+    #: Virtual time, in seconds of nominal plan: where the reference origin sat
+    #: at each wall-clock sample. It advances by `T_s` only while the progress
+    #: rate is one; the gap between the two is what the MPC bought.
+    virtual_time: np.ndarray
     state: np.ndarray
     q_ref: np.ndarray
     dq_ref: np.ndarray
@@ -118,6 +122,15 @@ def parse_arguments() -> argparse.Namespace:
     tuning.add_argument("--sway-rate-scale", type=float, default=1.0)
     tuning.add_argument("--effort-scale", type=float, default=1.0)
     tuning.add_argument("--input-scale", type=float, default=1.0)
+    tuning.add_argument("--lag-scale", type=float, default=1.0)
+    tuning.add_argument(
+        "--progress-scale",
+        type=float,
+        default=1.0,
+        help="multiplier on weights.progress_rate -- the price of spending time. "
+        "A very large value pins the progress rate at one, which is the "
+        "time-indexed controller this design replaces",
+    )
     tuning.add_argument(
         "--terminal-scale",
         type=float,
@@ -198,6 +211,14 @@ def load_settings(arguments: argparse.Namespace) -> tuple[dict, dict]:
         parameters["weights"][name] = [
             scale * float(value) for value in parameters["weights"][name]
         ]
+    positive(arguments.lag_scale, "--lag-scale", allow_zero=True)
+    positive(arguments.progress_scale, "--progress-scale")
+    parameters["weights"]["lag"] = arguments.lag_scale * float(
+        parameters["weights"]["lag"]
+    )
+    parameters["weights"]["progress_rate"] = arguments.progress_scale * float(
+        parameters["weights"]["progress_rate"]
+    )
 
     positive(float(parameters["Ts"]), "--dt")
     positive(float(parameters["weights"]["terminal_scale"]), "--terminal-scale", True)
@@ -346,25 +367,37 @@ def create_solver(
     return solver, model, scale
 
 
-def minimum_jerk(time: float, duration: float) -> tuple[float, float]:
-    """Return quintic progress and its rate, with zero endpoint velocity."""
+def minimum_jerk(time: float, duration: float) -> tuple[float, float, float]:
+    """Return quintic progress and its first two rates, zero at both endpoints."""
     if time <= 0.0:
-        return 0.0, 0.0
+        return 0.0, 0.0, 0.0
     if time >= duration:
-        return 1.0, 0.0
+        return 1.0, 0.0, 0.0
     s = time / duration
     position = 10.0 * s**3 - 15.0 * s**4 + 6.0 * s**5
     rate = (30.0 * s**2 - 60.0 * s**3 + 30.0 * s**4) / duration
-    return position, rate
+    accel = (60.0 * s - 180.0 * s**2 + 120.0 * s**3) / (duration * duration)
+    return position, rate, accel
 
 
 def reference_at(
     time: float, a: np.ndarray, b: np.ndarray, duration: float
-) -> tuple[np.ndarray, np.ndarray]:
-    """Evaluate the minimum-jerk A-to-B position and velocity reference."""
-    progress, rate = minimum_jerk(time, duration)
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Evaluate the reference and its first two derivatives at a **virtual** time.
+
+    The MPC evaluates the reference at its progress state, so what it needs per
+    stage is a local second-order model of the curve and not a sample of it. The
+    quintic is analytic, so both derivatives are exact here; the node takes them
+    off the cubic Hermite it already resamples with.
+    """
+    progress, rate, accel = minimum_jerk(time, duration)
     displacement = b - a
-    return a + progress * displacement, rate * displacement
+    return (
+        a + progress * displacement,
+        rate * displacement,
+        accel * displacement,
+    )
 
 
 def make_numeric_functions(
@@ -419,21 +452,25 @@ def equilibrium_table(
     duration: float,
     dt: float,
     count: int,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Precompute references and continuous-branch passive equilibria."""
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Precompute continuous-branch passive equilibria over **virtual** time.
+
+    Indexed by seconds of nominal plan, so a run that spends the plan slowly
+    reads the same table at a slower rate rather than needing a second one. The
+    grid is the horizon's own, and `equilibrium_at` interpolates between knots.
+    """
     times = dt * np.arange(count)
-    q_ref = np.zeros((count, cs.K_PLANNED_DOF))
-    dq_ref = np.zeros_like(q_ref)
     q_eq = np.zeros((count, cs.K_PASSIVE_DOF))
     guess = np.zeros(cs.K_PASSIVE_DOF)
 
     for index, time in enumerate(times):
-        q_ref[index], dq_ref[index] = reference_at(time, a, b, duration)
+        q_ref_index, _, _ = reference_at(time, a, b, duration)
 
-        def residual(passive: np.ndarray) -> np.ndarray:
+        def residual(passive: np.ndarray, q_ref_index=q_ref_index) -> np.ndarray:
             state = np.zeros(cs.NX)
             state[cs.X_PLANNED_POSITION : cs.X_PLANNED_POSITION + cs.K_PLANNED_DOF] = (
-                q_ref[index]
+                q_ref_index
             )
             state[cs.X_PASSIVE_POSITION : cs.X_PASSIVE_POSITION + cs.K_PASSIVE_DOF] = (
                 passive
@@ -448,7 +485,15 @@ def equilibrium_table(
         # Continuation from the previous knot keeps the same periodic branch.
         guess = solution.x
         q_eq[index] = guess
-    return q_ref, dq_ref, q_eq
+    return times, q_eq
+
+
+def equilibrium_at(times: np.ndarray, table: np.ndarray, tau: float) -> np.ndarray:
+    """Read the equilibrium table at a virtual time, linearly between knots."""
+    clamped = float(np.clip(tau, times[0], times[-1]))
+    return np.array(
+        [np.interp(clamped, times, table[:, row]) for row in range(table.shape[1])]
+    )
 
 
 def weight_matrices(parameters: dict) -> tuple[np.ndarray, np.ndarray]:
@@ -462,11 +507,13 @@ def weight_matrices(parameters: dict) -> tuple[np.ndarray, np.ndarray]:
             np.asarray(weights["dq_a"][:planned], dtype=float),
             np.asarray(weights["q_u"][:passive], dtype=float),
             np.asarray(weights["dq_u"][:passive], dtype=float),
+            [float(weights["lag"]), float(weights["progress_rate"])],
             np.asarray(weights["tau_a"][:planned], dtype=float),
             np.asarray(weights["u"][:planned], dtype=float),
+            [float(weights["progress_accel"])],
         ]
     )
-    terminal = float(weights["terminal_scale"]) * diagonal[: 2 * planned + 2 * passive]
+    terminal = float(weights["terminal_scale"]) * diagonal[: export_ocp.NY_TERMINAL]
     return np.diag(diagonal), np.diag(terminal)
 
 
@@ -506,7 +553,14 @@ def configure_fixed_data(
     lower_h, upper_h, extend, retract = constraint_data(
         model, scale, parameters, hydraulics
     )
-    u_max = np.asarray(parameters["limits"]["u_max"][: cs.K_PLANNED_DOF], dtype=float)
+    # The input box is the five joint commands and then the progress
+    # acceleration, which is not an actuated axis and has its own bound.
+    u_max = np.concatenate(
+        [
+            np.asarray(parameters["limits"]["u_max"][: cs.K_PLANNED_DOF], dtype=float),
+            [float(parameters["limits"]["progress_accel_max"])],
+        ]
+    )
     slack = parameters["slack"]
     soft_state = np.concatenate(
         [np.asarray(slack["q_u"], dtype=float), np.asarray(slack["dq_u"], dtype=float)]
@@ -559,16 +613,24 @@ def position_box(
 
 
 def state_bounds(
-    parameters: dict, equilibrium: np.ndarray, measured: np.ndarray
+    parameters: dict,
+    equilibrium: np.ndarray,
+    measured: np.ndarray,
+    elapsed: float,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Build one stage's state box around its passive equilibrium."""
     limits = parameters["limits"]
     u_max = np.asarray(limits["u_max"][: cs.K_PLANNED_DOF], dtype=float)
     q_lower, q_upper = position_box(parameters, measured)
-    # The boxed rows are the rigid state and the lagged command; the force states
-    # are bounded by constraint 6 and carry no box (`export_ocp.py`). `u_f` is a
-    # filtered `u`, so it gets `u`'s own box.
+    # The boxed rows are the rigid state, the lagged command and the progress
+    # pair; the force states are bounded by constraint 6 and carry no box
+    # (`export_ocp.py`). `u_f` is a filtered `u`, so it gets `u`'s own box.
     lag = u_max[list(cs.K_LAG_AXES)]
+    # `0 <= v_s <= progress_rate_max`: the floor is structural, the machine does
+    # not run the plan backwards. `s`'s own bound is per stage and exact -- it
+    # starts each cycle at zero, so by `elapsed` seconds into the horizon it
+    # cannot have outrun `elapsed` spent at the fastest rate allowed.
+    rate_max = float(limits["progress_rate_max"])
     lower = np.concatenate(
         [
             q_lower,
@@ -576,6 +638,7 @@ def state_bounds(
             -np.asarray(limits["dq_a_max"][: cs.K_PLANNED_DOF], dtype=float),
             -np.asarray(limits["dq_u_max"], dtype=float),
             -lag,
+            [0.0, 0.0],
         ]
     )
     upper = np.concatenate(
@@ -585,30 +648,63 @@ def state_bounds(
             np.asarray(limits["dq_a_max"][: cs.K_PLANNED_DOF], dtype=float),
             np.asarray(limits["dq_u_max"], dtype=float),
             lag,
+            [elapsed * rate_max, rate_max],
         ]
     )
     return lower, upper
 
 
 def stage_reference(
-    q_ref: np.ndarray,
-    dq_ref: np.ndarray,
-    q_eq: np.ndarray,
-    tau_ref: np.ndarray,
-    terminal: bool,
+    q_eq: np.ndarray, tau_ref: np.ndarray, terminal: bool
 ) -> np.ndarray:
     """
     Build an acados stage or terminal residual reference.
+
+    **The tracking rows are zero here.** The reference is evaluated at the
+    progress state, so it rides in `p` and the residual carries the error
+    itself; acados subtracts `yref` as a constant and could not express a
+    reference that moves with a decision variable.
 
     `tau_ref` is `h_eff`, and the effort term of `wiki/mpc.md` §2 references it
     rather than zero: `tau_a = M_eff ddq_a + h_eff`, so a zero reference prices
     the machine holding its own weight and the optimizer buys droop (issue 117).
     The smoothness row still references zero -- `u` is a command, not a force.
+    The progress row references one second of plan per second of wall clock.
     """
-    base = np.concatenate([q_ref, dq_ref, q_eq, np.zeros(cs.K_PASSIVE_DOF)])
-    if terminal:
-        return base
-    return np.concatenate([base, tau_ref, np.zeros(cs.K_PLANNED_DOF)])
+    reference = np.zeros(export_ocp.NY_TERMINAL if terminal else export_ocp.NY)
+    reference[
+        export_ocp.Y_PASSIVE_POSITION : export_ocp.Y_PASSIVE_POSITION + cs.K_PASSIVE_DOF
+    ] = q_eq
+    reference[export_ocp.Y_PROGRESS_RATE] = export_ocp.K_PROGRESS_RATE_REFERENCE
+    if not terminal:
+        reference[
+            export_ocp.Y_ACTUATED_FORCE : export_ocp.Y_ACTUATED_FORCE + cs.K_PLANNED_DOF
+        ] = tau_ref
+    return reference
+
+
+def stage_parameters(
+    base: np.ndarray,
+    nominal: float,
+    q_ref: np.ndarray,
+    dq_ref: np.ndarray,
+    ddq_ref: np.ndarray,
+) -> np.ndarray:
+    """Bind one stage's local reference model into the acados parameter vector."""
+    parameter = np.zeros(export_ocp.NP)
+    parameter[: cs.NP] = base
+    parameter[export_ocp.P_PROGRESS_NOMINAL] = nominal
+    parameter[
+        export_ocp.P_REFERENCE_POSITION : export_ocp.P_REFERENCE_POSITION
+        + cs.K_PLANNED_DOF
+    ] = q_ref
+    parameter[
+        export_ocp.P_REFERENCE_FIRST : export_ocp.P_REFERENCE_FIRST + cs.K_PLANNED_DOF
+    ] = dq_ref
+    parameter[
+        export_ocp.P_REFERENCE_SECOND : export_ocp.P_REFERENCE_SECOND + cs.K_PLANNED_DOF
+    ] = ddq_ref
+    return parameter
 
 
 def hydraulic_utilisation(
@@ -649,10 +745,15 @@ def simulate(
     dt = float(parameters["Ts"])
     intervals = export_ocp.shooting_intervals(parameters)
     steps = int(math.ceil((arguments.move_duration + arguments.settle_duration) / dt))
-    parameter = parameter_vector(arguments)
+    base_parameter = parameter_vector(arguments)
     dynamics, bias_u, outputs, static_force = make_numeric_functions(model)
-    q_ref_all, dq_ref_all, q_eq_all = equilibrium_table(
-        bias_u, parameter, a, b, arguments.move_duration, dt, steps + intervals + 1
+    # The equilibrium table is over **virtual** time and is read at whatever
+    # virtual time the horizon has reached, so a run that spends the plan slowly
+    # walks the same table more slowly rather than needing a second one. It is
+    # sized for the worst case, a horizon that never slows down at all.
+    table_count = steps + intervals + 1
+    eq_times, q_eq_table = equilibrium_table(
+        bias_u, base_parameter, a, b, arguments.move_duration, dt, table_count
     )
     u_max, extend, retract = configure_fixed_data(
         solver, model, scale, parameters, hydraulics
@@ -660,53 +761,81 @@ def simulate(
 
     state = np.zeros(cs.NX)
     state[cs.X_PLANNED_POSITION : cs.X_PLANNED_POSITION + cs.K_PLANNED_DOF] = a
-    state[cs.X_PASSIVE_POSITION : cs.X_PASSIVE_POSITION + cs.K_PASSIVE_DOF] = q_eq_all[
-        0
-    ]
+    state[cs.X_PASSIVE_POSITION : cs.X_PASSIVE_POSITION + cs.K_PASSIVE_DOF] = (
+        equilibrium_at(eq_times, q_eq_table, 0.0)
+    )
+    # The plan is spent at nominal rate until a solve says otherwise.
+    state[cs.X_PROGRESS_RATE] = export_ocp.K_PROGRESS_RATE_REFERENCE
     # C3 block 3 starts where the machine starts: holding its own weight. There
     # is no force measurement in the stack, so h_eff at the initial pose is the
     # seed, and zero would start the run with the hydraulics switched off.
     state[cs.X_ACTUATED_FORCE : cs.X_ACTUATED_FORCE + cs.K_PLANNED_DOF] = np.asarray(
-        static_force(state, parameter)
+        static_force(state, base_parameter)
     ).reshape(-1)
 
     states = np.zeros((steps + 1, cs.NX))
-    controls = np.zeros((steps, cs.NU))
+    controls = np.zeros((steps, cs.NU_PROGRESS))
     hydraulics_used = np.zeros((steps, cs.NU + 1))
     solve_times = np.zeros(steps)
     statuses = np.zeros(steps, dtype=int)
     fallback = np.zeros(steps, dtype=bool)
+    q_ref_log = np.zeros((steps + 1, cs.K_PLANNED_DOF))
+    dq_ref_log = np.zeros_like(q_ref_log)
+    q_eq_log = np.zeros((steps + 1, cs.K_PASSIVE_DOF))
+    virtual_time = np.zeros(steps + 1)
     states[0] = state
 
     previous_x: list[np.ndarray] | None = None
     previous_u: list[np.ndarray] | None = None
     budget = float(parameters["solve_budget"])
 
+    # **The reference origin, in virtual time.** This is what the progress state
+    # buys: the horizon is sampled from the reference here and not at the wall
+    # clock, and each cycle it advances by what the last solve decided its first
+    # interval was worth. Indexing by wall clock is what let the reference run
+    # away from a machine that had fallen behind.
+    origin = 0.0
+
     for step in range(steps):
+        virtual_time[step] = origin
+        q_ref_log[step], dq_ref_log[step], _ = reference_at(
+            origin, a, b, arguments.move_duration
+        )
+        q_eq_log[step] = equilibrium_at(eq_times, q_eq_table, origin)
         # One evaluation per cycle at the measured state, held across the
         # horizon -- what `ocp_solver.cpp` does, and the trade `mpc_node.cpp`
         # already makes for `q_eq`.
-        tau_hold = np.asarray(static_force(state, parameter)).reshape(-1)
+        tau_hold = np.asarray(static_force(state, base_parameter)).reshape(-1)
+        # The progress restart: `s` is pinned at zero every cycle and the origin
+        # above carries what the last one bought (`timber_crane_mpc.cpp:173-181`).
+        state[cs.X_PROGRESS] = 0.0
         solver.reset(reset_qp_solver_mem=1)
         for stage in range(intervals + 1):
-            index = step + stage
-            solver.set(stage, "p", parameter)
+            # The stage's nominal virtual time: where `s` would be if nothing had
+            # slipped. Anchoring the reference expansion on the previous
+            # solution's progress instead was tried and measured worse -- the
+            # notes for issue 119 carry the numbers -- so this is `k T_s`.
+            nominal = stage * dt
+            tau_virtual = origin + nominal
+            q_ref, dq_ref, ddq_ref = reference_at(
+                tau_virtual, a, b, arguments.move_duration
+            )
+            equilibrium = equilibrium_at(eq_times, q_eq_table, tau_virtual)
+            solver.set(
+                stage,
+                "p",
+                stage_parameters(base_parameter, nominal, q_ref, dq_ref, ddq_ref),
+            )
             solver.cost_set(
                 stage,
                 "yref",
-                stage_reference(
-                    q_ref_all[index],
-                    dq_ref_all[index],
-                    q_eq_all[index],
-                    tau_hold,
-                    stage == intervals,
-                ),
+                stage_reference(equilibrium, tau_hold, stage == intervals),
             )
             if stage == 0:
                 lower = upper = state
             else:
                 lower, upper = state_bounds(
-                    parameters, q_eq_all[index], state[: cs.K_PLANNED_DOF]
+                    parameters, equilibrium, state[: cs.K_PLANNED_DOF], nominal
                 )
             solver.constraints_set(stage, "lbx", lower)
             solver.constraints_set(stage, "ubx", upper)
@@ -715,9 +844,15 @@ def simulate(
             guess_x = [state.copy()]
             for _ in range(intervals):
                 guess_x.append(
-                    rk4_step(dynamics, guess_x[-1], np.zeros(cs.NU), parameter, dt)
+                    rk4_step(
+                        dynamics,
+                        guess_x[-1],
+                        np.zeros(cs.NU_PROGRESS),
+                        base_parameter,
+                        dt,
+                    )
                 )
-            guess_u = [np.zeros(cs.NU) for _ in range(intervals)]
+            guess_u = [np.zeros(cs.NU_PROGRESS) for _ in range(intervals)]
         else:
             guess_x = previous_x[1:] + [previous_x[-1].copy()]
             guess_u = previous_u[1:] + [previous_u[-1].copy()]
@@ -727,8 +862,9 @@ def simulate(
             if stage == 0:
                 value = state.copy()
             else:
+                equilibrium = equilibrium_at(eq_times, q_eq_table, origin + stage * dt)
                 lower, upper = state_bounds(
-                    parameters, q_eq_all[step + stage], state[: cs.K_PLANNED_DOF]
+                    parameters, equilibrium, state[: cs.K_PLANNED_DOF], stage * dt
                 )
                 # Only the boxed prefix has bounds; the force states are held by
                 # constraint 6 and are left as the rollout produced them.
@@ -757,43 +893,66 @@ def simulate(
 
         if accepted:
             control = candidate_u[0]
+            # The QP's own iterate at node one, so it satisfies the linearised
+            # dynamics and not the integrated ones. Clamped to what the rate box
+            # makes reachable over one interval, exactly as `ocp_solver.cpp` does:
+            # an origin that jumped would skip plan the machine never tracked, and
+            # every state would still be finite while it did.
+            advance = float(
+                np.clip(
+                    candidate_x[1][cs.X_PROGRESS],
+                    0.0,
+                    dt * float(parameters["limits"]["progress_rate_max"]),
+                )
+            )
             previous_x, previous_u = candidate_x, candidate_u
         elif previous_u is not None:
             # Same shifted-previous-plan fallback used by mpc_node.
             control = (
                 previous_u[1].copy() if len(previous_u) > 1 else previous_u[0].copy()
             )
+            advance = dt
             previous_x = previous_x[1:] + [previous_x[-1].copy()]
             previous_u = previous_u[1:] + [previous_u[-1].copy()]
             fallback[step] = True
         else:
-            control = np.zeros(cs.NU)
+            control = np.zeros(cs.NU_PROGRESS)
+            advance = dt
             fallback[step] = True
 
         controls[step] = control
         hydraulics_used[step] = hydraulic_utilisation(
-            outputs, state, control, parameter, extend, retract, hydraulics
+            outputs, state, control, base_parameter, extend, retract, hydraulics
         )
-        state = rk4_step(dynamics, state, control, parameter, dt)
+        state = rk4_step(dynamics, state, control, base_parameter, dt)
         states[step + 1] = state
+        origin += advance if math.isfinite(advance) and advance >= 0.0 else dt
 
         if (
             step == 0
             or (step + 1) % max(1, int(round(1.0 / dt))) == 0
             or step + 1 == steps
         ):
-            error = np.linalg.norm(state[: cs.K_PLANNED_DOF] - q_ref_all[step + 1])
+            reached, _, _ = reference_at(origin, a, b, arguments.move_duration)
+            error = np.linalg.norm(state[: cs.K_PLANNED_DOF] - reached)
             print(
-                f"t={(step + 1) * dt:6.2f} s  status={status:2d}  "
+                f"t={(step + 1) * dt:6.2f} s  s={origin:6.2f} s  "
+                f"v_s={state[cs.X_PROGRESS_RATE]:5.3f}  status={status:2d}  "
                 f"solve={1e3 * solve_time:7.2f} ms  |q-qref|={error:.4f}"
             )
+
+    virtual_time[steps] = origin
+    q_ref_log[steps], dq_ref_log[steps], _ = reference_at(
+        origin, a, b, arguments.move_duration
+    )
+    q_eq_log[steps] = equilibrium_at(eq_times, q_eq_table, origin)
 
     # `u` is a joint velocity at Psi's input under C3, not an acceleration, so
     # the desired velocity is the command and nothing is integrated to get it.
     desired_velocity = np.vstack(
         [
             states[0, cs.X_PLANNED_VELOCITY : cs.X_PLANNED_VELOCITY + cs.K_PLANNED_DOF],
-            controls,
+            controls[:, : cs.NU],
         ]
     )
     flow_limit = float(hydraulics["pump_flow_planning_factor"]) * float(
@@ -802,10 +961,11 @@ def simulate(
 
     return RunData(
         time=dt * np.arange(steps + 1),
+        virtual_time=virtual_time,
         state=states,
-        q_ref=q_ref_all[: steps + 1],
-        dq_ref=dq_ref_all[: steps + 1],
-        q_eq=q_eq_all[: steps + 1],
+        q_ref=q_ref_log,
+        dq_ref=dq_ref_log,
+        q_eq=q_eq_log,
         control=controls,
         desired_velocity=desired_velocity,
         hydraulic_use=hydraulics_used,
@@ -831,6 +991,7 @@ def write_csv(path: Path, data: RunData) -> None:
     headings += [f"u_{name}" for name in AXIS_NAMES]
     headings += [f"force_use_{name}" for name in AXIS_NAMES]
     headings += ["pump_use", "pump_flow_m3_s", "solve_time_s", "status", "fallback"]
+    headings += ["virtual_time_s", "progress_rate", "progress_accel"]
 
     with path.open("w", newline="") as stream:
         writer = csv.writer(stream)
@@ -855,7 +1016,7 @@ def write_csv(path: Path, data: RunData) -> None:
                 cs.X_PASSIVE_VELOCITY : cs.X_PASSIVE_VELOCITY + cs.K_PASSIVE_DOF
             ].tolist()
             if index < data.control.shape[0]:
-                row += data.control[index].tolist()
+                row += data.control[index, : cs.NU].tolist()
                 row += data.hydraulic_use[index].tolist()
                 row += [data.pump_flow[index]]
                 row += [
@@ -863,9 +1024,15 @@ def write_csv(path: Path, data: RunData) -> None:
                     int(data.status[index]),
                     int(data.fallback[index]),
                 ]
+                row += [
+                    data.virtual_time[index],
+                    state[cs.X_PROGRESS_RATE],
+                    data.control[index, cs.U_PROGRESS_ACCEL],
+                ]
             else:
                 row += [math.nan] * (cs.NU + cs.NU + 2)
                 row += [math.nan, 0, 0]
+                row += [data.virtual_time[index], state[cs.X_PROGRESS_RATE], math.nan]
             writer.writerow(row)
 
 
@@ -1168,6 +1335,14 @@ def print_summary(data: RunData, parameters: dict) -> None:
     )
     print(
         f"  fallback cycles:      {np.count_nonzero(data.fallback)} / {data.fallback.size}"
+    )
+    rate = data.state[:, cs.X_PROGRESS_RATE]
+    print(
+        f"  progress rate min/mean/max: {rate.min():.4f} / {rate.mean():.4f} / {rate.max():.4f}"
+    )
+    print(
+        f"  virtual time spent:   {data.virtual_time[-1]:.3f} s of plan in "
+        f"{data.time[-1]:.3f} s of wall clock"
     )
 
 

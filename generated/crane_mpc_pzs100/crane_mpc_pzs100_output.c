@@ -63,12 +63,12 @@ casadi_real casadi_fmax(casadi_real x, casadi_real y) {
 
 casadi_real casadi_sq(casadi_real x) { return x*x;}
 
-static const casadi_int casadi_s0[3] = {23, 1, 1};
-static const casadi_int casadi_s1[3] = {5, 1, 1};
+static const casadi_int casadi_s0[3] = {25, 1, 1};
+static const casadi_int casadi_s1[3] = {6, 1, 1};
 static const casadi_int casadi_s2[3] = {11, 1, 1};
 static const casadi_int casadi_s3[3] = {24, 1, 1};
 
-/* crane_mpc_pzs100_output:(x[23],u[5],p[11])->(z[24]) */
+/* crane_mpc_pzs100_output:(x[25],u[6],p[11])->(z[24]) */
 static int casadi_f0(const casadi_real** arg, casadi_real** res, casadi_int* iw, casadi_real* w, int mem) {
   casadi_real a000, a001, a002, a003, a004, a005, a006, a007, a008, a009, a010, a011;
   casadi_real a012, a013, a014, a015, a016, a017, a018, a019, a020, a021, a022, a023;
@@ -99,15 +99,15 @@ static int casadi_f0(const casadi_real** arg, casadi_real** res, casadi_int* iw,
   casadi_real a312, a313, a314, a315, a316, a317, a318, a319, a320, a321, a322, a323;
   casadi_real a324, a325, a326, a327, a328, a329, a330, a331, a332, a333, a334, a335;
   casadi_real a336, a337, a338, a339, a340;
-  a000=arg[0]? arg[0][18] : 0;
+  a000=arg[0]? arg[0][20] : 0;
   if (res[0]!=0) res[0][0]=a000;
-  a001=arg[0]? arg[0][19] : 0;
+  a001=arg[0]? arg[0][21] : 0;
   if (res[0]!=0) res[0][1]=a001;
-  a002=arg[0]? arg[0][20] : 0;
+  a002=arg[0]? arg[0][22] : 0;
   if (res[0]!=0) res[0][2]=a002;
-  a003=arg[0]? arg[0][21] : 0;
+  a003=arg[0]? arg[0][23] : 0;
   if (res[0]!=0) res[0][3]=a003;
-  a004=arg[0]? arg[0][22] : 0;
+  a004=arg[0]? arg[0][24] : 0;
   if (res[0]!=0) res[0][4]=a004;
   a005=1.0000418879020479e+02;
   a006=-2.2204460492503131e-16;
