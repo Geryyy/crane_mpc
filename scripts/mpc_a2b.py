@@ -12,8 +12,6 @@ from __future__ import annotations
 
 import argparse
 import csv
-import hashlib
-import json
 import math
 import os
 import shutil
@@ -39,6 +37,24 @@ warnings.filterwarnings(
 )
 
 import export_ocp  # noqa: E402
+
+# The pieces this driver and the node write onto the same solver, defined once.
+# `crane_mpc.solver` is installed; a from-scratch build has not installed it yet,
+# so the source tree is the fallback, exactly as `export_ocp` resolves `cs`.
+try:
+    from crane_mpc import solver as ocp_runtime  # noqa: E402
+except ImportError:
+    sys.path.insert(0, str(PACKAGE))
+    from crane_mpc import solver as ocp_runtime  # noqa: E402
+
+configure_fixed_data = ocp_runtime.configure_fixed_data
+constraint_data = ocp_runtime.constraint_data
+position_box = ocp_runtime.position_box
+solver_signature = ocp_runtime.solver_signature
+stage_parameters = ocp_runtime.stage_parameters
+stage_reference = ocp_runtime.stage_reference
+state_bounds = ocp_runtime.state_bounds
+weight_matrices = ocp_runtime.weight_matrices
 
 cs = export_ocp.cs
 
@@ -176,6 +192,12 @@ def parse_arguments() -> argparse.Namespace:
     )
     parser.add_argument("--no-csv", action="store_true")
     parser.add_argument(
+        "--no-plot",
+        action="store_true",
+        help="skip the figure. Every automated driver passes this: they read the "
+        "CSV and the summary, and matplotlib is most of a run's wall clock",
+    )
+    parser.add_argument(
         "--show", action="store_true", help="also open the matplotlib window"
     )
     parser.add_argument(
@@ -287,109 +309,24 @@ def parameter_vector(arguments: argparse.Namespace) -> np.ndarray:
     return parameter
 
 
-def solver_signature(parameters: dict, hydraulics: dict, description: Path) -> str:
-    """Hash inputs that materially change generated solver code."""
-    digest = hashlib.sha256()
-    # W, all bounds and slack prices are set through the runtime API.  Keeping
-    # them out of this signature is important: changing a cost multiplier is the
-    # main tuning loop and must reuse the compiled solver.  Grid dimensions and
-    # regularisation are part of the generated plan used here.
-    generated_settings = {
-        "Ts": parameters["Ts"],
-        "horizon_length": parameters["horizon_length"],
-        "levenberg_marquardt": parameters["levenberg_marquardt"],
-        "qp_solver_cond_N": parameters.get("qp_solver_cond_N"),
-    }
-    digest.update(json.dumps(generated_settings, sort_keys=True, default=str).encode())
-    digest.update(json.dumps(hydraulics, sort_keys=True, default=str).encode())
-    digest.update(description.read_bytes())
-    digest.update((PACKAGE / "scripts" / "export_ocp.py").read_bytes())
-    # C3 is folded in as constants, so the model and the fit are generated code
-    # here exactly as the exporter is.
-    digest.update(Path(cs.__file__).read_bytes())
-    digest.update(Path(cs.default_actuator_path()).read_bytes())
-    return digest.hexdigest()[:16]
-
-
 def create_solver(
     arguments: argparse.Namespace, parameters: dict, hydraulics: dict
 ) -> tuple[AcadosOcpSolver, object, np.ndarray]:
-    """Load a cached solver or generate and compile an exact OCP solver."""
-    description = export_ocp.DEFAULT_DESCRIPTIONS / export_ocp.DESCRIPTION
-    signature = solver_signature(parameters, hydraulics, description)
-    cache = PACKAGE / "build" / "mpc_a2b" / f"{export_ocp.TOOL}_{signature}"
-    json_path = cache / "ocp.json"
-    solver_name = f"{export_ocp.SOLVER_PREFIX}_{export_ocp.TOOL}"
-    shared_library = cache / "code" / f"libacados_ocp_solver_{solver_name}.so"
+    """
+    Open this problem's compiled solver, compiling it once if need be.
 
+    The node opens the same one out of the same cache: two callers of one
+    problem, so a driver run does not compile a second copy of it.
+    """
+    description = (export_ocp.DEFAULT_DESCRIPTIONS / export_ocp.DESCRIPTION).read_text()
+    cache = ocp_runtime.solver_cache(parameters, hydraulics, description)
     if arguments.rebuild and cache.is_dir():
-        # This is a generated, ignored directory resolved below this package's
-        # own build/mpc_a2b root; no source or user output can be selected here.
+        # A generated, ignored directory under this run's own cache root; no
+        # source and no user output can be selected here.
         shutil.rmtree(cache)
-
-    if json_path.is_file() and shared_library.is_file():
-        print(f"Reusing cached solver: {cache}")
-        solver = AcadosOcpSolver(
-            None,
-            json_file=str(json_path),
-            generate=False,
-            build=False,
-            verbose=arguments.verbose_build,
-        )
-        # The symbolic model is still needed for plant integration and plots.
-        model = cs.CraneSymbolicModel(
-            description.read_text(), export_ocp.TOOL, actuator=cs.load_actuator_fit()
-        )
-        scale = export_ocp.constraint_scale(model, hydraulics)
-        return solver, model, scale
-
-    cache.mkdir(parents=True, exist_ok=True)
-    print(f"Generating and compiling solver in: {cache}")
-    ocp, scale, model = export_ocp.build_ocp(
-        description.read_text(), parameters, hydraulics
-    )
-    # Issue 129's sweep, kept reproducible without giving a deployment a knob it
-    # must never turn: acados' default block count is `N` and is the fastest one
-    # measured. `None` leaves the exporter's choice alone.
-    if parameters.get("qp_solver_cond_N") is not None:
-        ocp.solver_options.qp_solver_cond_N = int(parameters["qp_solver_cond_N"])
-    ocp.code_export_directory = str(cache / "code")
-    # The devcontainer keeps the acados source (and t_renderer) under /opt but
-    # installs the headers and libraries under /usr/local.  acados_template
-    # otherwise derives unusable /opt/acados/{include,lib} paths from
-    # ACADOS_SOURCE_DIR.  Native installs whose source tree contains its own
-    # installed layout keep the paths build_ocp supplied.
-    installed_prefix = Path("/usr/local")
-    if (installed_prefix / "include" / "acados").is_dir() and (
-        installed_prefix / "lib" / "libacados.so"
-    ).is_file():
-        ocp.acados_include_path = str(installed_prefix / "include")
-        ocp.acados_lib_path = str(installed_prefix / "lib")
-
-    AcadosOcpSolver.generate(ocp, json_file=str(json_path))
-    # acados emits exact nonlinear-cost Hessians even under GAUSS_NEWTON.  They
-    # are not registered by the solver (the checked-in deployment tree prunes
-    # them for the same reason) and are by far the slowest files to compile.
-    makefile = cache / "code" / "Makefile"
-    makefile.write_text(
-        "\n".join(
-            line for line in makefile.read_text().splitlines() if "_hess.c" not in line
-        )
-        + "\n"
-    )
-    AcadosOcpSolver.build(
-        str(cache / "code"), with_cython=False, verbose=arguments.verbose_build
-    )
-    if not shared_library.is_file():
-        raise RuntimeError(
-            "acados failed to build the shared solver; rerun with --verbose-build for details"
-        )
-    solver = AcadosOcpSolver(
-        None,
-        json_file=str(json_path),
-        generate=False,
-        build=False,
-        verbose=arguments.verbose_build,
+    ocp, scale, model = export_ocp.build_ocp(description, parameters, hydraulics)
+    solver, _ = ocp_runtime.load_or_build(
+        ocp, parameters, hydraulics, description, verbose=arguments.verbose_build
     )
     return solver, model, scale
 
@@ -531,217 +468,6 @@ def equilibrium_at(times: np.ndarray, table: np.ndarray, tau: float) -> np.ndarr
     return np.array(
         [np.interp(clamped, times, table[:, row]) for row in range(table.shape[1])]
     )
-
-
-def weight_matrices(parameters: dict) -> tuple[np.ndarray, np.ndarray]:
-    """Construct stage and terminal nonlinear-least-squares weights."""
-    weights = parameters["weights"]
-    planned = cs.K_PLANNED_DOF
-    passive = cs.K_PASSIVE_DOF
-    diagonal = np.concatenate(
-        [
-            np.asarray(weights["q_a"][:planned], dtype=float),
-            np.asarray(weights["dq_a"][:planned], dtype=float),
-            np.asarray(weights["q_u"][:passive], dtype=float),
-            np.asarray(weights["dq_u"][:passive], dtype=float),
-            [float(weights["lag"]), float(weights["progress_rate"])],
-            np.asarray(weights["tau_a"][:planned], dtype=float),
-            np.asarray(weights["u"][:planned], dtype=float),
-            [float(weights["progress_accel"])],
-        ]
-    )
-    terminal = float(weights["terminal_scale"]) * diagonal[: export_ocp.NY_TERMINAL]
-    return np.diag(diagonal), np.diag(terminal)
-
-
-def constraint_data(
-    model: object, scale: np.ndarray, parameters: dict, hydraulics: dict
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """Derive scaled nonlinear bounds and physical force limits."""
-    pressure = float(hydraulics["system_pressure_pa"])
-    full = np.full(cs.K_ACTUATED_DOF, pressure)
-    zero = np.zeros(cs.K_ACTUATED_DOF)
-    extend = np.abs(np.asarray(ca.evalf(model.chamber_force(full, zero))).reshape(-1))
-    retract = np.abs(np.asarray(ca.evalf(model.chamber_force(zero, full))).reshape(-1))
-    lower_h = np.concatenate([-retract[: cs.K_PLANNED_DOF] / scale[: cs.NU], [0.0]])
-    upper_h = np.concatenate(
-        [
-            extend[: cs.K_PLANNED_DOF] / scale[: cs.NU],
-            [
-                float(hydraulics["pump_flow_planning_factor"])
-                * float(hydraulics["pump_flow_max"])
-                / scale[cs.NU]
-            ],
-        ]
-    )
-    return lower_h, upper_h, extend[: cs.K_PLANNED_DOF], retract[: cs.K_PLANNED_DOF]
-
-
-def configure_fixed_data(
-    solver: AcadosOcpSolver,
-    model: object,
-    scale: np.ndarray,
-    parameters: dict,
-    hydraulics: dict,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Write runtime-tunable data that does not move during a run."""
-    intervals = export_ocp.shooting_intervals(parameters)
-    W, W_e = weight_matrices(parameters)
-    lower_h, upper_h, extend, retract = constraint_data(
-        model, scale, parameters, hydraulics
-    )
-    # The input box is the five joint commands and then the progress
-    # acceleration, which is not an actuated axis and has its own bound.
-    u_max = np.concatenate(
-        [
-            np.asarray(parameters["limits"]["u_max"][: cs.K_PLANNED_DOF], dtype=float),
-            [float(parameters["limits"]["progress_accel_max"])],
-        ]
-    )
-    slack = parameters["slack"]
-    soft_state = np.concatenate(
-        [np.asarray(slack["q_u"], dtype=float), np.asarray(slack["dq_u"], dtype=float)]
-    )
-    soft_h = np.concatenate(
-        [
-            np.asarray(slack["cylinder_force"][: cs.K_PLANNED_DOF], dtype=float),
-            [float(slack["pump_flow"])],
-        ]
-    )
-
-    for stage in range(intervals + 1):
-        if stage < intervals:
-            solver.cost_set(stage, "W", W)
-            solver.constraints_set(stage, "lbu", -u_max)
-            solver.constraints_set(stage, "ubu", u_max)
-            solver.constraints_set(stage, "lh", lower_h)
-            solver.constraints_set(stage, "uh", upper_h)
-        else:
-            solver.cost_set(stage, "W", W_e)
-
-        price = (
-            soft_h
-            if stage == 0
-            else (soft_state if stage == intervals else np.r_[soft_state, soft_h])
-        )
-        zeros = np.zeros(price.size)
-        solver.cost_set(stage, "Zl", zeros)
-        solver.cost_set(stage, "Zu", zeros)
-        solver.cost_set(stage, "zl", price)
-        solver.cost_set(stage, "zu", price)
-    return u_max, extend, retract
-
-
-def position_box(
-    parameters: dict, measured: np.ndarray
-) -> tuple[np.ndarray, np.ndarray]:
-    """
-    Apply `q_a_margin` to constraint 1's box, never excluding `measured`.
-
-    `ocp_solver.cpp`'s `position_box`, and it has to stay that: a margin that
-    excluded the pose the machine is in would make stage 1 chase a position no
-    input reaches in one interval.
-    """
-    limits = parameters["limits"]
-    margin = np.asarray(limits["q_a_margin"][: cs.K_PLANNED_DOF], dtype=float)
-    lower = np.asarray(limits["q_a_lower"][: cs.K_PLANNED_DOF], dtype=float) + margin
-    upper = np.asarray(limits["q_a_upper"][: cs.K_PLANNED_DOF], dtype=float) - margin
-    return np.minimum(lower, measured), np.maximum(upper, measured)
-
-
-def state_bounds(
-    parameters: dict,
-    equilibrium: np.ndarray,
-    measured: np.ndarray,
-    elapsed: float,
-) -> tuple[np.ndarray, np.ndarray]:
-    """Build one stage's state box around its passive equilibrium."""
-    limits = parameters["limits"]
-    u_max = np.asarray(limits["u_max"][: cs.K_PLANNED_DOF], dtype=float)
-    q_lower, q_upper = position_box(parameters, measured)
-    # The boxed rows are the rigid state, the lagged command and the progress
-    # pair; the force states are bounded by constraint 6 and carry no box
-    # (`export_ocp.py`). `u_f` is a filtered `u`, so it gets `u`'s own box.
-    lag = u_max[list(cs.K_LAG_AXES)]
-    # `0 <= v_s <= progress_rate_max`: the floor is structural, the machine does
-    # not run the plan backwards. `s`'s own bound is per stage and exact -- it
-    # starts each cycle at zero, so by `elapsed` seconds into the horizon it
-    # cannot have outrun `elapsed` spent at the fastest rate allowed.
-    rate_max = float(limits["progress_rate_max"])
-    lower = np.concatenate(
-        [
-            q_lower,
-            equilibrium - np.asarray(limits["q_u_max"], dtype=float),
-            -np.asarray(limits["dq_a_max"][: cs.K_PLANNED_DOF], dtype=float),
-            -np.asarray(limits["dq_u_max"], dtype=float),
-            -lag,
-            [0.0, 0.0],
-        ]
-    )
-    upper = np.concatenate(
-        [
-            q_upper,
-            equilibrium + np.asarray(limits["q_u_max"], dtype=float),
-            np.asarray(limits["dq_a_max"][: cs.K_PLANNED_DOF], dtype=float),
-            np.asarray(limits["dq_u_max"], dtype=float),
-            lag,
-            [elapsed * rate_max, rate_max],
-        ]
-    )
-    return lower, upper
-
-
-def stage_reference(
-    q_eq: np.ndarray, tau_ref: np.ndarray, terminal: bool
-) -> np.ndarray:
-    """
-    Build an acados stage or terminal residual reference.
-
-    **The tracking rows are zero here.** The reference is evaluated at the
-    progress state, so it rides in `p` and the residual carries the error
-    itself; acados subtracts `yref` as a constant and could not express a
-    reference that moves with a decision variable.
-
-    `tau_ref` is `h_eff`, and the effort term of `wiki/mpc.md` §2 references it
-    rather than zero: `tau_a = M_eff ddq_a + h_eff`, so a zero reference prices
-    the machine holding its own weight and the optimizer buys droop (issue 117).
-    The smoothness row still references zero -- `u` is a command, not a force.
-    The progress row references one second of plan per second of wall clock.
-    """
-    reference = np.zeros(export_ocp.NY_TERMINAL if terminal else export_ocp.NY)
-    reference[
-        export_ocp.Y_PASSIVE_POSITION : export_ocp.Y_PASSIVE_POSITION + cs.K_PASSIVE_DOF
-    ] = q_eq
-    reference[export_ocp.Y_PROGRESS_RATE] = export_ocp.K_PROGRESS_RATE_REFERENCE
-    if not terminal:
-        reference[
-            export_ocp.Y_ACTUATED_FORCE : export_ocp.Y_ACTUATED_FORCE + cs.K_PLANNED_DOF
-        ] = tau_ref
-    return reference
-
-
-def stage_parameters(
-    base: np.ndarray,
-    nominal: float,
-    q_ref: np.ndarray,
-    dq_ref: np.ndarray,
-    ddq_ref: np.ndarray,
-) -> np.ndarray:
-    """Bind one stage's local reference model into the acados parameter vector."""
-    parameter = np.zeros(export_ocp.NP)
-    parameter[: cs.NP] = base
-    parameter[export_ocp.P_PROGRESS_NOMINAL] = nominal
-    parameter[
-        export_ocp.P_REFERENCE_POSITION : export_ocp.P_REFERENCE_POSITION
-        + cs.K_PLANNED_DOF
-    ] = q_ref
-    parameter[
-        export_ocp.P_REFERENCE_FIRST : export_ocp.P_REFERENCE_FIRST + cs.K_PLANNED_DOF
-    ] = dq_ref
-    parameter[
-        export_ocp.P_REFERENCE_SECOND : export_ocp.P_REFERENCE_SECOND + cs.K_PLANNED_DOF
-    ] = ddq_ref
-    return parameter
 
 
 def hydraulic_utilisation(
@@ -1414,7 +1140,10 @@ def main() -> int:
         a, b = validate_movement(arguments, parameters)
         solver, model, scale = create_solver(arguments, parameters, hydraulics)
         data = simulate(arguments, parameters, hydraulics, solver, model, scale, a, b)
-        plot(arguments.output.resolve(), data, parameters, hydraulics, arguments.show)
+        if not arguments.no_plot:
+            plot(
+                arguments.output.resolve(), data, parameters, hydraulics, arguments.show
+            )
         if not arguments.no_csv:
             csv_path = arguments.output.resolve().with_suffix(".csv")
             write_csv(csv_path, data)

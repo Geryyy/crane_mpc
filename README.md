@@ -5,14 +5,52 @@ The `crane_mpc` node is the producer of `/crane/mpc/horizon` described by
 beside the controller manager and solves the OCP in [mpc](../../wiki/mpc.md) §1
 with acados once per 40 ms cycle.
 
+## Where the code is
+
+The node is Python and the solver is generated C:
+
+| file | what it is |
+|---|---|
+| `crane_mpc/node.py` | the node: the graph, the cycle, the fallback, the reports |
+| `crane_mpc/solver.py` | the solver wrapper: what is written before a solve and read after, the dead-time predictor and the static hold force |
+| `crane_mpc/horizon.py` | the reference read off the wire, resampled, and written back |
+| `crane_mpc/problem.py` | the OCP itself, as an `AcadosOcp` |
+| `scripts/export_ocp.py` | the same problem written out as the generated C in `generated/` |
+
+`problem.py` is imported by both the node and the exporter, so the solver a
+deployment runs and the tree that is checked in are one definition of the
+problem rather than two.
+
+The solver is compiled once, on the first startup that needs it, into a cache
+outside the source tree (`CRANE_MPC_OCP_CACHE`, default the system temporary
+directory), keyed by everything that changes generated code. Weights, bounds and
+slack prices are deliberately not in that key: retuning must reuse the compiled
+solver, and it does.
+
+**`src/` and `include/` still carry the C++ node this one was ported from**, and
+`crane_mpc_node` still builds. It is kept only until the Python node has been
+shown equivalent to it against the same recorded inputs; the executables are
+`crane_mpc_node` (C++) and `crane_mpc_node.py` (Python) until then.
+
 ## OCP
 
-The state is `x = [q_a, q_u, dq_a, dq_u]` and the input is actuated
-acceleration `u = ddq_a`. The continuous dynamics and the actuated-force output
-come directly from `crane_model`'s private CasADi graph; this package contains no
-second rigid-body dynamics implementation. acados integrates that graph with one
-explicit ERK4 step per shooting interval and runs `SQP_RTI`, exactly one
-iteration per cycle.
+The state is the C3-extended one `crane_model.symbolic` defines: the five
+planned joint coordinates and the two passive sway coordinates with their
+velocities, then C3's lagged command `u_f`, the progress pair `(s, v_s)` and the
+actuated force `tau_a` — 25 rows. **The input is a joint velocity command**, five
+of them, plus the progress acceleration; it is not an acceleration and is never
+differenced into one. The tool axis is not planned: it rides in `p` pinned at its
+measurement, which is why six actuated joints leave this node and five are solved
+for.
+
+The continuous dynamics and the actuated-force output come directly from
+`crane_model.symbolic`'s CasADi graph; this package contains no second
+rigid-body dynamics implementation. acados integrates that graph with an
+**implicit** Runge-Kutta step (two Gauss stages) per shooting interval and runs
+`SQP_RTI`, exactly one iteration per cycle. The integrator is implicit because
+C3 is stiff at `T_s`: the fastest eigenvalue of the linearised plant gives
+`|lambda| T_s = 8.5` against an explicit stability limit near 2.8, so an
+explicit step diverges in three samples.
 
 Stage and terminal costs use nonlinear least squares and a Gauss–Newton Hessian.
 The stage residual is
@@ -78,15 +116,25 @@ slowest sway period has never been computed and is not presented as a
 measurement.
 
 The state pinned as `x_0` is the measured state propagated under the command
-already applied by `sensor_to_valve_delay`, default 50 ms. This is deliberately
-not one 40 ms step. The configured solve budget is 30 ms; the solve is not
+already applied by `sensor_to_valve_delay`, default 60 ms — C3's transport dead
+time, pinned common to all six axes. This is deliberately not one 40 ms step.
+The prediction is an acados integrator over the same model, so the command in
+flight reaches `ddq` through the rows it actually reaches it through.
+
+The configured solve budget is 30 ms; the solve is not
 interrupted at it, and what it decides is whether the finished step is applied
 (see the next section). The offline performance test prints the measured median
 rather than asserting wall-clock timing on whichever machine runs CI.
 
-Only `u_0` is used. The inner-loop command is a velocity,
-`dq_a,d = dq_a,0 + T_s u_0 = [x_1]_{dq_a}`—never acceleration, force, or valve
-command.
+**What the horizon carries is the plan's own predicted joint velocity, not the
+optimizer's command.** Under C3 the two are different quantities: `u` is the
+command at the compensator's input and `dq_a` is what the plant does with it,
+and the PT1 command lag and the force state stand between them — 100 to 185 ms
+of it, depending on axis. `u` lives in the solution and reaches no topic. Issue
+120 is that gap; it is not closed here, because a port that changed what is
+published could not be shown equivalent to what it replaced. The expression
+`dq_a,d = dq_a,0 + T_s u_0` that used to be written here was true only while `u`
+was an acceleration, which it stopped being in issue 116.
 
 ## The four requirements of `mpc` §5.3
 
@@ -105,7 +153,7 @@ even when the horizon is non-finite, because failing the call would erase the
 backend's own account of what went wrong.
 
 **2. Never latch internal state across cycles.** Every quantity acados carries
-between `solve` calls is named in `src/ocp.cpp` and answered per quantity:
+between `solve` calls is named in `crane_mpc/solver.py` and answered per quantity:
 
 | Quantity | Carried by acados | What happens |
 |---|---|---|
@@ -146,14 +194,18 @@ way of manufacturing a horizon out of a solve that failed. Inventing one there
 would be requirement 3's enforcement taken back out. The receiver's expiry ramp
 is the defined behaviour instead.
 
-That case is not hypothetical. **At the shipped 50-knot horizon the measured RTI
-solve on the CI image is 70–80 ms against the 30 ms budget**, so on that machine
-every solve overruns: the node publishes nothing until a solve lands inside the
-budget, and reaches §6's repeated-failure escalation in
-`max_consecutive_failures` cycles. `mpc` §4 names the two mitigations—a
-non-uniform grid, or terminal weighting instead of horizon length—and neither is
-implemented; the budget is not widened to hide the measurement. What the
-deployed RT-IPC does is unmeasured, and PRD §14 leaves that measurement human-run.
+That case is not hypothetical, but it is no longer the common one. Issue 129
+measured the shipped configuration at a **13.7 ms median against the 30 ms
+budget**, p90 27 ms, max 68–102 ms — so an overrun is a tail under load rather
+than every cycle. (An older figure of 70–80 ms is in circulation; it was measured
+before issue 116 changed the model and the integrator, and it is not this
+problem.) **Every timing on this container is worthless without the load
+average**: the same binary measured 34.89 ms median at load 4.0 and 13.05 ms at
+load 1.8, and `scripts/sweep_grid.py` prints the load beside every number for
+that reason. `mpc` §4 names the two mitigations — a non-uniform grid, or terminal
+weighting instead of horizon length — and neither is implemented; the budget is
+not widened to hide a measurement. What the deployed RT-IPC does is unmeasured,
+and PRD §14 leaves that measurement human-run.
 
 **4. Expose the residuals.** The per-constraint violation and the per-term cost
 go out on a stream, not only into a log, because §5.3's reason for wanting them
@@ -183,7 +235,7 @@ of the softening of issue 050 and is not changed here.
 decide what happens when one fails.
 
 **Warm start.** Every cycle is linearised about the previous solution shifted one
-step, with the last stage duplicated—`shifted()` in `ocp.hpp`. The shift is the
+step, with the last stage duplicated — `Ocp.shifted` in `crane_mpc/solver.py`. The shift is the
 whole content of the rule: an unshifted copy is also a warm start, also
 converges, and also publishes a horizon that satisfies every contract here,
 because one RTI iteration repairs a one-step defect without complaint. It is
@@ -192,8 +244,8 @@ node runs, and nothing downstream can see it. The test for it therefore reads th
 guess and not the answer.
 
 **Cold start.** On the first cycle, and after any silence, from a rollout holding
-`u = 0`—`Ocp::cold_start`, `N` ERK4 steps on the same `F` the solver integrates,
-so the guess satisfies the dynamics it is a guess for. Not the measured state
+`u = 0` — `Ocp.cold_start`, `N` steps of an acados integrator over the same model
+the solver integrates, so the guess satisfies the dynamics it is a guess for. Not the measured state
 held: a held state violates its own continuity conditions by `F(x_0, 0) - x_0`
 per interval, and on the passive rows that defect is the entire tool swing, which
 is exactly where §2's sway terms live.

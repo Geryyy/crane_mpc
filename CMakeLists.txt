@@ -2,6 +2,9 @@ cmake_minimum_required(VERSION 3.8)
 project(crane_mpc)
 
 find_package(ament_cmake REQUIRED)
+# The node is Python. What is still C++ here is the solver acados generated and
+# the C++ node the Python one is being shown equivalent to before it is deleted.
+find_package(ament_cmake_python REQUIRED)
 # acados, for the optimal control problem of `wiki/mpc.md` §1.
 # `wiki/implementation/libraries.md` §1 lists it for "the optimal control problems
 # of `mpc` and `trajectory_planning`" against "SQP loops, condensing, integrators,
@@ -126,6 +129,11 @@ target_link_libraries(ocp
 
 generate_parameter_library(crane_mpc_parameters
   src/crane_mpc_parameters.yaml)
+# The same yaml again, for the Python node: one declaration, two languages, so
+# a parameter cannot be added to one and missed by the other. The target name
+# differs from the C++ one only because CMake target names are global.
+generate_parameter_module(parameters
+  src/crane_mpc_parameters.yaml)
 
 # The adapter, as a library rather than as part of the executable: the stream
 # test constructs this node object in process, so what is asserted is the node
@@ -140,8 +148,7 @@ target_compile_features(mpc_node PUBLIC cxx_std_17)
 target_include_directories(mpc_node
   PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-    $<INSTALL_INTERFACE:include>
-  )
+    $<INSTALL_INTERFACE:include>)
 target_link_libraries(mpc_node
   PUBLIC
     horizon_source
@@ -176,6 +183,13 @@ install(
 install(
   TARGETS crane_mpc_node
   RUNTIME DESTINATION lib/${PROJECT_NAME})
+ament_python_install_package(${PROJECT_NAME})
+# `crane_mpc_node.py` beside `crane_mpc_node` while both exist: they are the
+# same node in two languages and the parity run needs to start either. The
+# suffix goes when the C++ does.
+install(
+  PROGRAMS scripts/crane_mpc_node.py
+  DESTINATION lib/${PROJECT_NAME})
 
 ament_export_include_directories(include)
 ament_export_libraries(horizon_source mpc_node ocp)
@@ -205,5 +219,17 @@ add_custom_target(crane_mpc_generated_is_current ALL
   COMMENT "checking generated/ against scripts/export_ocp.py"
   VERBATIM)
 add_dependencies(ocp crane_mpc_generated_is_current)
+
+if(BUILD_TESTING)
+  find_package(ament_cmake_pytest REQUIRED)
+  # The node's own cycle, the solver wrapper and the resample. The solver tests
+  # compile a solver on their first run and reuse the cache after.
+  # Run from the build tree, not from the source: with the source directory as
+  # the working directory `import crane_mpc` finds the source package, which has
+  # no generated parameter module in it and is not what a deployment runs.
+  ament_add_pytest_test(crane_mpc_python ${CMAKE_CURRENT_SOURCE_DIR}/test
+    WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+    TIMEOUT 900)
+endif()
 
 ament_package()

@@ -59,6 +59,8 @@ def run_cell(knots: int, dt: float, extra: list[str]) -> dict | None:
     command = [
         sys.executable,
         str(HARNESS),
+        # Nobody reads these figures and they are most of a cell's wall clock.
+        "--no-plot",
         "--horizon-knots",
         str(knots),
         "--dt",

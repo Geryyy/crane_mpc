@@ -8,6 +8,7 @@
   <license>Apache-2.0</license>
 
   <buildtool_depend>ament_cmake</buildtool_depend>
+  <buildtool_depend>ament_cmake_python</buildtool_depend>
 
     <depend>crane_model</depend>
     <depend>crane_msgs</depend>
@@ -17,14 +18,21 @@
   <depend>diagnostic_msgs</depend>
   <depend>nav_msgs</depend>
     <depend>acados</depend>
+  <!-- The node builds the OCP through acados_template at startup, so both
+       are runtime dependencies of the Python half. The C++ half links
+       neither: what reaches it is generated straight-line C. -->
   <depend>casadi</depend>
   <build_depend>eigen</build_depend>
   <exec_depend>eigen</exec_depend>
   <depend>generate_parameter_library</depend>
   <depend>rclcpp</depend>
+  <depend>rclpy</depend>
+  <exec_depend>python3-numpy</exec_depend>
   <depend>std_msgs</depend>
   <depend>trajectory_msgs</depend>
 
+
+  <test_depend>python3-pytest</test_depend>
 
   <export>
     <build_type>ament_cmake</build_type>
