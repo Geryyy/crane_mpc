@@ -553,6 +553,7 @@ def simulate(
     previous_x: list[np.ndarray] | None = None
     previous_u: list[np.ndarray] | None = None
     budget = float(parameters["solve_budget"])
+    rate_max = float(parameters["limits"]["progress_rate_max"])
 
     # **The reference origin, in virtual time.** This is what the progress state
     # buys: the horizon is sampled from the reference here and not at the wall
@@ -600,8 +601,11 @@ def simulate(
                 lower = upper = state
             else:
                 lower, upper = state_bounds(
-                    parameters, equilibrium, state[: cs.K_PLANNED_DOF], nominal
+                    parameters, equilibrium, state[: cs.K_PLANNED_DOF]
                 )
+                # `s`'s ceiling is what `nominal` seconds at the fastest rate
+                # allowed can have reached; the box is the caller's to close.
+                upper[cs.X_PROGRESS] = nominal * rate_max
             solver.constraints_set(stage, "lbx", lower)
             solver.constraints_set(stage, "ubx", upper)
 
@@ -629,8 +633,9 @@ def simulate(
             else:
                 equilibrium = equilibrium_at(eq_times, q_eq_table, origin + stage * dt)
                 lower, upper = state_bounds(
-                    parameters, equilibrium, state[: cs.K_PLANNED_DOF], stage * dt
+                    parameters, equilibrium, state[: cs.K_PLANNED_DOF]
                 )
+                upper[cs.X_PROGRESS] = stage * dt * rate_max
                 # Only the boxed prefix has bounds; the force states are held by
                 # constraint 6 and are left as the rollout produced them.
                 boxed = lower.size

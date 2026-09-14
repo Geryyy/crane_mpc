@@ -25,7 +25,10 @@ The solver is compiled once, on the first startup that needs it, into a cache
 outside the source tree (`CRANE_MPC_OCP_CACHE`, default the system temporary
 directory), keyed by everything that changes generated code. Weights, bounds and
 slack prices are deliberately not in that key: retuning must reuse the compiled
-solver, and it does.
+solver, and it does. The two integrators beside it — the cold-start stepper and
+the dead-time predictor — are cached under the same key (issue 134), which is
+what a warm startup of 0.13 s against a cold 5.0 s is (load 2.3; every timing
+here is worthless without it).
 
 **The C++ node this one was ported from is gone** (issue 132). It was kept for a
 parity run against the same recorded inputs, and that run could not pass: the two

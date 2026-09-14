@@ -3,11 +3,18 @@
 import numpy as np
 import pytest
 import yaml
+from acados_template import AcadosOcpSolver, AcadosSimSolver
 from ament_index_python.packages import get_package_share_directory
 from crane_model import symbolic as cs
 from crane_mpc import problem
 from crane_mpc.horizon import Grid, Knots, resample
-from crane_mpc.solver import Ocp, Outcome
+from crane_mpc.solver import (
+    Ocp,
+    Outcome,
+    predictor_cache,
+    solver_cache,
+    solver_signature,
+)
 
 PLANNED = cs.K_PLANNED_DOF
 
@@ -19,9 +26,14 @@ def read_parameters(name):
 
 
 @pytest.fixture(scope="module")
-def ocp():
-    parameters = read_parameters("crane_mpc.yaml")
-    parameters.update(read_parameters("hydraulic_limits.yaml"))
+def parameters():
+    values = read_parameters("crane_mpc.yaml")
+    values.update(read_parameters("hydraulic_limits.yaml"))
+    return values
+
+
+@pytest.fixture(scope="module")
+def ocp(parameters):
     return Ocp(
         problem.default_description().read_text(),
         parameters,
@@ -138,6 +150,51 @@ def test_a_payload_step_drops_the_warm_start_whatever_the_caller_passes(ocp, sta
     # And only the step: the cycle after it is warm again.
     assert ocp.solve(state, horizon, q_eq, guess).warm_started
     ocp.set_payload(0.0, np.zeros(3))
+
+
+def test_a_second_construction_over_a_warm_cache_compiles_nothing(
+    ocp, parameters, monkeypatch
+):
+    """
+    Issue 134. The two integrators beside the solver passed neither `generate`
+    nor `build`, and acados defaults both to True, so every startup ran CasADi
+    code generation and `make` over a cache that was already warm.
+    """
+
+    def refuse(*arguments, **keywords):
+        raise AssertionError("a warm cache was regenerated or rebuilt")
+
+    for backend in (AcadosOcpSolver, AcadosSimSolver):
+        monkeypatch.setattr(backend, "generate", staticmethod(refuse))
+        monkeypatch.setattr(backend, "build", staticmethod(refuse))
+
+    Ocp(
+        problem.default_description().read_text(),
+        parameters,
+        parameters["hydraulics"],
+    )
+
+
+def test_the_predictor_is_rebuilt_for_the_model_changes_the_solver_is(parameters):
+    """
+    The predictor integrates the same model, so a second and weaker key is how a
+    stale one survives a model change the solver correctly rebuilds for.
+    """
+    hydraulics = parameters["hydraulics"]
+    description = problem.default_description().read_text()
+    changed = description + "<!-- a link moved -->"
+    assert solver_cache(parameters, hydraulics, description) != solver_cache(
+        parameters, hydraulics, changed
+    )
+
+    signature = solver_signature(parameters, hydraulics, description)
+    warm = predictor_cache(signature, 0.06, 0.04)
+    assert warm != predictor_cache(
+        solver_signature(parameters, hydraulics, changed), 0.06, 0.04
+    )
+    # The sub-step count is generated code too, and the interval alone fixes it
+    # only while `T_s` is held.
+    assert warm != predictor_cache(signature, 0.06, 0.02)
 
 
 def test_a_non_finite_input_never_reaches_a_solve(ocp, state):

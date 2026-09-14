@@ -151,7 +151,7 @@ def weight_matrices(parameters: dict) -> tuple[np.ndarray, np.ndarray]:
 
 
 def constraint_data(
-    model, scale: np.ndarray, parameters: dict, hydraulics: dict
+    model, scale: np.ndarray, hydraulics: dict
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Scaled bounds of `h` (constraints 6 and 7) and the physical force limits."""
     extend, retract = problem.chamber_forces(
@@ -190,14 +190,15 @@ def position_box(
 
 
 def state_bounds(
-    parameters: dict, equilibrium: np.ndarray, measured: np.ndarray, elapsed: float
+    parameters: dict, equilibrium: np.ndarray, measured: np.ndarray
 ) -> tuple[np.ndarray, np.ndarray]:
     """
     Build one stage's box over the boxed prefix of `x`.
 
     The rigid rows, the lagged command and the progress pair. The force rows
     carry no box -- constraint 6 holds them, because their transmission is not
-    constant.
+    constant. `s`'s ceiling comes out at zero and is the caller's to move: it is
+    the one entry of this box that differs between stages.
     """
     limits = parameters["limits"]
     u_max = np.asarray(limits["u_max"][: cs.K_PLANNED_DOF], dtype=float)
@@ -221,7 +222,7 @@ def state_bounds(
             np.asarray(limits["dq_a_max"][: cs.K_PLANNED_DOF], dtype=float),
             np.asarray(limits["dq_u_max"], dtype=float),
             lag,
-            [elapsed * rate_max, rate_max],
+            [0.0, rate_max],
         ]
     )
     return lower, upper
@@ -311,9 +312,7 @@ def configure_fixed_data(
     """
     intervals = problem.shooting_intervals(parameters)
     weight, terminal_weight = weight_matrices(parameters)
-    lower_h, upper_h, extend, retract = constraint_data(
-        model, scale, parameters, hydraulics
-    )
+    lower_h, upper_h, extend, retract = constraint_data(model, scale, hydraulics)
     # The input box is the five joint commands and then the progress
     # acceleration, which is not an actuated axis and has its own bound.
     u_max = np.concatenate(
@@ -409,6 +408,21 @@ def solver_cache(parameters: dict, hydraulics: dict, description_xml: str) -> Pa
     return _cache_root() / f"{problem.TOOL}_{signature}"
 
 
+def _compiled(json_path: Path, library: Path, what: str) -> bool:
+    """
+    Is this cache entry a finished build, and say out loud when it is not.
+
+    A miss is minutes of `make`, and the usual cause is a cache exported for
+    another machine rather than a change anybody made. `crane_planning` prints
+    what diverged for that reason (`ocp.py:826-845`); this is no quieter.
+    """
+    if json_path.is_file() and library.is_file():
+        return True
+    missing = "no json" if not json_path.is_file() else "no shared library"
+    print(f"crane_mpc: compiling {what}: {missing} in {json_path.parent}")
+    return False
+
+
 def load_or_build(
     ocp, parameters: dict, hydraulics: dict, description_xml: str, verbose: bool = False
 ) -> tuple[AcadosOcpSolver, dict]:
@@ -435,7 +449,7 @@ def load_or_build(
         )
         return solver, json.loads(json_path.read_text())["dims"]
 
-    if json_path.is_file() and library.is_file():
+    if _compiled(json_path, library, f"the {name} solver"):
         return opened()
 
     cache.mkdir(parents=True, exist_ok=True)
@@ -460,9 +474,30 @@ def load_or_build(
     return opened()
 
 
-def _build_predictor(ocp, seconds: float, sample_time: float, verbose: bool):
+def _sub_steps(seconds: float, sample_time: float) -> int:
+    """How many integrator steps the interval takes with none longer than `T_s`."""
+    return max(1, int(np.ceil(seconds / sample_time)))
+
+
+def predictor_cache(signature: str, seconds: float, sample_time: float) -> Path:
     """
-    Build an acados integrator over the same model, for the transport dead time.
+    Where this exact integrator's compiled library lives.
+
+    Keyed by `load_or_build`'s own signature and not a second, weaker one: the
+    predictor integrates the same `ocp.model`, so everything that rebuilds the
+    solver must rebuild this too -- a weaker key is how a stale predictor
+    survives a model change. The interval and the sub-step count are the rest of
+    what its generated code depends on.
+    """
+    steps = _sub_steps(seconds, sample_time)
+    return _cache_root() / f"predictor_{problem.TOOL}_{signature}_{seconds:g}_{steps}"
+
+
+def _build_predictor(
+    ocp, signature: str, seconds: float, sample_time: float, verbose: bool
+):
+    """
+    Open an acados integrator over the same model, compiling it once if need be.
 
     IRK for the reason the horizon is IRK: C3 is stiff at `T_s` (`|lambda| T_s`
     is 8.5 against an explicit stability limit near 2.8), and the delay is longer
@@ -474,12 +509,26 @@ def _build_predictor(ocp, seconds: float, sample_time: float, verbose: bool):
     sim.solver_options.T = seconds
     sim.solver_options.integrator_type = "IRK"
     sim.solver_options.num_stages = 2
-    sim.solver_options.num_steps = max(1, int(np.ceil(seconds / sample_time)))
-    tree = _cache_root() / f"predictor_{problem.TOOL}_{seconds:g}"
+    sim.solver_options.num_steps = _sub_steps(seconds, sample_time)
+    tree = predictor_cache(signature, seconds, sample_time)
     sim.code_export_directory = str(tree / "code")
     _installed_acados(sim)
+    json_path = tree / "sim.json"
+    library = tree / "code" / f"libacados_sim_solver_{ocp.model.name}.so"
+    fresh = _compiled(json_path, library, f"the {seconds:g} s predictor")
     tree.mkdir(parents=True, exist_ok=True)
-    return AcadosSimSolver(sim, json_file=str(tree / "sim.json"), verbose=verbose)
+    # acados defaults both of these to True, and its own reuse check is reached
+    # only when `generate is False` -- so the unset defaults ran CasADi codegen
+    # and `make` on every construction, warm tree or not. The tree name is the
+    # key, so acados' re-hash of the formulation is not asked for on top of it.
+    return AcadosSimSolver(
+        sim,
+        json_file=str(json_path),
+        generate=not fresh,
+        build=not fresh,
+        check_reuse_possible=False,
+        verbose=verbose,
+    )
 
 
 class Ocp:
@@ -506,6 +555,7 @@ class Ocp:
         self._ocp, self.scale, self.model = problem.build_ocp(
             description_xml, parameters, hydraulics
         )
+        signature = solver_signature(parameters, hydraulics, description_xml)
         self.solver, self._dims = load_or_build(
             self._ocp, parameters, hydraulics, description_xml, verbose=verbose
         )
@@ -533,10 +583,12 @@ class Ocp:
         )
         self._slack_price = slack_prices(parameters)
 
-        self._stepper = _build_predictor(self._ocp, self.Ts, self.Ts, verbose)
+        self._stepper = _build_predictor(
+            self._ocp, signature, self.Ts, self.Ts, verbose
+        )
         delay = float(parameters["sensor_to_valve_delay"])
         self._predictor = (
-            _build_predictor(self._ocp, delay, self.Ts, verbose)
+            _build_predictor(self._ocp, signature, delay, self.Ts, verbose)
             if delay > 0.0
             else None
         )
@@ -755,7 +807,7 @@ class Ocp:
         # Built once and that one entry moved, because fifty of these cost more
         # than the solve can spare.
         rate_max = float(self.parameters["limits"]["progress_rate_max"])
-        lower, upper = state_bounds(self.parameters, q_eq, measured, 0.0)
+        lower, upper = state_bounds(self.parameters, q_eq, measured)
         running = stage_reference(q_eq, force_reference, terminal=False)
         terminal = stage_reference(q_eq, force_reference, terminal=True)
         for stage in range(intervals + 1):
