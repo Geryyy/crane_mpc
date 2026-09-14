@@ -8,6 +8,7 @@ from crane_mpc import problem
 from crane_mpc.node import MpcNode
 from crane_msgs.msg import SolverHealth
 from rclpy.parameter import Parameter
+from rclpy.time import Time
 from sensor_msgs.msg import JointState
 from std_msgs.msg import String
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
@@ -143,3 +144,24 @@ def test_the_active_mode_publishes_on_the_contract_topic(node):
     assert node.mode == "active"
     assert "_shadow_horizon_publisher" not in node.published
     assert len(node.published["_horizon_publisher"]) == 1
+
+
+def test_a_non_finite_measurement_is_not_written_through(node):
+    """
+    It is a stale sensor, not a solver fault: dropped here the node keeps the
+    last finite pose and the stamp stops advancing, so `max_state_age` is what
+    speaks. Written through, the NaN reaches `x0` and comes back as a solve
+    failure counted against `max_consecutive_failures`.
+    """
+    configured(node)
+    fresh = node._actuated_stamp
+    broken = joint_state(node)
+    broken.position[2] = float("nan")
+    node.on_joint_state(broken)
+
+    assert node._q_a[2] == POSE[2]
+    assert node._actuated_stamp == fresh
+    # The passive rows of that same message are finite and are taken: the two
+    # groups are read and stamped apart, so one bad axis does not stop the sway
+    # measurement.
+    assert node._passive_stamp == Time.from_msg(broken.header.stamp)

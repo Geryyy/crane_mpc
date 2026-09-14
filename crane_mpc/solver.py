@@ -26,10 +26,10 @@ from pathlib import Path
 
 import casadi as ca
 import numpy as np
-from acados_template import AcadosOcpSolver, AcadosSim, AcadosSimSolver
+from acados_template import AcadosOcp, AcadosOcpSolver, AcadosSim, AcadosSimSolver
 from crane_model import symbolic as cs
 
-from . import problem
+from . import config, problem
 
 #: Slack below this is round-off, not a violation (`ocp_solver.hpp` kSlackNoticeable).
 SLACK_NOTICEABLE = 1e-6
@@ -388,13 +388,17 @@ def _installed_acados(target) -> None:
     Point acados_template at the installed headers and libraries.
 
     The devcontainer keeps the acados source under `/opt` and installs under
-    `/usr/local`; acados_template otherwise derives unusable `/opt/acados/{include,lib}`
-    paths from `ACADOS_SOURCE_DIR`.
+    `/usr/local`. Take `/usr/local` only when that install is complete:
+    acados_template needs `lib/link_libs.json` to know what to link against, and
+    the `/usr/local` copy does not always carry it. Without it, fall through to
+    acados_template's own `ACADOS_SOURCE_DIR` default, which does.
     """
     prefix = Path("/usr/local")
-    if (prefix / "include" / "acados").is_dir() and (
-        prefix / "lib" / "libacados.so"
-    ).is_file():
+    if (
+        (prefix / "include" / "acados").is_dir()
+        and (prefix / "lib" / "libacados.so").is_file()
+        and (prefix / "lib" / "link_libs.json").is_file()
+    ):
         target.acados_include_path = str(prefix / "include")
         target.acados_lib_path = str(prefix / "lib")
 
@@ -420,8 +424,14 @@ def load_or_build(
     library = cache / "code" / f"libacados_ocp_solver_{name}.so"
 
     def opened():
+        # acados refuses ocp=None since 0.5; the formulation is read back from the
+        # json the generate step wrote, and nothing is regenerated or rebuilt.
         solver = AcadosOcpSolver(
-            None, json_file=str(json_path), generate=False, build=False, verbose=verbose
+            AcadosOcp.from_json(str(json_path)),
+            json_file=str(json_path),
+            generate=False,
+            build=False,
+            verbose=verbose,
         )
         return solver, json.loads(json_path.read_text())["dims"]
 
@@ -483,6 +493,10 @@ class Ocp:
         *,
         verbose: bool = False,
     ) -> None:
+        # Before anything is built: generating and compiling a solver for a
+        # configuration that is then refused costs a minute for nothing, and a
+        # configuration that is *not* refused here is one no later stage checks.
+        config.check_settings(parameters, hydraulics)
         self.parameters = parameters
         self.hydraulics = hydraulics
         self.Ts = float(parameters["Ts"])
@@ -531,6 +545,7 @@ class Ocp:
         self._base_parameter = np.zeros(cs.NP)
         self.payload_mass_kg = 0.0
         self.payload_com_m = np.zeros(3)
+        self._payload_changed = False
 
     # -- what the problem is, checked against what was compiled -----------------
 
@@ -581,10 +596,15 @@ class Ocp:
 
     def set_payload(self, mass_kg: float, com_m) -> bool:
         """Bind a payload into `p`. Returns whether it changed the model."""
+        config.check_payload(mass_kg, com_m)
         com = np.asarray(com_m, dtype=float)
         changed = mass_kg != self.payload_mass_kg or not np.array_equal(
             com, self.payload_com_m
         )
+        # Held here rather than trusted to the caller passing `guess=None`
+        # (`ocp_solver.cpp:1396-1400`): `h_eff` moves discontinuously at a
+        # grasp, so a plan that was warm was a plan for another model.
+        self._payload_changed = self._payload_changed or changed
         self.payload_mass_kg = float(mass_kg)
         self.payload_com_m = com
         self._base_parameter[cs.P_PAYLOAD_MASS] = float(mass_kg)
@@ -626,17 +646,32 @@ class Ocp:
         instant it takes effect, and under C3 the input reaches `ddq` only
         through the command-lag and force rows.
         """
+        x = np.asarray(x, dtype=float)
+        u = np.asarray(u, dtype=float)
+        if not np.all(np.isfinite(x)) or not np.all(np.isfinite(u)):
+            raise ValueError(
+                "the measured state and the applied input must be finite to be "
+                "carried through the transport dead time"
+            )
         if self._predictor is None:
-            return np.asarray(x, dtype=float).copy()
+            return x.copy()
         self._predictor.set("p", self._model_parameter())
-        self._predictor.set("x", np.asarray(x, dtype=float))
-        self._predictor.set("u", np.asarray(u, dtype=float))
+        self._predictor.set("x", x)
+        self._predictor.set("u", u)
         status = self._predictor.solve()
         if status != 0:
             raise RuntimeError(
                 f"the dead-time predictor answered {status_word(status)}"
             )
-        return self._predictor.get("x")
+        predicted = self._predictor.get("x")
+        # acados reports a successful step whose state is NaN, and this is the
+        # state `x0` is built from (`ocp_solver.cpp:1156-1162`).
+        if not np.all(np.isfinite(predicted)):
+            raise RuntimeError(
+                "propagating the measured state forward under the applied command "
+                "left it non-finite"
+            )
+        return predicted
 
     # -- one cycle ---------------------------------------------------------------
 
@@ -687,6 +722,24 @@ class Ocp:
                 f"the horizon carries {len(horizon)} knots and the problem is posed "
                 f"on {intervals + 1}"
             )
+        # The curvature is the sharp one of the four: the resample's Hermite
+        # second derivative carries `1/dt^2` in the *incoming* knot spacing,
+        # which nothing bounds from below, and it reaches every stage of the
+        # horizon through `p`, multiplied by `ds^2`, into a Gauss-Newton Hessian
+        # (`ocp_solver.cpp:1250-1266`).
+        if not all(
+            np.all(np.isfinite(block))
+            for block in (
+                horizon.q_a_ref,
+                horizon.dq_a_ref,
+                horizon.ddq_a_ref,
+                np.asarray(q_eq, dtype=float),
+            )
+        ):
+            raise ValueError(
+                "the reference, its curvature or the sway equilibrium carries a "
+                "value that is not finite"
+            )
         # `s` is virtual time *within one cycle*: it restarts here, and the
         # caller's own reference origin is what carries between cycles.
         x0[cs.X_PROGRESS] = 0.0
@@ -730,7 +783,9 @@ class Ocp:
             self.solver.constraints_set(stage, "lbx", lower)
             self.solver.constraints_set(stage, "ubx", upper)
 
-        warm = guess is not None and guess.warm(intervals)
+        # A payload step forces the cold start, whatever the caller passed.
+        warm = not self._payload_changed and guess is not None and guess.warm(intervals)
+        self._payload_changed = False
         seed = guess if warm else self.cold_start(x0)
         for stage in range(intervals + 1):
             if stage == 0:

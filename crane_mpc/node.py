@@ -76,6 +76,36 @@ def _text(value: float) -> str:
     return f"{value:.17g}"
 
 
+def _measured(message: JointState, index: dict, names: list):
+    """
+    `(q, dq)` for `names`, or `None` if the message does not carry them finitely.
+
+    `dq` is `None` where the message carries no velocity for them, which leaves
+    the last one standing.
+
+    **A non-finite row is dropped rather than written through**
+    (`mpc_node.cpp:360-364`). A NaN that reaches `x0` comes back as a solve
+    failure: it counts against `max_consecutive_failures` and is reported as
+    FAULT_SOLVER, when what happened is that one sensor went stale. Dropped
+    here, the group's stamp does not advance and it surfaces as staleness
+    through `max_state_age`, which is what it is.
+    """
+    rows = [index.get(name) for name in names]
+    if any(row is None for row in rows) or len(message.position) <= max(rows):
+        return None
+    position = np.array([message.position[row] for row in rows])
+    velocity = (
+        np.array([message.velocity[row] for row in rows])
+        if len(message.velocity) > max(rows)
+        else None
+    )
+    if not np.all(np.isfinite(position)):
+        return None
+    if velocity is not None and not np.all(np.isfinite(velocity)):
+        return None
+    return position, velocity
+
+
 class MpcNode(Node):
     def __init__(self) -> None:
         super().__init__("crane_mpc")
@@ -202,17 +232,17 @@ class MpcNode(Node):
             return
         index = {name: row for row, name in enumerate(message.name)}
         stamp = Time.from_msg(message.header.stamp)
-        rows = [index.get(name) for name in self._joints]
-        if all(row is not None for row in rows) and len(message.position) > max(rows):
-            self._q_a = np.array([message.position[row] for row in rows])
-            if len(message.velocity) > max(rows):
-                self._dq_a = np.array([message.velocity[row] for row in rows])
+        measured = _measured(message, index, self._joints)
+        if measured is not None:
+            self._q_a, velocity = measured
+            if velocity is not None:
+                self._dq_a = velocity
             self._actuated_stamp = stamp
-        rows = [index.get(name) for name in self._passive_joints]
-        if all(row is not None for row in rows) and len(message.position) > max(rows):
-            self._q_u = np.array([message.position[row] for row in rows])
-            if len(message.velocity) > max(rows):
-                self._dq_u = np.array([message.velocity[row] for row in rows])
+        measured = _measured(message, index, self._passive_joints)
+        if measured is not None:
+            self._q_u, velocity = measured
+            if velocity is not None:
+                self._dq_u = velocity
             self._passive_stamp = stamp
 
     def on_reference(self, message: JointTrajectory) -> None:

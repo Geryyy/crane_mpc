@@ -101,6 +101,7 @@ typedef struct crane_mpc_pzs100_solver_capsule
     external_function_external_param_casadi *impl_dae_fun;
     external_function_external_param_casadi *impl_dae_fun_jac_x_xdot_z;
     external_function_external_param_casadi *impl_dae_jac_x_xdot_u_z;
+    external_function_external_param_casadi *impl_dae_jac_p;
 
 
 
@@ -144,7 +145,7 @@ ACADOS_SYMBOL_EXPORT int crane_mpc_pzs100_acados_free_capsule(crane_mpc_pzs100_s
 
 ACADOS_SYMBOL_EXPORT int crane_mpc_pzs100_acados_create(crane_mpc_pzs100_solver_capsule * capsule);
 
-ACADOS_SYMBOL_EXPORT int crane_mpc_pzs100_acados_reset(crane_mpc_pzs100_solver_capsule* capsule, int reset_qp_solver_mem);
+ACADOS_SYMBOL_EXPORT int crane_mpc_pzs100_acados_reset(crane_mpc_pzs100_solver_capsule* capsule, int reset_qp_solver_mem, int reset_numerical_values, int reset_solver_options, int reset_x_to_x0_bar);
 
 /**
  * Generic version of crane_mpc_pzs100_acados_create which allows to use a different number of shooting intervals than
@@ -173,7 +174,6 @@ ACADOS_SYMBOL_EXPORT int crane_mpc_pzs100_acados_setup_qp_matrices_and_factorize
 ACADOS_SYMBOL_EXPORT int crane_mpc_pzs100_acados_free(crane_mpc_pzs100_solver_capsule * capsule);
 ACADOS_SYMBOL_EXPORT void crane_mpc_pzs100_acados_print_stats(crane_mpc_pzs100_solver_capsule * capsule);
 ACADOS_SYMBOL_EXPORT int crane_mpc_pzs100_acados_custom_update(crane_mpc_pzs100_solver_capsule* capsule, double* data, int data_len);
-
 
 ACADOS_SYMBOL_EXPORT ocp_nlp_in *crane_mpc_pzs100_acados_get_nlp_in(crane_mpc_pzs100_solver_capsule * capsule);
 ACADOS_SYMBOL_EXPORT ocp_nlp_out *crane_mpc_pzs100_acados_get_nlp_out(crane_mpc_pzs100_solver_capsule * capsule);

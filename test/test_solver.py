@@ -118,3 +118,43 @@ def test_the_warm_start_is_the_last_horizon_shifted(ocp, state):
     # spent rather than carried forward with the old origin.
     assert guess.states[0, cs.X_PROGRESS] <= solution.states[1, cs.X_PROGRESS] + 1e-12
     assert ocp.solve(solution.states[1], horizon, q_eq, guess).warm_started
+
+
+def test_a_payload_step_drops_the_warm_start_whatever_the_caller_passes(ocp, state):
+    """
+    `h_eff` moves discontinuously at a grasp, so the plan that was warm was a
+    plan for another model. Held in the solver rather than trusted to the caller
+    passing `guess=None` (`ocp_solver.cpp:1396-1400`).
+    """
+    position = state[cs.X_PLANNED_POSITION : cs.X_PLANNED_POSITION + PLANNED]
+    horizon = horizon_holding(ocp, position)
+    q_eq = state[cs.X_PASSIVE_POSITION : cs.X_PASSIVE_POSITION + cs.K_PASSIVE_DOF]
+
+    guess = ocp.shifted(ocp.solve(state, horizon, q_eq))
+    assert ocp.solve(state, horizon, q_eq, guess).warm_started
+
+    ocp.set_payload(120.0, [0.1, 0.0, -0.4])
+    assert not ocp.solve(state, horizon, q_eq, guess).warm_started
+    # And only the step: the cycle after it is warm again.
+    assert ocp.solve(state, horizon, q_eq, guess).warm_started
+    ocp.set_payload(0.0, np.zeros(3))
+
+
+def test_a_non_finite_input_never_reaches_a_solve(ocp, state):
+    """
+    Both are the same defect: acados answers a NaN state with status 0, so what
+    comes back is a `FAULT_SOLVER` for a measurement or a reference nobody
+    checked. `ddq_a_ref` is the sharp one -- the resample's second derivative
+    carries `1/dt^2` in the incoming knot spacing, which nothing bounds below.
+    """
+    broken = state.copy()
+    broken[cs.X_PLANNED_VELOCITY] = np.nan
+    with pytest.raises(ValueError, match="finite"):
+        ocp.propagate(broken, np.zeros(cs.NU_PROGRESS))
+
+    position = state[cs.X_PLANNED_POSITION : cs.X_PLANNED_POSITION + PLANNED]
+    horizon = horizon_holding(ocp, position)
+    horizon.ddq_a_ref[3, 1] = np.nan
+    q_eq = state[cs.X_PASSIVE_POSITION : cs.X_PASSIVE_POSITION + cs.K_PASSIVE_DOF]
+    with pytest.raises(ValueError, match="curvature"):
+        ocp.solve(state, horizon, q_eq)

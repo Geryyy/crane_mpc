@@ -52,12 +52,12 @@ extern "C" {
 #endif
 
 static const casadi_int casadi_s0[3] = {25, 1, 1};
-static const casadi_int casadi_s1[3] = {0, 0, 1};
-static const casadi_int casadi_s2[3] = {0, 1, 1};
+static const casadi_int casadi_s1[3] = {0, 1, 1};
+static const casadi_int casadi_s2[3] = {0, 0, 1};
 static const casadi_int casadi_s3[3] = {27, 1, 1};
 static const casadi_int casadi_s4[3] = {16, 1, 1};
 
-/* crane_mpc_pzs100_cost_y_e_fun:(i0[25],i1[],i2[0],i3[],i4[27])->(o0[16]) */
+/* crane_mpc_pzs100_cost_y_e_fun:(i0[25],i1[0],i2[0],i3[],i4[27])->(o0[16]) */
 static int casadi_f0(const casadi_real** arg, casadi_real** res, casadi_int* iw, casadi_real* w, int mem) {
   casadi_real a00, a01, a02, a03, a04, a05, a06, a07, a08, a09, a10, a11;
   casadi_real a12, a13, a14;
@@ -230,8 +230,8 @@ CASADI_SYMBOL_EXPORT const casadi_int* crane_mpc_pzs100_cost_y_e_fun_sparsity_in
   switch (i) {
     case 0: return casadi_s0;
     case 1: return casadi_s1;
-    case 2: return casadi_s2;
-    case 3: return casadi_s1;
+    case 2: return casadi_s1;
+    case 3: return casadi_s2;
     case 4: return casadi_s3;
     default: return 0;
   }
