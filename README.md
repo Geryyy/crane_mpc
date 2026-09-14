@@ -27,10 +27,18 @@ directory), keyed by everything that changes generated code. Weights, bounds and
 slack prices are deliberately not in that key: retuning must reuse the compiled
 solver, and it does.
 
-**`src/` and `include/` still carry the C++ node this one was ported from**, and
-`crane_mpc_node` still builds. It is kept only until the Python node has been
-shown equivalent to it against the same recorded inputs; the executables are
-`crane_mpc_node` (C++) and `crane_mpc_node.py` (Python) until then.
+**The C++ node this one was ported from is gone** (issue 132). It was kept for a
+parity run against the same recorded inputs, and that run could not pass: the two
+nodes were deliberately diverged — the Python fixed issue 125's dead-time bug and
+the C++ did not, and the shadow comparison carries two cost rows the C++ never
+had. It had no tests, no launch file started it and nothing outside the package
+included its headers, so what the gate protected was 4,300 unverified lines.
+`architecture-audit.md` §2 is the argument.
+
+The one executable is `crane_mpc_node.py`. The suffix outlived the second node it
+distinguished from and stays for now: dropping it changes the launch contract and
+[ROS 2 Interfaces](../../wiki/implementation/ros2_interfaces.md) §8, which is
+issue 133's diff together with the `ament_python` conversion.
 
 ## OCP
 
@@ -75,6 +83,15 @@ and 5 remain hard.
 
     ./scripts/export_ocp.py            # rewrite `generated/`
     ./scripts/export_ocp.py --check    # regenerate into a scratch tree and diff
+
+**Nothing compiles that tree since the C++ went** (issue 132): the node builds its
+own solver at startup into `CRANE_MPC_OCP_CACHE` and never opens `generated/`. It
+is kept anyway, as the one reviewable form of the OCP — a diff of it is how a
+change to the problem becomes visible to a reviewer — and the `--check` is kept
+with it, re-homed from a prerequisite of the deleted `ocp` library to a
+standalone build-time `ALL` target, because a tree nobody checks is a tree nobody
+can read as current. It regenerates and diffs in about 2 s and compiles nothing.
+`architecture-audit.md` §3 wants it as a pytest once CMake goes; that is issue 133.
 
 `generated/` carries **one** artifact, `crane_mpc_pzs100/`. The description is
 baked into a generated solver, so an artifact is one machine's, and the PZS100 is
@@ -551,12 +568,12 @@ slice 1b identification campaign supplies bandwidth, lag, and delay data.
 
 ## Dependency resolution
 
-The image installs acados under `/usr/local`, with
-`/usr/local/cmake/acadosConfig.cmake`; CMake's standard prefix search therefore
-finds it without `acados_DIR` or a custom `CMAKE_PREFIX_PATH`. CasADi arrives
-through `crane_model::casadi_graph`. `CMakeLists.txt` records the complete lookup
-reasoning. The package manifest declares both dependencies even though neither
-has a rosdep key in this workspace.
+acados and CasADi are reached by the Python, as `acados_template` and `casadi`
+off the image's interpreter: nothing here looks either of them up from CMake any
+more. Neither has a rosdep key in this workspace, so the manifest declares both
+as documentation and the image is what provides them. The image's
+`ACADOS_SOURCE_DIR=/opt/acados` is the templater's, and it is what the startup
+build of the solver uses.
 
 ## Still out of scope
 

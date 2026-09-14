@@ -12,9 +12,16 @@ scratch tree and diffs, which is what says the tree still matches its inputs.
 ## What is in here
 
     crane_mpc_ocp_generated.h        the grid, the residual offsets and the
-                                     conditioning divisors -- written by the
-                                     export, read by `src/ocp_solver.cpp`
+                                     conditioning divisors, as the export chose
+                                     them
     crane_mpc_pzs100/                the PZS100 solver, constrained
+
+**Nothing compiles this tree.** The node builds its own solver at startup, into
+`CRANE_MPC_OCP_CACHE`, and never opens what is here; the C++ that did was deleted
+by issue 132. The tree is kept as the reviewable form of the OCP -- a diff of it
+is how a change to the problem is seen -- and `--check` is kept with it as a
+build-time target, because a tree nobody checks is a tree nobody can read as
+current.
 
 **One solver.** The description is *baked in*, so a generated solver is one
 machine's, and the PZS100 is the machine that has to run.
@@ -46,8 +53,8 @@ tree disagree.**
 
 `docs/features/cbs-ocp-python/grill.md` §4 records the alternative that was
 considered and rejected -- hashing the inputs into the generated code and
-comparing in a test, which is the pattern `crane_model`'s own fixture and
-`test_contract.cpp` use -- and records that this is therefore a deliberate
+comparing in a test, which is the pattern `crane_model`'s own fixture uses --
+and records that this is therefore a deliberate
 divergence from both existing generator scripts in this repository. The failure
 mode it accepts is a solver silently running the previous hydraulic constants or
 the previous description.

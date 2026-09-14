@@ -12,20 +12,21 @@
 
     <depend>crane_model</depend>
     <depend>crane_msgs</depend>
-  <depend>crane_ocp</depend>
+  <!-- Build only, and by path: `scripts/export_ocp.py` imports
+       `crane_ocp/scripts/crane_ocp_export.py` out of the source tree for the
+       `generated/` check the build runs. Nothing links the C++ capsule any
+       more: issue 132 deleted the one target that did. -->
+  <build_depend>crane_ocp</build_depend>
     <depend>sensor_msgs</depend>
     <depend>control_msgs</depend>
   <depend>diagnostic_msgs</depend>
   <depend>nav_msgs</depend>
     <depend>acados</depend>
-  <!-- The node builds the OCP through acados_template at startup, so both
-       are runtime dependencies of the Python half. The C++ half links
-       neither: what reaches it is generated straight-line C. -->
+  <!-- The node builds the OCP through acados_template at startup, so both are
+       runtime dependencies. Neither has a rosdep key here; the image provides
+       them. -->
   <depend>casadi</depend>
-  <build_depend>eigen</build_depend>
-  <exec_depend>eigen</exec_depend>
   <depend>generate_parameter_library</depend>
-  <depend>rclcpp</depend>
   <depend>rclpy</depend>
   <exec_depend>python3-numpy</exec_depend>
   <depend>std_msgs</depend>
