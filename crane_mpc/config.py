@@ -11,9 +11,11 @@ the solver.
 quantity, the value it carries and why the bound exists. "invalid weight" is
 worth much less than what a negative entry does to the Gauss-Newton Hessian.
 
-Nothing here reads a file or a parameter server: the caller has already shaped
-the parameters (`node.py`'s `_parameter_dict`/`_hydraulics_dict`, or a yaml on a
-driver's disk), and this refuses that shape.
+Nothing here reads a file or a parameter server. `parameter_dict` and
+`hydraulics_dict` re-shape the generated `Params` object -- whatever it came off
+-- into the plain dicts `problem` and `solver` read, and `check_settings`
+refuses that shape. A yaml on a driver's disk arrives in the same shape without
+passing through them.
 """
 
 from __future__ import annotations
@@ -55,8 +57,65 @@ WIDTHS = {
 }
 
 
+#: The scalar, weight, limit and slack names `problem` and `solver` read, in the
+#: blocks they read them from. One list, so a parameter cannot be declared in
+#: the yaml and then quietly not reach the OCP.
+SCALARS = (
+    "Ts",
+    "levenberg_marquardt",
+    "solve_budget",
+    "sensor_to_valve_delay",
+)
+WEIGHTS = (
+    "q_a",
+    "dq_a",
+    "q_u",
+    "dq_u",
+    "tau_a",
+    "u",
+    "lag",
+    "progress_rate",
+    "progress_accel",
+    "terminal_scale",
+)
+LIMITS = (
+    "q_a_lower",
+    "q_a_upper",
+    "q_a_margin",
+    "dq_a_max",
+    "q_u_max",
+    "dq_u_max",
+    "u_max",
+    "progress_rate_max",
+    "progress_accel_max",
+)
+SLACK = ("q_u", "dq_u", "cylinder_force", "pump_flow")
+HYDRAULICS = ("pump_flow_max", "pump_flow_planning_factor", "system_pressure_pa")
+
+
 class MpcConfigError(ValueError):
     """Refusal. The message is what the operator gets instead of a node."""
+
+
+def parameter_dict(values) -> dict:
+    """
+    Shape the parameters as the problem reads them.
+
+    One shape, whether they came off the parameter server or out of a yaml on a
+    driver's disk. `horizon_length` is the one integer; the rest are floats or
+    sequences the OCP reads as they are.
+    """
+    shaped = {name: float(getattr(values, name)) for name in SCALARS}
+    shaped["horizon_length"] = int(values.horizon_length)
+    for block, names in (("weights", WEIGHTS), ("limits", LIMITS), ("slack", SLACK)):
+        group = getattr(values, block)
+        shaped[block] = {name: getattr(group, name) for name in names}
+    return shaped
+
+
+def hydraulics_dict(values) -> dict:
+    hydraulics = values.hydraulics
+    return {name: float(getattr(hydraulics, name)) for name in HYDRAULICS}
 
 
 def _positive(value: float) -> bool:
@@ -94,7 +153,7 @@ def check_settings(parameters: dict, hydraulics: dict) -> None:
 
     `horizon_length >= 2` is **not** here: `problem.shooting_intervals` already
     refuses it, and on the path `scripts/export_ocp.py` takes, which never
-    reaches this module.
+    reaches this check.
     """
     for block, widths in WIDTHS.items():
         for name, width in widths.items():
@@ -238,7 +297,7 @@ def check_payload(mass_kg: float, com_m) -> None:
 
     No `valid` flag and no inertia, unlike `check_payload` in the C++:
     `crane_msgs/Payload` carries neither, so an undeclared payload is refused
-    where it is declared (`node.py`'s `_payload_from_message`) and the body
+    where it is declared (`reports.payload_from_message`) and the body
     bound into `p` here is a point mass.
     """
     mass = float(mass_kg)

@@ -11,7 +11,10 @@ The node is Python and the solver is generated C:
 
 | file | what it is |
 |---|---|
-| `crane_mpc/node.py` | the node: the graph, the cycle, the fallback, the reports |
+| `crane_mpc/node.py` | the ROS adapter: parameters, subscriptions, publishers, the service, the timer |
+| `crane_mpc/cycle.py` | one cycle without ROS: the silence gates, the cadence anchor, the fallback ladder |
+| `crane_mpc/reports.py` | what the cycle says about itself, as messages: health, the shadow comparison, the TCP path |
+| `crane_mpc/config.py` | the parameters shaped as the problem reads them, and what it refuses to start on |
 | `crane_mpc/solver.py` | the solver wrapper: what is written before a solve and read after, the dead-time predictor and the static hold force |
 | `crane_mpc/horizon.py` | the reference read off the wire, resampled, and written back |
 | `crane_mpc/problem.py` | the OCP itself, as an `AcadosOcp` |
