@@ -5,3 +5,5 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 .ruff_cache/
+# setup.py generates it from crane_mpc_parameters.yaml, into the source package
+crane_mpc/parameters.py*

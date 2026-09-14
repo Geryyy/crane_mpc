@@ -7,16 +7,10 @@
   <maintainer email="maintainers@example.invalid">Architecture maintainers</maintainer>
   <license>Apache-2.0</license>
 
-  <buildtool_depend>ament_cmake</buildtool_depend>
-  <buildtool_depend>ament_cmake_python</buildtool_depend>
+  <buildtool_depend>ament_python</buildtool_depend>
 
     <depend>crane_model</depend>
     <depend>crane_msgs</depend>
-  <!-- Build only, and by path: `scripts/export_ocp.py` imports
-       `crane_ocp/scripts/crane_ocp_export.py` out of the source tree for the
-       `generated/` check the build runs. Nothing links the C++ capsule any
-       more: issue 132 deleted the one target that did. -->
-  <build_depend>crane_ocp</build_depend>
     <depend>sensor_msgs</depend>
     <depend>control_msgs</depend>
   <depend>diagnostic_msgs</depend>
@@ -34,8 +28,14 @@
 
 
   <test_depend>python3-pytest</test_depend>
+  <!-- Test only, and by path: `scripts/export_ocp.py` imports
+       `crane_ocp/scripts/crane_ocp_export.py` out of the source tree, and the
+       `generated/` check that used to be a CMake `ALL` target is now
+       `test/test_generated_is_current.py` (issue 133). Nothing links the C++
+       capsule any more: issue 132 deleted the one target that did. -->
+  <test_depend>crane_ocp</test_depend>
 
   <export>
-    <build_type>ament_cmake</build_type>
+    <build_type>ament_python</build_type>
   </export>
 </package>
