@@ -23,11 +23,19 @@ crane_mpc:
     weights:
       q_a: [4.0, 4.0, 4.0, 4.0, 1.0, 1.0]
       dq_a: [0.4, 0.4, 0.4, 0.4, 0.1, 0.1]
+      # Sway is damped by rate alone. Not an oversight and not a retune: q_eq is
+      # frozen at the measurement, so a weight here prices boom+arm travel rather
+      # than swing, and measured under the node's own centre 20.0 is worse than
+      # 0.0 on both tracking and sway. Issue 137 settled that and moved the
+      # declared default onto it; the derivation is in the parameter description
+      # and the centre is issue 049's.
       q_u: [0.0, 0.0]
       dq_u: [4.0, 4.0]
       # Priced against h_eff and not against zero -- see the parameter
       # description; a zero reference prices holding the machine's own weight.
       tau_a: [1.0e-8, 1.0e-8, 1.0e-8, 1.0e-8, 1.0e-8, 1.0e-8]
+      # `u` is a velocity here, and progress_rate below is derived against this
+      # 1.0 -- the two move together or not at all (issue 137).
       u: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
       # The progress rows. `lag` is the tracking error projected on the
       # reference's direction of travel, on the slewing axis alone as in the

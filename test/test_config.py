@@ -31,9 +31,10 @@ def refusal(parameters) -> str:
 def test_the_shipped_configuration_is_accepted(shipped):
     """A guard that rejects what the repo ships is a bug in the guard."""
     check_settings(shipped, shipped["hydraulics"])
-    # And **not** issue 137's weight divergence: the guard on the weights is
-    # non-negativity, so the shipped zero sway weight passes here. Widening it
-    # to positive is 137's question, not this file's.
+    # The guard on the weights is non-negativity, so the shipped zero sway offset
+    # weight passes. Issue 137 established that the zero is the value that should
+    # ship and moved the declared default onto it; the guard stays non-negative,
+    # because a positive one would refuse the configuration this repo ships.
     assert list(shipped["weights"]["q_u"]) == [0.0, 0.0]
 
 

@@ -72,13 +72,34 @@ explicit step diverges in three samples.
 Stage and terminal costs use nonlinear least squares and a Gauss–Newton Hessian.
 The stage residual is
 
-    [q_a, dq_a, q_u, dq_u, tau_a, u]
+    [q_a, dq_a, q_u, dq_u, lag, v_s, tau_a, u]
 
-against `[q_a,ref, dq_a,ref, q_eq, 0, 0, 0]`. In particular, effort prices
-`tau_a`, not acceleration, so effective inertia affects how hard the optimizer
-pushes. Sway offset and sway rate are independent terms. The terminal cost omits
-the two input-dependent blocks and raises the remaining weights; it is a cost,
-not a hard terminal set.
+against `[q_a,ref(s), q_a,ref'(s) v_s, q_eq, 0, 0, 1, h_eff, 0]`. The tracking
+and `lag` rows carry their reference **inside** the residual, because it is
+evaluated at the decision variable `s` and `yref` is subtracted as a constant;
+everything else is `yref`. `lag` and `v_s` are issue 119's two rows — the
+tracking error projected on the reference's direction of travel, on the slewing
+axis alone, and the progress rate as a regulator toward one. In particular,
+effort prices `tau_a`, not acceleration, so effective inertia affects how hard
+the optimizer pushes, and it prices it against `h_eff` and not zero (issue 117),
+so holding the machine's own weight is free. Sway offset and sway rate are
+independent terms, and **only the rate is priced** — see below. The terminal cost
+omits the effort and input blocks and raises the remaining weights by
+`terminal_scale`; it is a cost, not a hard terminal set.
+
+**`q_eq` is the measured passive position, not a solved hanging pose.**
+`cycle.py` pins it at the propagated measurement and holds it across every stage,
+so the sway residual is zero at the first knot by construction and what it
+charges over the rest of the horizon is the *change* in the passive rows. That is
+not sway. The hanging pose moves 1:1 with `-(q_boom + q_arm)` and with nothing
+else, so a tool hanging quietly through a lift still produces the boom and arm
+travel as a residual: **a weight on it prices luffing, not swinging.** That is why
+`weights.q_u` ships at zero and `weights.dq_u` carries the damping — a rate
+residual needs no centre — and why issue 137 recorded the pair rather than
+retuning it. The offline A2B driver solves a true equilibrium per stage, so the
+two are not the same cost, and measured under *this* centre the offset weight is
+marginally worse than zero. The centre itself is worth three to four times the
+peak sway that the weight is worth nothing, and it is issue 049's.
 
 Constraints 1–5 of `mpc` §3 are native boxes: control-safe actuated position,
 actuated velocity, sway about `q_eq`, sway rate, and input rate. Constraints 6

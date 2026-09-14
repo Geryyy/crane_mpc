@@ -342,9 +342,11 @@ class Cycle:
                 f"The measured state could not be carried {self.delay} s forward, so "
                 f"nothing is published on {HORIZON_TOPIC}: {error}.",
             )
-        # The sway box is centred on where the tool is actually swinging, not on
-        # the hanging pose. `weights.q_u` being zero and this centre justify each
-        # other in a circle -- both are recorded, neither is this port's business.
+        # The sway box, and §2's offset residual with it, are centred on where the
+        # tool is actually swinging and not on the hanging pose. `weights.q_u`
+        # being zero and this centre still justify each other in a circle, but the
+        # circle is no longer only recorded: issue 137 measured it, and the centre
+        # is worth 3-4x the peak sway the weight is worth nothing. Issue 049's.
         self.q_eq = x0[
             cs.X_PASSIVE_POSITION : cs.X_PASSIVE_POSITION + PASSIVE_DOF
         ].copy()

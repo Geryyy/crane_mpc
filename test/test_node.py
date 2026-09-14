@@ -1,5 +1,7 @@
 """The node's cycle: what it publishes, and what it refuses to publish."""
 
+import math
+
 import pytest
 import rclpy
 from crane_model import canonical_joints
@@ -17,6 +19,15 @@ NAMES = canonical_joints()
 ACTUATED = [NAMES[row] for row in cs.K_ACTUATED_ROWS]
 PASSIVE = [NAMES[row] for row in cs.K_PASSIVE_ROWS]
 POSE = [0.0, 0.5, 1.0, 0.2, 0.0, 0.3]
+# The tool hanging at `POSE`, not a pair of zeros. The tilt joint's URDF range is
+# [0.785, 2.356] and it hangs at pi/2, so the zeros these used to be pinned the
+# tool 0.785 rad outside its own stop, some 90 degrees off hanging, with the sway
+# box centred there. Nothing refuses that -- `lbx = ubx = x0` at stage 0 takes it
+# -- it just made the feedback QP hard: 48 of its 50 iterations against 13 from
+# here, so every assertion in this file sat two iterations from the cap and
+# `weights.q_u` looked like what decided it (issue 137). Tip is
+# `pi/2 - q_boom - q_arm`; tilt does not move.
+PASSIVE_POSE = [0.5 * math.pi - POSE[1] - POSE[2], 0.5 * math.pi]
 
 
 @pytest.fixture(scope="module")
@@ -52,7 +63,7 @@ def joint_state(node, position=POSE, velocity=None, permuted=False):
     message = JointState()
     message.header.stamp = node.get_clock().now().to_msg()
     names = list(ACTUATED) + list(PASSIVE)
-    values = list(position) + [0.0, 0.0]
+    values = list(position) + list(PASSIVE_POSE)
     rates = list(velocity if velocity is not None else [0.0] * 6) + [0.0, 0.0]
     if permuted:
         order = [7, 2, 0, 5, 6, 1, 4, 3]

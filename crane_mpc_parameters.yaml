@@ -231,11 +231,36 @@ crane_mpc:
         lower_element_bounds<>: [0.0]
     q_u:
       type: double_array
-      default_value: [20.0, 20.0]
+      default_value: [0.0, 0.0]
       read_only: true
-      description: "Q_u of 2 -- the sway offset from the hanging pose, per passive
-        row. It is needed **with** the rate weight below and not instead of it:
-        penalising the rate alone admits a large steady offset. Not tuned."
+      description: "Q_u of 2 -- the sway offset, per passive row. **Zero: the
+        offset row is in the residual and unpriced, and dq_u below is the whole
+        of the sway damping.** 2's `penalising the rate alone admits a large
+        steady offset` is the general argument and it is sound; what makes it not
+        apply here is **which q_eq this residual is centred on**. cycle.py pins
+        q_eq at the measured passive position and holds it across the horizon, so
+        the residual is zero at the first knot by construction and what it
+        charges over the rest is the *change* in the passive rows. That is not
+        sway: the hanging pose moves 1:1 with -(q_boom + q_arm) and with nothing
+        else (crane_planning's closed form; d q_eq / d q_a = [0, -1, -1, 0, 0]),
+        so a tool that hangs perfectly through a lift still produces the boom and
+        arm travel as a residual. **A weight here prices luffing, not swinging.**
+        Zero is the value consistent with that centre -- and the two do justify
+        each other in a circle, which is exactly why this is not a number to
+        retune until 049 settles the centre. Measured, on the A2B move
+        scripts/mpc_a2b.py runs by default, with its per-stage equilibrium
+        replaced by the node's frozen one so that the driver solves the cost the
+        node actually has: 0.0 finishes 0.4036 from the goal at 0.4894 rad of
+        peak sway against the true equilibrium, 20.0 finishes 0.4159 at 0.5182 --
+        the weight is marginally **worse** on both. Under the driver's own
+        per-stage equilibrium the ordering reverses (0.4462 / 0.1566 rad against
+        0.3178 / 0.1159), which is worth reading twice: what that pair measures is
+        the **centre** and not this weight, and it says the centre is worth three
+        to four times the peak sway that the weight is worth nothing. That is
+        issue 049's to spend, not this parameter's. Not tuned against the
+        machine. Anyone re-opening it must edit this number --
+        scripts/mpc_a2b.py's --sway-scale is a **multiplier**, so at zero no
+        value of that flag prices the offset."
       validation:
         fixed_size<>: [2]
         lower_element_bounds<>: [0.0]
@@ -243,9 +268,10 @@ crane_mpc:
       type: double_array
       default_value: [4.0, 4.0]
       read_only: true
-      description: "Q_dot_u of 2 -- the sway rate. Needed **with** the offset
-        weight above and not instead of it: penalising the offset alone admits
-        sustained oscillation about it. Not tuned."
+      description: "Q_dot_u of 2 -- the sway rate, and **the only sway term
+        priced in what ships** (q_u above is zero; issue 137). It is the half
+        that survives the frozen q_eq q_u could not: a rate residual needs no
+        centre. Not tuned."
       validation:
         fixed_size<>: [2]
         lower_element_bounds<>: [0.0]
@@ -278,9 +304,19 @@ crane_mpc:
         lower_element_bounds<>: [0.0]
     u:
       type: double_array
-      default_value: [0.01, 0.01, 0.01, 0.01, 0.01, 0.01]
+      default_value: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
       read_only: true
-      description: "R of 2 -- smoothness, on the input itself. Not tuned."
+      description: "R of 2 -- smoothness, on the input itself. **1.0, not the
+        0.01 this declared until issue 137**, which is the other half of the
+        divergence q_u above records: the same commit raised the config by a
+        factor of 100 and left this behind. Here the shipped value won, and for
+        the opposite reason. The run does not discriminate -- the A2B move
+        finishes at 0.3178 against 0.3224, which is nothing -- but
+        weights.progress_rate's 160.0 is *derived* against `u` pricing a
+        **velocity** at 1.0 where Marc's weight_qADDot prices an acceleration at
+        0.25-0.5, so dropping this by two decades would invalidate a recorded
+        measurement rather than just soften the input. Not tuned against the
+        machine."
       validation:
         fixed_size<>: [6]
         lower_element_bounds<>: [0.0]
