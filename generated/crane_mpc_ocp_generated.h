@@ -88,6 +88,17 @@
 #define CRANE_MPC_OCP_ACTUATOR_COMMAND_LAG_S {0.1, 0.025, 0.0, 0.075, 0.125}
 #define CRANE_MPC_OCP_ACTUATOR_DEAD_TIME_S 0.06
 
+// **Which** fit those came from. The path is the repository's name for the
+// file and not the one the reader opened -- `crane_model` is installed, so
+// that one is a machine's install prefix. The digest is sha256 over the
+// parsed document with sorted keys, so it is a property of the numbers and
+// not the formatting, and **every** number is in it: the `d` that reaches
+// the dynamics through the description as well as the `k` and `tau_v`
+// above. A refit therefore fails `export_ocp.py --check` rather than
+// shipping under the previous fit's identity.
+#define CRANE_MPC_OCP_ACTUATOR_FIT_SOURCE "crane_model/config/c3_full_model.json"
+#define CRANE_MPC_OCP_ACTUATOR_FIT_DIGEST "dbd66c7f9b94147d"
+
 // The blocks of the stage residual
 // `y = [q_a, dq_a, q_u, dq_u, lag, v_s, tau_a, u]`. The order is §2's --
 // tracking, sway, lag, progress, effort, smoothness -- and not the state's,

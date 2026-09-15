@@ -63,7 +63,7 @@ call; the header written beside the tree is that number *recorded*, not a second
 derivation of it. Its reader was `ocp_solver.cpp` and issue 132 deleted that, so
 the header is now part of what a reviewer diffs and nothing else.
 
-## There is no staleness guard, by decision
+## There is no staleness guard, by decision -- except on the fit
 
 `config/hydraulics.yaml`, `config/hydraulic_limits.yaml` and the description
 all require this script to be re-run and the workspace rebuilt. **Nothing fails
@@ -73,6 +73,12 @@ which is what `crane_model`'s own fixture does -- was considered and rejected, a
 that this is therefore a deliberate divergence from both existing generator
 scripts in this repository. `generated/README.md` says the same thing where a
 reader of the tree will find it.
+
+**`c3_full_model.json` is the exception**, because it is the one input that
+exists twice and reaches the solver by two routes. Its digest is in the generated
+header, so a refit fails `--check`; its copies are compared, so a drift between
+them fails generation; and the description's damping is held against the fit's
+own `d`, so a refit that moved `k` and left `d` behind is refused, not shipped.
 
 ## What is boilerplate lives in `crane_ocp`
 
@@ -85,6 +91,8 @@ the two exporters was the same code twice. What is left here is the problem.
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 import sys
 from pathlib import Path
 
@@ -139,6 +147,133 @@ DEFAULT_DESCRIPTIONS = ox.default_descriptions(PACKAGE)
 # export chose.
 GENERATED_HEADER = "crane_mpc_ocp_generated.h"
 
+# --- the C3 fit, and the places it lives --------------------------------------
+#
+# `load_actuator_fit` opens whichever copy `crane_model` carries -- the install
+# prefix by preference -- so the path it returns is a machine's and cannot go in
+# a generated header. This is the repository's name for the same file.
+FIT_LABEL = "crane_model/config/c3_full_model.json"
+
+# The fit's other homes. `wiki/` is not reachable from an installed package, so
+# `crane_model` carries a byte copy: one identification in several files with
+# nothing failing when they drift. This export is what fails now.
+WIKI_FIT = (
+    PACKAGE.parents[2]
+    / "wiki"
+    / "diagrams"
+    / "hydraulic_calibration"
+    / "c3_full_model.json"
+)
+
+# The copy that bites. `default_actuator_path` prefers the **install prefix**
+# while the description comes off the source tree unconditionally, so editing the
+# source fit and rebuilding only `crane_mpc` used to regenerate nothing and
+# report "current": `k` from one revision, `d` from another, every guard green.
+SOURCE_FIT = PACKAGE.parent / "crane_model" / "config" / "c3_full_model.json"
+
+# How far the description's damping may sit from the fit's `d` and still be the
+# same identification. A rounding allowance and nothing wider -- a refit moves
+# these by tens of percent, not tenths. The description states `d` to four
+# significant figures except for the rotator, which gets three (`484` for
+# `483.671816`), so the budget is 2e-3: measured gaps, worst last, are sw 1.8e-5,
+# sa 5.4e-5, ka 6.1e-5, ha 1.4e-4, ro 6.8e-4.
+FIT_DAMPING_TOLERANCE = 2.0e-3
+
+
+# --------------------------------------------------------------------- the fit
+
+
+def read_fit(path: Path) -> dict:
+    """Read one copy of the C3 fit as a document, not as numbers."""
+    with open(path, encoding="utf-8") as stream:
+        return json.load(stream)
+
+
+def fit_digest(fit: dict) -> str:
+    """
+    Return a content digest of the whole fit: which identification this is.
+
+    Over the **parsed** document rather than the bytes, because the two copies
+    differ by a trailing newline and are the same fit.
+
+    Every number is in it, including the `d` that reaches the dynamics through
+    the description and the diagnostics this export never reads. That is the
+    point: a refit moves the digest, the digest is in the generated header, so
+    `--check` fails until the tree is rewritten instead of the artifact shipping
+    under the previous fit's identity.
+    """
+    canonical = json.dumps(fit, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
+
+
+def check_fit_is_one_artifact(fit: dict) -> None:
+    """
+    Refuse to generate while any two copies of the fit disagree.
+
+    `fit` is the copy that was actually read; every other copy that exists is
+    compared against it as a parsed document. A standalone checkout has no
+    `wiki/` and a source-only workspace has no install copy -- a missing
+    candidate is skipped, because it is not a drift.
+    """
+    for other in (WIKI_FIT, SOURCE_FIT):
+        if not other.is_file() or read_fit(other) == fit:
+            continue
+        raise ValueError(
+            f"{other} and {FIT_LABEL} are one identification in two files and "
+            "they have drifted. Copy whichever the fitter wrote last over the "
+            "other, rebuild `crane_model` so the install copy follows, and "
+            "re-run this script."
+        )
+
+
+def check_fit(model: cs.CraneSymbolicModel, fit: dict) -> None:
+    """
+    Refuse to generate on a fit the solver must not be built from, by axis name.
+
+    Two failures, both per axis and both invisible in every quantity except the
+    machine's response:
+
+    * **a non-finite `k`, `tau_v` or `d`.** `load_actuator_fit` refuses a missing
+      axis and a non-positive `k`, but `inf > 0` is true, so an infinity walks
+      through it into the dynamics. `d` has to be checked here or nowhere:
+      nothing upstream reads it, because it reaches the dynamics through the
+      description, and a NaN would defeat the comparison below rather than fail
+      it -- `nan > nan` is False, so the axis would pass;
+    * **a description whose damping is not this fit's `d`.** `d_i` and `k_i` are
+      one identification and only pair with each other, and they arrive by two
+      routes: `k` and `tau_v` out of the fit at full precision, `d` through the
+      description's `<dynamics damping>` at four figures. A refit that moved one
+      and not the other is a damping-ratio error, not a rounding one.
+    """
+    actuator = model.actuator
+    for axis, key in enumerate(cs.K_AXIS_KEYS):
+        for name, value in (("k", actuator.k[axis]), ("tau_v", actuator.tau_v[axis])):
+            if not np.isfinite(value):
+                raise ValueError(
+                    f"{FIT_LABEL}: axis {key!r} has {name}={value}, which is not a "
+                    "number a solver can be built on"
+                )
+        entry = fit["axes"][key]
+        if "d" not in entry:
+            raise ValueError(f"{FIT_LABEL}: axis {key!r} carries no d")
+        fitted = float(entry["d"])
+        if not np.isfinite(fitted):
+            raise ValueError(
+                f"{FIT_LABEL}: axis {key!r} has d={fitted}, which is not a number "
+                "a solver can be built on"
+            )
+        damped = float(model.description.damping[cs.K_PLANNED_ROWS[axis]])
+        if abs(damped - fitted) > FIT_DAMPING_TOLERANCE * abs(fitted):
+            raise ValueError(
+                f"axis {key!r}: the description damps it at {damped} and this "
+                f"fit's d is {fitted}. `d` and `k` are one identification -- "
+                f"regenerate the description from {FIT_LABEL} before exporting."
+            )
+    if not np.isfinite(actuator.dead_time_s):
+        raise ValueError(
+            f"{FIT_LABEL}: dead_time_common_ms is {actuator.dead_time_s * 1.0e3}"
+        )
+
 
 # ------------------------------------------------------------------ generation
 
@@ -149,6 +284,7 @@ def write_header(
     scale: np.ndarray,
     constants: cs.Constants,
     actuator: cs.ActuatorFit,
+    digest: str,
 ) -> Path:
     """
     Record what the export chose, beside the solver it chose it for.
@@ -261,6 +397,17 @@ def write_header(
         + ", ".join(f"{value!r}" for value in actuator.tau_v)
         + "}",
         f"#define CRANE_MPC_OCP_ACTUATOR_DEAD_TIME_S {actuator.dead_time_s!r}",
+        "",
+        "// **Which** fit those came from. The path is the repository's name for the",
+        "// file and not the one the reader opened -- `crane_model` is installed, so",
+        "// that one is a machine's install prefix. The digest is sha256 over the",
+        "// parsed document with sorted keys, so it is a property of the numbers and",
+        "// not the formatting, and **every** number is in it: the `d` that reaches",
+        "// the dynamics through the description as well as the `k` and `tau_v`",
+        "// above. A refit therefore fails `export_ocp.py --check` rather than",
+        "// shipping under the previous fit's identity.",
+        f'#define CRANE_MPC_OCP_ACTUATOR_FIT_SOURCE "{FIT_LABEL}"',
+        f'#define CRANE_MPC_OCP_ACTUATOR_FIT_DIGEST "{digest}"',
         "",
         "// The blocks of the stage residual",
         "// `y = [q_a, dq_a, q_u, dq_u, lag, v_s, tau_a, u]`. The order is §2's --",
@@ -399,16 +546,26 @@ def generate(
 ) -> None:
     """Write the whole tree, from an empty directory."""
     output.mkdir(parents=True, exist_ok=True)
+    # The same file `load_actuator_fit` reads, read once more as a document: the
+    # checks below and the header's provenance are about the fit's *identity*,
+    # which is more than the three numbers the dynamics take out of it.
+    fit = read_fit(Path(cs.default_actuator_path()))
+    check_fit_is_one_artifact(fit)
     ocp, scale, model = build_ocp(
         (descriptions / DESCRIPTION).read_text(), parameters, hydraulics
     )
+    # Before the code generation, so a bad fit stops generation rather than
+    # producing a tree and then complaining about it.
+    check_fit(model, fit)
     tree = ox.generate_solver(ocp, output)
     # `crane_symbolic`'s `z` over `(x, u, p)`, shipped beside the solver because
     # acados generates only the rows it solves and `wiki/mpc.md` §5.3
     # requirement 4 wants the residuals in physical units.
     ox.write_output_map(model, ocp.model.name, tree)
 
-    write_header(output, parameters, scale, cs.load_constants(), model.actuator)
+    write_header(
+        output, parameters, scale, cs.load_constants(), model.actuator, fit_digest(fit)
+    )
     ox.finalise(output, README)
 
 
