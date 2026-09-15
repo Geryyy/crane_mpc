@@ -569,6 +569,25 @@ carries no validity flag, so freshness is the whole test on both halves. The rec
 still-fresh reference, the reference supplied to the OCP holds the goal at zero
 velocity.
 
+## Launch
+
+    ros2 launch crane_mpc crane_mpc.launch.py
+
+Starts this node and nothing else: ROS 2 Interfaces §2 composes the horizon
+producer beside the controller manager, so the file is a component a profile
+includes and not a bringup. Arguments are `use_sim_time` and
+`joint_states_topic`; there is no `mode` argument, because leaving shadow is a
+deliberate separate act (issue 146) and not a launch's.
+
+**Both configuration files are passed, and `hydraulic_limits.yaml` is passed
+second.** Two reasons, and the second is the footgun: the `hydraulics` defaults
+in `crane_mpc_parameters.yaml` are equal to the values that file ships, so
+forgetting it costs nothing today and costs a constraint the day one of those
+numbers is re-measured. `test_launch_contract.py` holds all of it — that both
+files are in the list and unconditional, that their parameter sets are disjoint
+so the merge order decides nothing, and that every declared `hydraulics.*`
+parameter is carried by the machine file rather than by a default.
+
 ## Parameters
 
 Parameters are declared with `generate_parameter_library`; deployment values are

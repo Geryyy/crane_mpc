@@ -23,11 +23,16 @@
   <depend>generate_parameter_library</depend>
   <depend>rclpy</depend>
   <exec_depend>python3-numpy</exec_depend>
+  <!-- launch only: the node itself imports neither. -->
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
   <depend>std_msgs</depend>
   <depend>trajectory_msgs</depend>
 
 
   <test_depend>python3-pytest</test_depend>
+  <!-- `test_launch_contract.py` parses the shipped config yaml. -->
+  <test_depend>python3-yaml</test_depend>
   <!-- Test only, and by path: `scripts/export_ocp.py` imports
        `crane_ocp/scripts/crane_ocp_export.py` out of the source tree, and the
        `generated/` check that used to be a CMake `ALL` target is now
