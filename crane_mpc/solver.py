@@ -398,8 +398,11 @@ def _installed_acados(target) -> None:
         and (prefix / "lib" / "libacados.so").is_file()
         and (prefix / "lib" / "link_libs.json").is_file()
     ):
-        target.acados_include_path = str(prefix / "include")
-        target.acados_lib_path = str(prefix / "lib")
+        # acados 0.5.4 moved both onto `code_gen_options` and made the
+        # AcadosSim properties read-only, so the old spelling raises there.
+        options = getattr(target, "code_gen_options", target)
+        options.acados_include_path = str(prefix / "include")
+        options.acados_lib_path = str(prefix / "lib")
 
 
 def solver_cache(parameters: dict, hydraulics: dict, description_xml: str) -> Path:
