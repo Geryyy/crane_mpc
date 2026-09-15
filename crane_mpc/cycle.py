@@ -221,6 +221,12 @@ class Cycle:
         self.dq_a_carried: np.ndarray | None = None
         self.velocity_carry = VelocityCarry()
         self.last_input = np.zeros(cs.NU_PROGRESS)
+        # What this node put in flight, newest first. `last_input` is one command
+        # and the dead time is 1.5 intervals on the shipped 40 ms / 60 ms, so the
+        # machine really did execute two different numbers over the window the
+        # propagation carries `x_0` across. One entry per cycle, kept only as deep
+        # as `Ocp.replay` can ask for.
+        self.applied_inputs: list = []
         self.guess = None
         self.last_solution = None
         self.measured: np.ndarray | None = None
@@ -258,6 +264,10 @@ class Cycle:
         self.escalated = False
         self.cadence_anchored = False
         self.last_input = np.zeros(cs.NU_PROGRESS)
+        # And the rest of what was in flight: every entry older than this instant
+        # was issued by whatever was driving before, and replaying those would
+        # carry `x_0` forward under another commander's plan.
+        self.applied_inputs.clear()
         return previous
 
     def adopt_follower(self, follower: FollowerCommand, u_max) -> None:
@@ -407,8 +417,14 @@ class Cycle:
     def propagate(self):
         """Carry the measurement over the dead time, or refuse the cycle."""
         self.ocp.pin_tool(self.tool_position)
+        # One entry per cycle, recorded here rather than beside each `last_input`
+        # write: in shadow mode there are two of those per cycle and still only
+        # one command, and by this line `last_input` is whichever of them applies.
+        self.applied_inputs.insert(0, self.last_input.copy())
+        depth = self.ocp.replay[0].age + 1 if self.ocp.replay else 1
+        del self.applied_inputs[depth:]
         try:
-            x0 = self.ocp.propagate(self.measured, self.last_input)
+            x0 = self.ocp.propagate_applied(self.measured, self.applied_inputs)
         except Exception as error:
             return Silence(
                 "the measured state could not be propagated to the instant the plan "

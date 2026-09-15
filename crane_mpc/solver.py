@@ -482,6 +482,57 @@ def _sub_steps(seconds: float, sample_time: float) -> int:
     return max(1, int(np.ceil(seconds / sample_time)))
 
 
+@dataclass(frozen=True)
+class ReplaySegment:
+    """One command in flight: which history entry it is, and how much it covers."""
+
+    #: Index into the newest-first applied-input history. 0 is what is applied now.
+    age: int
+    #: Seconds of the delay window that entry was the applied command for.
+    seconds: float
+
+
+#: Both numbers are read from yaml, so `0.08/0.04` is as entitled to come out
+#: just under 2 as exactly 2, and a remainder of one ulp is not a third command.
+GRID_TOLERANCE = 1e-9
+
+#: A dead time worth a thousand intervals is a unit slip -- 60 read as seconds
+#: where 0.06 was meant -- and not a command queue.
+MAX_REPLAY_INTERVALS = 1024.0
+
+
+def replay_schedule(delay_s: float, step_s: float) -> list[ReplaySegment]:
+    """
+    Cut the dead time into one segment per command the machine was actually given.
+
+    Commands are issued on the `step_s` grid, so a `delay_s` that is not a whole
+    multiple of it has more than one in flight -- 60 ms on a 40 ms step is 1.5 of
+    them, and holding one input constant across the window describes a machine
+    that was commanded twice with the same number.
+
+    Oldest first, and **the partial interval is the oldest**. With `t = 0` the
+    solve instant, entry 0 covers `[-step_s, 0)` and entry 1 `[-2*step_s,
+    -step_s)`, so the remainder lands at the far end and belongs to the entry
+    `floor(delay_s / step_s)` old. Full steps first and the remainder last is the
+    natural misreading and misattributes it to a newer command.
+
+    Empty when there is nothing to replay: a non-positive or non-finite argument,
+    or a delay so deep it is a unit slip. The largest `age` it asks for is
+    `schedule[0].age`, which is how deep a history has to be kept.
+    """
+    if not (np.isfinite(delay_s) and np.isfinite(step_s)):
+        return []
+    if delay_s <= 0.0 or step_s <= 0.0 or delay_s / step_s > MAX_REPLAY_INTERVALS:
+        return []
+    full = int(np.floor(delay_s / step_s + GRID_TOLERANCE))
+    remainder = delay_s - full * step_s
+    segments = []
+    if remainder > GRID_TOLERANCE * step_s:
+        segments.append(ReplaySegment(full, remainder))
+    segments.extend(ReplaySegment(age, step_s) for age in range(full - 1, -1, -1))
+    return segments
+
+
 def predictor_cache(signature: str, seconds: float, sample_time: float) -> Path:
     """
     Where this exact integrator's compiled library lives.
@@ -596,6 +647,22 @@ class Ocp:
             else None
         )
         self.delay_s = delay
+        #: How the delay window splits between the commands in flight (issue 125).
+        self.replay = replay_schedule(delay, self.Ts)
+        # One integrator per distinct segment length, built here and not in the
+        # cycle: a miss is CasADi codegen and `make`, which a control callback
+        # cannot afford. The full-`T_s` segments are the stepper the cold start
+        # already uses; only the remainder is a length nothing else integrates.
+        self._segment_predictor = {
+            segment.seconds: (
+                self._stepper
+                if segment.seconds == self.Ts
+                else _build_predictor(
+                    self._ocp, signature, segment.seconds, self.Ts, verbose
+                )
+            )
+            for segment in self.replay
+        }
 
         self._base_parameter = np.zeros(cs.NP)
         self.payload_mass_kg = 0.0
@@ -693,32 +760,16 @@ class Ocp:
         value = self._static_force(x, self._base_parameter[: cs.NP])
         return np.asarray(value).reshape(-1)[: cs.K_PLANNED_DOF]
 
-    def propagate(self, x: np.ndarray, u: np.ndarray) -> np.ndarray:
-        """
-        `x` carried forward through the transport dead time under `u`.
-
-        The whole state, actuator rows included: the plan is computed for the
-        instant it takes effect, and under C3 the input reaches `ddq` only
-        through the command-lag and force rows.
-        """
-        x = np.asarray(x, dtype=float)
-        u = np.asarray(u, dtype=float)
-        if not np.all(np.isfinite(x)) or not np.all(np.isfinite(u)):
-            raise ValueError(
-                "the measured state and the applied input must be finite to be "
-                "carried through the transport dead time"
-            )
-        if self._predictor is None:
-            return x.copy()
-        self._predictor.set("p", self._model_parameter())
-        self._predictor.set("x", x)
-        self._predictor.set("u", u)
-        status = self._predictor.solve()
+    def _integrate(self, predictor, x: np.ndarray, u: np.ndarray) -> np.ndarray:
+        predictor.set("p", self._model_parameter())
+        predictor.set("x", x)
+        predictor.set("u", u)
+        status = predictor.solve()
         if status != 0:
             raise RuntimeError(
                 f"the dead-time predictor answered {status_word(status)}"
             )
-        predicted = self._predictor.get("x")
+        predicted = predictor.get("x")
         # acados reports a successful step whose state is NaN, and this is the
         # state `x0` is built from (`ocp_solver.cpp:1156-1162`).
         if not np.all(np.isfinite(predicted)):
@@ -727,6 +778,51 @@ class Ocp:
                 "left it non-finite"
             )
         return predicted
+
+    def propagate(self, x: np.ndarray, u: np.ndarray) -> np.ndarray:
+        """
+        `x` carried forward through the transport dead time under `u`.
+
+        The whole state, actuator rows included: the plan is computed for the
+        instant it takes effect, and under C3 the input reaches `ddq` only
+        through the command-lag and force rows.
+        """
+        x, u = _finite(x, u)
+        if self._predictor is None:
+            return x.copy()
+        return self._integrate(self._predictor, x, u)
+
+    def propagate_applied(self, x: np.ndarray, applied) -> np.ndarray:
+        """
+        Carry `x` under the sequence of commands actually applied over the delay.
+
+        `applied` is newest first: `applied[0]` is the command in flight now,
+        `applied[1]` the one before it. `self.replay` cuts the delay against this
+        problem's own `T_s` and each segment is integrated under the command that
+        covered it, so this is one hold per command rather than one for all.
+
+        A history shorter than the delay clamps to its oldest entry, which is
+        exactly the single-input behaviour -- the first cycles after a reset have
+        nothing older to replay and do not invent one. An empty one is refused.
+        """
+        if len(applied) == 0:
+            raise ValueError(
+                "replaying the commands in flight needs at least the one applied "
+                "now; an empty history is not the same thing as a zero command "
+                "and is not guessed at here"
+            )
+        state, *history = _finite(x, *applied)
+        if not self.replay:
+            # Nothing to cut up: a zero delay, or an argument the single-input
+            # path is the one that owns the complaint about.
+            return self.propagate(state, history[0])
+        for segment in self.replay:
+            state = self._integrate(
+                self._segment_predictor[segment.seconds],
+                state,
+                history[min(segment.age, len(history) - 1)],
+            )
+        return state
 
     # -- one cycle ---------------------------------------------------------------
 
@@ -994,6 +1090,17 @@ class Ocp:
             terms.tau_a += float(np.sum(row[problem.Y_ACTUATED_FORCE :][:planned]))
             terms.u += float(np.sum(row[problem.Y_INPUT :][: cs.NU_PROGRESS]))
         return terms
+
+
+def _finite(*values) -> list[np.ndarray]:
+    """Return the arguments as float arrays, refused unless every entry is finite."""
+    arrays = [np.asarray(value, dtype=float) for value in values]
+    if not all(np.all(np.isfinite(array)) for array in arrays):
+        raise ValueError(
+            "the measured state and the applied input must be finite to be "
+            "carried through the transport dead time"
+        )
+    return arrays
 
 
 def _last(value) -> int:

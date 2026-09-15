@@ -82,9 +82,11 @@ crane_mpc:
       axes, which is where this default now comes from -- it replaces the 50 ms
       deployed round trip, and the 10 ms difference is inside the uncertainty of
       both numbers. docs/features/mpc-full-authority/brief.md 2.2 is the decision.
-      The propagation still holds the last applied input constant across the
-      delay rather than replaying the inputs actually in flight; that is issue
-      125."
+      The propagation replays the commands actually in flight rather than
+      holding one constant across the delay (issue 125): 60 ms over a 40 ms step
+      is 1.5 intervals, so the older of the two owns the 20 ms at the far end of
+      the window. Each segment is integrated under the command that covered it;
+      nothing is interpolated between them."
     validation:
       gt_eq<>: [0.0]
 

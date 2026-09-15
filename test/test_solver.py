@@ -12,6 +12,7 @@ from crane_mpc.solver import (
     Ocp,
     Outcome,
     predictor_cache,
+    replay_schedule,
     solver_cache,
     solver_signature,
 )
@@ -80,6 +81,55 @@ def test_the_predictor_carries_the_command_that_is_in_flight(ocp, state):
         state[cs.X_PLANNED_POSITION : cs.X_PLANNED_POSITION + PLANNED],
         atol=0.02,
     )
+
+
+def test_the_schedule_cuts_the_delay_between_the_commands_in_flight():
+    """
+    Issue 125, and no solver needed for it. 60 ms over a 40 ms step is 1.5
+    intervals: the window `[-60, 0)` ms is 20 ms under the command issued at
+    -80 ms and 40 ms under the one issued at -40 ms, so **the remainder belongs
+    to the older entry** -- the half of this worth a test.
+    """
+    schedule = replay_schedule(0.06, 0.04)
+    assert [segment.age for segment in schedule] == [1, 0]
+    assert schedule[0].seconds == pytest.approx(0.02)
+    assert schedule[1].seconds == pytest.approx(0.04)
+
+    # An exact multiple is whole steps and nothing else: the grid tolerance is
+    # what keeps a one-ulp remainder from being a third command in flight.
+    for delay in (0.08, 0.04 + 0.04):
+        assert [segment.age for segment in replay_schedule(delay, 0.04)] == [1, 0]
+
+    # Nothing to replay, and a delay read in seconds where it was written in ms.
+    assert replay_schedule(0.0, 0.04) == []
+    assert replay_schedule(np.nan, 0.04) == []
+    assert replay_schedule(60.0, 0.04) == []
+
+
+def test_the_prediction_replays_each_command_over_its_own_segment(ocp, state):
+    """Issue 125: two commands are in flight over 60 ms, and both are integrated."""
+    command = np.zeros(cs.NU_PROGRESS)
+    command[0] = 0.4
+    older = -command
+
+    held = ocp.propagate(state, command)
+    repeated = ocp.propagate_applied(state, [command, command])
+    clamped = ocp.propagate_applied(state, [command])
+    # What replaying a genuinely different older command over the oldest 20 ms is
+    # worth. The scale everything below is measured against, so it is checked
+    # rather than assumed.
+    moved = np.max(np.abs(ocp.propagate_applied(state, [command, older]) - held))
+    assert moved > 1.0
+    # The same command in every slot is the constant hold back -- but not to the
+    # bit: 20 + 40 ms is not the truncation one 60 ms integration takes, and
+    # acados warm-starts the IRK's Newton from whatever it solved last. Both
+    # residues are orders below what the older command is worth.
+    assert np.max(np.abs(repeated - held)) < 1e-3 * moved
+    # A history shorter than the delay clamps to its oldest entry rather than
+    # inventing an older command: the first cycles after a reset still predict.
+    assert np.max(np.abs(clamped - repeated)) < 1e-3 * moved
+    with pytest.raises(ValueError, match="empty history"):
+        ocp.propagate_applied(state, [])
 
 
 def test_a_solve_keeps_its_plan_inside_the_boxes_it_was_given(ocp, state):
