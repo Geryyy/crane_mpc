@@ -14,6 +14,8 @@ from crane_mpc.horizon import (
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 
 JOINTS = ["sw", "ha", "ka", "sa", "ro", "gr"]
+#: The canonical eight, with the two passive coordinates at rows 4 and 5.
+CANONICAL = ["sw", "ha", "ka", "sa", "tip", "tilt", "ro", "gr"]
 
 
 def ramp(times, slope=0.3):
@@ -98,10 +100,32 @@ def test_the_wire_form_carries_positions_velocities_and_no_accelerations():
     horizon.ddq_a_ref[:] = 7.0
     from builtin_interfaces.msg import Time
 
-    message = horizon_to_message(horizon, JOINTS, Time(sec=3, nanosec=0))
-    assert message.joint_names == JOINTS
+    message = horizon_to_message(horizon, CANONICAL, Time(sec=3, nanosec=0))
+    assert message.joint_names == CANONICAL
     assert message.header.stamp.sec == 3
     assert len(message.points) == 3
     assert message.points[2].time_from_start == Duration(sec=0, nanosec=80000000)
     assert message.points[1].positions[0] == pytest.approx(0.3 * 0.04)
     assert list(message.points[0].accelerations) == []
+
+
+def test_the_wire_form_names_the_canonical_eight_and_carries_the_sway():
+    """
+    The JTC's `joints` is eight wide and `allow_partial_joints_goal: false`
+    rejects a six-name trajectory outright, so the two passive columns go out
+    with the six -- in their canonical rows, not appended.
+    """
+    from builtin_interfaces.msg import Time
+
+    horizon = ramp([0.0, 0.04])
+    horizon.q_u_ref[:] = [0.1, 1.5]
+    horizon.dq_u_ref[:] = [-0.2, 0.3]
+
+    message = horizon_to_message(horizon, CANONICAL, Time(sec=0, nanosec=0))
+    point = message.points[1]
+    assert len(point.positions) == len(CANONICAL)
+    assert [point.positions[row] for row in (4, 5)] == pytest.approx([0.1, 1.5])
+    assert [point.velocities[row] for row in (4, 5)] == pytest.approx([-0.2, 0.3])
+    # The actuated six keep their canonical rows around the sway pair.
+    assert point.positions[0] == pytest.approx(0.3 * 0.04)
+    assert point.positions[6] == pytest.approx(0.0)

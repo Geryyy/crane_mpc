@@ -18,9 +18,11 @@ from enum import Enum
 
 import numpy as np
 from builtin_interfaces.msg import Duration
+from crane_model import symbolic as cs
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 
-ACTUATED_DOF = 6
+ACTUATED_DOF = cs.K_ACTUATED_DOF
+PASSIVE_DOF = cs.K_PASSIVE_DOF
 
 
 class Rejection(Enum):
@@ -53,12 +55,20 @@ class Grid:
 
 @dataclass
 class Knots:
-    """N knots. In a reference `t` is time_from_start; in a horizon, index*Ts."""
+    """
+    N knots. In a reference `t` is time_from_start; in a horizon, index*Ts.
+
+    The sway pair is the solved one, written by `Cycle.adopt_solution` and
+    shifted with the rest. A *reference* carries no sway, so there it stays
+    zero and nothing reads it.
+    """
 
     t: np.ndarray  # (N,)
     q_a_ref: np.ndarray  # (N, 6)
     dq_a_ref: np.ndarray  # (N, 6)
     ddq_a_ref: np.ndarray  # (N, 6)
+    q_u_ref: np.ndarray  # (N, 2)
+    dq_u_ref: np.ndarray  # (N, 2)
 
     def __len__(self) -> int:
         return int(self.t.shape[0])
@@ -70,6 +80,8 @@ class Knots:
             np.zeros((count, ACTUATED_DOF)),
             np.zeros((count, ACTUATED_DOF)),
             np.zeros((count, ACTUATED_DOF)),
+            np.zeros((count, PASSIVE_DOF)),
+            np.zeros((count, PASSIVE_DOF)),
         )
 
     def copy(self) -> Knots:
@@ -78,6 +90,8 @@ class Knots:
             self.q_a_ref.copy(),
             self.dq_a_ref.copy(),
             self.ddq_a_ref.copy(),
+            self.q_u_ref.copy(),
+            self.dq_u_ref.copy(),
         )
 
 
@@ -210,15 +224,29 @@ def horizon_to_message(horizon: Knots, joints, first_knot_valid_at):
     """
     Write the horizon in the form `wiki/implementation/ros2_interfaces.md` §4 fixes.
 
+    `joints` is the **canonical eight**, in contract order, and the columns are
+    laid out to match: the JTC's `dof_` is its own `joints` list, eight wide
+    here, and with `allow_partial_joints_goal: false` a six-name trajectory is
+    rejected whole. It commands only the six, but it tracks tip and tilt, so the
+    two passive columns are the solved sway -- a fill, not a computation. Same
+    call `crane_planning` makes for its `a2b_movement` answer.
+
     No accelerations: `ddq_a_ref` is the OCP's stage residual, not a command.
     """
+    position = np.zeros((len(horizon), cs.K_GENERALIZED_DOF))
+    velocity = np.zeros_like(position)
+    position[:, cs.K_ACTUATED_ROWS] = horizon.q_a_ref
+    velocity[:, cs.K_ACTUATED_ROWS] = horizon.dq_a_ref
+    position[:, cs.K_PASSIVE_ROWS] = horizon.q_u_ref
+    velocity[:, cs.K_PASSIVE_ROWS] = horizon.dq_u_ref
+
     message = JointTrajectory()
     message.header.stamp = first_knot_valid_at
     message.joint_names = list(joints)
     message.points = [
         JointTrajectoryPoint(
-            positions=horizon.q_a_ref[index].tolist(),
-            velocities=horizon.dq_a_ref[index].tolist(),
+            positions=position[index].tolist(),
+            velocities=velocity[index].tolist(),
             time_from_start=seconds_duration(float(horizon.t[index])),
         )
         for index in range(len(horizon))

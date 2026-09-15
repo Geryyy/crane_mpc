@@ -119,6 +119,8 @@ class MpcNode(Node):
         self._configuration_failure = ""
         self._joints: list[str] = []
         self._passive_joints: list[str] = []
+        #: The canonical eight, in contract order: what the horizon is named by.
+        self._canonical_joints: list[str] = []
 
         # The measurement, by name and never by index: the two stacks publish
         # different `/joint_states` name sets in different orders.
@@ -246,6 +248,7 @@ class MpcNode(Node):
             names = canonical_joints()
             self._joints = [names[row] for row in ACTUATED_INDICES]
             self._passive_joints = [names[row] for row in PASSIVE_INDICES]
+            self._canonical_joints = list(names)
             self._ocp = Ocp(
                 problem.default_description().read_text(),
                 config.parameter_dict(self._values),
@@ -439,7 +442,7 @@ class MpcNode(Node):
         cycle = self._cycle
         message = hz.horizon_to_message(
             cycle.horizon,
-            self._joints,
+            self._canonical_joints,
             Time(nanoseconds=cycle.next_first_knot_ns).to_msg(),
         )
         self.publish_tcp_horizon()

@@ -437,7 +437,7 @@ class Cycle:
         return Verdict(text, published=False, severity="warn")
 
     def adopt_solution(self, solution) -> None:
-        """Write the solved horizon as the six actuated joints the wire carries."""
+        """Write the solved horizon as the canonical eight the wire carries."""
         states = solution.states
         self.horizon.q_a_ref[:, :PLANNED_DOF] = states[
             :, cs.X_PLANNED_POSITION : cs.X_PLANNED_POSITION + PLANNED_DOF
@@ -448,6 +448,14 @@ class Cycle:
         # The tool is pinned, not planned: it holds where it was measured.
         self.horizon.q_a_ref[:, TOOL_AXIS] = self.tool_position
         self.horizon.dq_a_ref[:, TOOL_AXIS] = 0.0
+        # The sway the JTC tracks but does not command. Nothing is planned for
+        # it -- this is the OCP's own prediction of where the tool will be.
+        self.horizon.q_u_ref[:] = states[
+            :, cs.X_PASSIVE_POSITION : cs.X_PASSIVE_POSITION + PASSIVE_DOF
+        ]
+        self.horizon.dq_u_ref[:] = states[
+            :, cs.X_PASSIVE_VELOCITY : cs.X_PASSIVE_VELOCITY + PASSIVE_DOF
+        ]
         self.tcp_states = states.copy()
 
     def shift_previous_horizon(self) -> bool:
@@ -459,7 +467,7 @@ class Cycle:
             or len(self.last_tcp_states) != len(self.horizon)
         ):
             return False
-        for field_name in ("q_a_ref", "dq_a_ref"):
+        for field_name in ("q_a_ref", "dq_a_ref", "q_u_ref", "dq_u_ref"):
             previous = getattr(self.last_horizon, field_name)
             current = getattr(self.horizon, field_name)
             current[:-1] = previous[1:]

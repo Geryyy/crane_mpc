@@ -117,10 +117,16 @@ def test_in_shadow_the_horizon_goes_to_the_private_topic(node):
     horizons = node.published["_shadow_horizon_publisher"]
     assert len(horizons) == 1
     horizon = horizons[0]
-    assert list(horizon.joint_names) == ACTUATED
+    # The canonical eight, not the actuated six: the JTC rejects a six-name
+    # trajectory whole under `allow_partial_joints_goal: false`.
+    assert list(horizon.joint_names) == list(NAMES)
     assert len(horizon.points) == node.grid.horizon_length
     # The plan starts where the machine is, not where the last cycle left off.
     assert horizon.points[0].positions[1] == pytest.approx(POSE[1], abs=0.05)
+    # The two passive rows carry the solved sway, not a pair of zeros.
+    assert [horizon.points[0].positions[row] for row in cs.K_PASSIVE_ROWS] == (
+        pytest.approx(PASSIVE_POSE, abs=0.05)
+    )
     health = node.published["_health_publisher"][0]
     assert health.outcome in (
         SolverHealth.SOLVE_CONVERGED,
@@ -135,7 +141,8 @@ def test_the_measurement_is_keyed_by_name_and_not_by_index(node):
     node.update()
     horizon = node.published["_shadow_horizon_publisher"][0]
     assert horizon.points[0].positions[1] == pytest.approx(POSE[1], abs=0.05)
-    assert horizon.points[0].positions[5] == pytest.approx(POSE[5])
+    # Canonical row 7 is the tool -- the pinned axis -- and not actuated row 5.
+    assert horizon.points[0].positions[7] == pytest.approx(POSE[5])
 
 
 def test_a_stale_measurement_stops_the_publisher(node):
