@@ -83,6 +83,47 @@ class FollowerCommand:
 
 
 @dataclass
+class VelocityCarry:
+    """What `carry_actuated_velocity` did to `x_0`, per actuated axis."""
+
+    #: True where this axis' velocity was taken from the model, not measured.
+    carried: list = field(default_factory=lambda: [False] * ACTUATED_DOF)
+    #: Model-carried minus measured. Zero on an axis that was not carried.
+    divergence: np.ndarray = field(default_factory=lambda: np.zeros(ACTUATED_DOF))
+    #: True where `|divergence|` crossed that axis' `dq_a_divergence_max`.
+    diverged: list = field(default_factory=lambda: [False] * ACTUATED_DOF)
+    any_diverged: bool = False
+
+
+def carry_actuated_velocity(
+    x: np.ndarray, carried, from_measurement, divergence_max
+) -> VelocityCarry:
+    """
+    Put the model's own velocity into `x` on the axes that opt out of feedback.
+
+    `from_measurement[axis]` false overwrites that planned velocity row with
+    `carried[axis]`, the previous cycle's propagated value, instead of the
+    measurement. Positions and both passive rows are never touched, and a carry
+    that is not finite falls back to the measurement rather than poisoning `x`.
+
+    All-true is the shipped default and then this writes nothing at all, which
+    is what makes the feature bit-identical until it is configured.
+    """
+    report = VelocityCarry()
+    for axis in range(PLANNED_DOF):
+        if from_measurement[axis] or not np.isfinite(carried[axis]):
+            continue
+        row = cs.X_PLANNED_VELOCITY + axis
+        difference = float(carried[axis]) - float(x[row])
+        x[row] = carried[axis]
+        report.carried[axis] = True
+        report.divergence[axis] = difference
+        report.diverged[axis] = abs(difference) > float(divergence_max[axis])
+    report.any_diverged = any(report.diverged)
+    return report
+
+
+@dataclass
 class Measurement:
     """
     What `/joint_states` last carried, with the age of each group of rows.
@@ -131,11 +172,28 @@ class Cycle:
     here reaches back into the node.
     """
 
-    def __init__(self, Ts: float, grid: hz.Grid, mode: str, delay: float) -> None:
+    def __init__(
+        self,
+        Ts: float,
+        grid: hz.Grid,
+        mode: str,
+        delay: float,
+        dq_a_feedback=None,
+        dq_a_divergence_max=None,
+    ) -> None:
         self.Ts = Ts
         self.grid = grid
         self.mode = mode
         self.delay = delay
+        #: Per axis, whether x_0's velocity is measured or model-carried.
+        self.dq_a_feedback = (
+            [True] * ACTUATED_DOF if dq_a_feedback is None else list(dq_a_feedback)
+        )
+        self.dq_a_divergence_max = (
+            np.full(ACTUATED_DOF, np.inf)
+            if dq_a_divergence_max is None
+            else np.asarray(dq_a_divergence_max, dtype=float)
+        )
         #: Set once the description has arrived and the problem is posed.
         self.ocp = None
 
@@ -156,6 +214,12 @@ class Cycle:
         self.carried = np.zeros(cs.NX)
         self.carried[cs.X_PROGRESS_RATE] = problem.K_PROGRESS_RATE_REFERENCE
         self.seed_force = True
+        # The previous cycle's propagated planned velocity, read back as the
+        # carry. **Not a second integrator**: a read of `Ocp.propagate`'s own
+        # output, the same one x_0 is built from. `None` until one has been
+        # propagated, and the first cycle then takes the measurement.
+        self.dq_a_carried: np.ndarray | None = None
+        self.velocity_carry = VelocityCarry()
         self.last_input = np.zeros(cs.NU_PROGRESS)
         self.guess = None
         self.last_solution = None
@@ -313,6 +377,16 @@ class Cycle:
         x[cs.X_PLANNED_VELOCITY : cs.X_PLANNED_VELOCITY + PLANNED_DOF] = (
             measurement.dq_a[:PLANNED_DOF]
         )
+        # On an axis whose `dq_a_feedback` entry is false the velocity is the
+        # model's own from the previous cycle rather than the measurement just
+        # written. All-true ships, so this writes nothing until it is configured.
+        self.velocity_carry = (
+            VelocityCarry()
+            if self.dq_a_carried is None
+            else carry_actuated_velocity(
+                x, self.dq_a_carried, self.dq_a_feedback, self.dq_a_divergence_max
+            )
+        )
         x[cs.X_PASSIVE_POSITION : cs.X_PASSIVE_POSITION + PASSIVE_DOF] = measurement.q_u
         x[cs.X_PASSIVE_VELOCITY : cs.X_PASSIVE_VELOCITY + PASSIVE_DOF] = (
             measurement.dq_u
@@ -349,6 +423,13 @@ class Cycle:
         # is worth 3-4x the peak sway the weight is worth nothing. Issue 049's.
         self.q_eq = x0[
             cs.X_PASSIVE_POSITION : cs.X_PASSIVE_POSITION + PASSIVE_DOF
+        ].copy()
+        # What the next cycle carries on an axis that opted out of feedback: what
+        # this propagation says the velocity is when the plan takes effect. One
+        # cycle old and half a delay ahead of the measurement instant, which is
+        # inside what dq_a_divergence_max watches.
+        self.dq_a_carried = x0[
+            cs.X_PLANNED_VELOCITY : cs.X_PLANNED_VELOCITY + PLANNED_DOF
         ].copy()
         self.x0 = x0
         return None
@@ -523,6 +604,13 @@ class Cycle:
 
     def forget_plan(self) -> None:
         """Drop the warm start and the horizon a shift would be taken from."""
+        # The carry goes with them. It was propagated under whatever drove
+        # before, and a break in this node's own output stream -- a gate, the
+        # escalation, a payload step, a mode change -- is this node's
+        # reactivation, so the next cycle re-seeds the row from the measurement
+        # rather than from a state that kept integrating while nobody drove.
+        self.dq_a_carried = None
+        self.velocity_carry = VelocityCarry()
         self.last_horizon = None
         self.tcp_states = None
         self.last_tcp_states = None

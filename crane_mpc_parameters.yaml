@@ -88,6 +88,55 @@ crane_mpc:
     validation:
       gt_eq<>: [0.0]
 
+  dq_a_feedback:
+    type: bool_array
+    default_value: [true, true, true, true, true, true]
+    read_only: true
+    description: "Per actuated axis, where x_0's **velocity** comes from: true is
+      the measurement on /joint_states, false is the model's own propagation of
+      the previous cycle. Positions are always measured and so are both passive
+      rows; this touches the planned velocity rows and nothing else.
+      Marc's node has the same switch as an opt-in list
+      (timber_crane_ilqr_model `velocity_feedback_joints`) and deploys it with
+      the slewing axis alone on measurement, so boom, arm, telescope and rotator
+      run **open-loop** in velocity. That is deliberate: hydraulic velocity
+      signals are noisy, and each axis now carries a PT1 command-lag state and a
+      force state that integrate that noise.
+      All-true is the default and is bit-identical to the node before this row
+      existed -- the carry is only ever written on an axis whose entry is false.
+      **read_only**, unlike `mode`, `solve_budget` and
+      `solver_health_decimation`: flipping an axis mid-move steps that row of
+      x_0 by whatever the two sources currently disagree on, and that step
+      propagates into the force and lag states, the warm start and the command.
+      This is a commissioning choice per deployment, not a knob to turn under a
+      moving machine.
+      The tool row is inert: the tool is pinned and has no velocity row in the
+      OCP's state at all. It is kept six wide for symmetry with every other
+      per-axis row here."
+    validation:
+      fixed_size<>: [6]
+
+  dq_a_divergence_max:
+    type: double_array
+    default_value: [0.19, 0.06, 0.08, 0.10, 0.53, 0.13]
+    read_only: true
+    description: "How far a model-carried velocity may sit from the measured one
+      before it is reported, per axis, rad/s (m/s on the telescope). An
+      open-loop state that has quietly walked away from the machine is the
+      failure mode `dq_a_feedback` buys, so the difference is computed on every
+      carried axis, warned about when it crosses this, and published per axis on
+      ~/shadow_comparison. Nothing is corrected: the carry is the configured
+      behaviour and substituting the measurement on a threshold would be a
+      second, unconfigured controller.
+      A quarter of `limits.dq_a_max`, which is a **judgement and not a
+      measurement** -- no open-loop drift has been recorded on this stack. The
+      units differ per row for the same reason dq_a_max's do, which is why this
+      is an array and not a scalar. Axes on measurement never reach it, since
+      their difference is identically zero."
+    validation:
+      fixed_size<>: [6]
+      lower_element_bounds<>: [0.0]
+
   solve_budget:
     type: double
     default_value: 0.03

@@ -10,8 +10,10 @@ import numpy as np
 import pytest
 from crane_model import symbolic as cs
 from crane_mpc import horizon as hz
-from crane_mpc.cycle import HORIZON_TOPIC, Cycle
+from crane_mpc import reports
+from crane_mpc.cycle import HORIZON_TOPIC, Cycle, carry_actuated_velocity
 from crane_mpc.solver import Outcome, Solution, Violation
+from rclpy.time import Time
 
 KNOTS = 5
 Ts = 0.04
@@ -126,3 +128,102 @@ def test_the_shadow_mode_names_its_own_topic_in_the_verdict():
     verdict = one.ladder(solution(Outcome.CONVERGED), 3, 0.02)
     assert HORIZON_TOPIC not in verdict.text
     assert "shadow_horizon" in verdict.text
+
+
+# -- where x_0's actuated velocity comes from, per axis -------------------------
+
+DOF = cs.K_PLANNED_DOF
+VELOCITY = cs.X_PLANNED_VELOCITY
+
+
+def measured_state():
+    """A state whose rows all count up, so a write to the wrong one is caught."""
+    return np.arange(cs.NX, dtype=float)
+
+
+def test_every_axis_on_measurement_leaves_the_state_untouched():
+    x = measured_state()
+    report = carry_actuated_velocity(x, [99.0] * DOF, [True] * DOF, [1e-9] * DOF)
+    assert x == pytest.approx(measured_state())
+    assert not report.any_diverged
+    assert not any(report.carried)
+
+
+def test_an_opted_out_axis_takes_the_model_velocity_and_nothing_else_moves():
+    x = measured_state()
+    carried = [0.0] * DOF
+    carried[1] = 0.25
+    from_measurement = [True] * DOF
+    from_measurement[1] = False
+
+    report = carry_actuated_velocity(x, carried, from_measurement, [1.0] * DOF)
+
+    expected = measured_state()
+    expected[VELOCITY + 1] = 0.25
+    assert x == pytest.approx(expected)
+    assert report.carried[1]
+    assert report.divergence[1] == pytest.approx(0.25 - measured_state()[VELOCITY + 1])
+    # The tool row is six wide for symmetry and is never carried.
+    assert not report.carried[cs.K_TOOL_AXIS]
+
+
+def test_divergence_past_the_bound_is_reported_and_at_it_is_not():
+    from_measurement = [True] * DOF
+    from_measurement[0] = False
+    bounds = [1.0] * DOF
+    measured = measured_state()[VELOCITY]
+
+    carried = [0.0] * DOF
+    carried[0] = measured + 0.1
+    bounds[0] = 0.05
+    report = carry_actuated_velocity(
+        measured_state(), carried, from_measurement, bounds
+    )
+    assert report.diverged[0] and report.any_diverged
+    assert report.divergence[0] == pytest.approx(0.1)
+
+    bounds[0] = 0.1
+    report = carry_actuated_velocity(
+        measured_state(), carried, from_measurement, bounds
+    )
+    assert not report.diverged[0]
+    assert not report.any_diverged
+
+
+def test_a_carried_axis_reports_its_divergence_on_the_comparison():
+    one = cycle("shadow")
+    x = measured_state()
+    carried = [0.0] * DOF
+    carried[1] = x[VELOCITY + 1] + 0.5
+    from_measurement = [True] * DOF
+    from_measurement[1] = False
+    one.velocity_carry = carry_actuated_velocity(
+        x, carried, from_measurement, [0.1] * DOF
+    )
+
+    joints = [f"axis{axis}" for axis in range(cs.K_ACTUATED_DOF)]
+    message = reports.shadow_comparison(
+        one, "a verdict", None, joints, 0.02, Time().to_msg()
+    )
+    keys = {entry.key: entry.value for entry in message.status[0].values}
+
+    assert float(keys["axis1.dq_a_divergence"]) == pytest.approx(0.5)
+    assert keys["axis1.dq_a_diverged"] == "true"
+    # The other five are on measurement, so they carry no row at all.
+    assert not [key for key in keys if key.startswith("axis0.dq_a")]
+
+
+def test_a_break_in_the_output_stream_drops_the_carry():
+    """A silence is this node's reactivation: the next cycle re-seeds from measurement."""
+    one = cycle()
+    one.dq_a_carried = np.zeros(DOF)
+    one.stay_silent("a gate refused")
+    assert one.dq_a_carried is None
+
+
+def test_a_carry_that_is_not_finite_falls_back_to_the_measurement():
+    x = measured_state()
+    carried = [np.nan] * DOF
+    report = carry_actuated_velocity(x, carried, [False] * DOF, [1.0] * DOF)
+    assert x == pytest.approx(measured_state())
+    assert not any(report.carried)

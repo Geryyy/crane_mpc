@@ -43,6 +43,7 @@ from .cycle import (
     PASSIVE_DOF,
     PASSIVE_INDICES,
     PAYLOAD_ESTIMATE_TOPIC,
+    PLANNED_DOF,
     REFERENCE_TOPIC,
     ROBOT_DESCRIPTION_TOPIC,
     SET_PAYLOAD_SERVICE,
@@ -111,7 +112,14 @@ class MpcNode(Node):
         self.Ts = float(self._values.Ts)
         self.grid = hz.Grid(self.Ts, int(self._values.horizon_length))
         self.delay = float(self._values.sensor_to_valve_delay)
-        self._cycle = Cycle(self.Ts, self.grid, str(self._values.mode), self.delay)
+        self._cycle = Cycle(
+            self.Ts,
+            self.grid,
+            str(self._values.mode),
+            self.delay,
+            list(self._values.dq_a_feedback),
+            list(self._values.dq_a_divergence_max),
+        )
 
         self._ocp: Ocp | None = None
         self._model: CraneModel | None = None
@@ -151,10 +159,58 @@ class MpcNode(Node):
             f"{self.Ts} s, {self.delay} s of transport delay, a "
             f"{self._values.solve_budget} s budget."
         )
+        self.warn_open_loop_axes()
 
     @property
     def mode(self) -> str:
         return self._cycle.mode
+
+    def axis_names(self) -> list[str]:
+        """Name the six actuated joints, before the description has arrived too."""
+        names = canonical_joints()
+        return [names[row] for row in ACTUATED_INDICES]
+
+    def warn_open_loop_axes(self) -> None:
+        """Say once, at startup, which axes do not close the velocity loop."""
+        cycle = self._cycle
+        names = self.axis_names()
+        open_loop = [
+            names[axis] for axis in range(PLANNED_DOF) if not cycle.dq_a_feedback[axis]
+        ]
+        if not open_loop:
+            return
+        self.get_logger().warn(
+            f"{', '.join(open_loop)} take their velocity in x_0 from the **model** "
+            f"and not from {JOINT_STATE_TOPIC} (dq_a_feedback). That is Marc's "
+            "deployed setting -- his node closes the velocity loop on the slewing "
+            "axis alone -- and it buys quiet on noisy hydraulic velocity signals at "
+            "the cost of an actuator state that can walk away from the machine. "
+            f"dq_a_divergence_max is what watches for that; it is reported on "
+            f"{SHADOW_COMPARISON_TOPIC} and warned about, and never corrected."
+        )
+
+    def warn_divergence(self) -> None:
+        """Report a carried velocity that has walked away from the measured one."""
+        carry = self._cycle.velocity_carry
+        if not carry.any_diverged:
+            return
+        for axis, joint in enumerate(self._joints):
+            if not carry.diverged[axis]:
+                continue
+            # Its own call site, not `self.warn`: rclpy keys the throttle by
+            # caller, so sharing that one would put the divergence in the same
+            # five-second bucket as every silence this node reports.
+            self.get_logger().warn(
+                f"The model-carried velocity of {joint} has walked "
+                f"{carry.divergence[axis]:g} away from the measured one, past the "
+                f"{self._cycle.dq_a_divergence_max[axis]:g} dq_a_divergence_max on "
+                "that axis. This axis runs open-loop in velocity by configuration "
+                "(dq_a_feedback), so nothing corrects it and the state the OCP is "
+                "solved from is the model's, not the machine's. Reported and not "
+                "corrected: substituting the measurement on a threshold would be a "
+                "second controller nobody configured.",
+                throttle_duration_sec=WARN_PERIOD,
+            )
 
     @property
     def _last_silence(self) -> str:
@@ -334,6 +390,7 @@ class MpcNode(Node):
         if silence is not None:
             self.fall_silent(silence)
             return
+        self.warn_divergence()
 
         solution, refusal = cycle.solve()
         if refusal:
