@@ -402,21 +402,62 @@ crane_mpc:
   limits:
     q_a_lower:
       type: double_array
-      default_value: [-3.71, -1.2, -0.91, 0.0, -12.566370614359172, 0.2]
+      default_value: [-3.71, 0.0, -0.91, 0.0, -12.566370614359172, 0.2]
       read_only: true
       description: "Constraint 1 of wiki/mpc.md, lower end, per actuated row.
         These are the **control-safe** limits of
         wiki/implementation/parameters.md and explicitly not the URDF's, which
         is why they are written down here rather than read off the description --
         see config/control_safe_limits.yaml for where each number comes from and
-        which of them is weak."
+        which of them is weak.
+        **The boom's 0.0 is the row that is narrower than the description**
+        (issue 128). -1.2 was the URDF's, and the boom's four-bar stops closing
+        at q2 = -1.1841609: below that the discriminant of wiki/hydraulics.md
+        §2.2 is negative, the pose does not exist and the transmission ratio is
+        not finite. The ratio is also negative on (-1.18416, -1.15096) and
+        reaches -6.1 there, where constraint 6 under-reports cylinder force by
+        more than a decade. The stroke limit s2 >= 1.253 m (§5.3) already
+        excludes all of it at q2 >= -1.054, so the defect was the box and not the
+        row. The number is Marc's, as the arm's upper is:
+        timber_crane_model_cpp/include/timber_crane_model_cpp/joint_limits.hpp:14-30,
+        which his MPC's joint-limit constraint reads, and the deployed
+        epsilon_crane_bringup_mp/config/motion_planning/mp_parameter_pzs100.yaml:135-224
+        (qMinCtrl) agree to the digit. It sits 1.18 rad clear of the closure
+        failure, and on [0.0, 1.563] the boom ratio is 0.2806..0.4530 -- positive,
+        finite and bounded away from zero.
+        **A narrowed lower is not a refusal.** `position_box` never excludes the
+        measured pose, so engaging with the boom folded below 0.0 relaxes this
+        bound to wherever the boom is rather than declining to run. That is
+        survivable and not accidental -- the machine cannot be below -1.184, so
+        the relaxed bound stays on the finite branch, where the ratio bottoms out
+        at 0.1245 instead of 0.2806 and constraint 6 stays well formed. What it
+        means is that the folded pose is out of the *configured* box and not out
+        of the *effective* one; refusing to engage there would be a supervisor
+        decision and nothing here makes it."
       validation:
         fixed_size<>: [6]
     q_a_upper:
       type: double_array
-      default_value: [3.71, 1.563, 4.6, 2.236, 12.566370614359172, 0.7]
+      default_value: [3.71, 1.563, 1.324864, 2.236, 12.566370614359172, 0.7]
       read_only: true
-      description: "Constraint 1 of 3, upper end. See q_a_lower."
+      description: "Constraint 1 of 3, upper end. See q_a_lower.
+        **The arm's 1.324864 is the one entry here that is narrower than the
+        description, and it is what makes constraint 6 well formed** (issue 126).
+        That row divides the joint torque by the arm's transmission ratio, which
+        crosses zero at q3 = 1.8466647 -- a real dead point, pivot and both
+        cylinder attachments collinear -- and is *negative* above it, where the
+        asymmetric extend and retract bounds of wiki/mpc.md §3 would then be
+        assigned the wrong way round. 4.6 was the URDF's and admitted all of it.
+        The number is Marc's, not a derivation:
+        timber_crane_model_cpp/include/timber_crane_model_cpp/joint_limits.hpp:14-30,
+        which his MPC's joint-limit constraint reads, and the deployed
+        epsilon_crane_bringup_mp/config/motion_planning/mp_parameter_pzs100.yaml:146
+        (qMaxCtrl) agree to the digit. It is field-tested and sits 0.52 rad clear
+        of the dead point. Force authority corroborates rather than sets it: the
+        static hold at q3 = 1.6 already needs 2.76x the force limit (wiki/mpc.md
+        §3, issue 043), so the usable branch ends below 1.6 and 1.324864 is on
+        the right side of that. The MPC drives the working configuration only;
+        the folded transport pose is out of the box by construction."
       validation:
         fixed_size<>: [6]
     q_a_margin:
@@ -433,10 +474,15 @@ crane_mpc:
         C3 block 1: the travel an axis can put in before the loop can react to
         anything, which is the smallest margin that means something on a bound the
         optimizer already never crosses. Zero is legal and reproduces the
-        untightened bound exactly.
+        untightened bound exactly. It is the **pre-128** dq_a_max times that dead
+        time, and recomputing it after that narrowing would widen the effective
+        position box -- the wrong direction for a row whose purpose is to tighten
+        one. So on the four axes 128 narrowed, the margin now exceeds the product
+        it was derived from; the rotator's and the tool's are unchanged and are
+        their own rounding of it (2.121947 x 0.06 = 0.12732 written as 0.127).
         A margin **never excludes the pose the machine is in** (`position_box` in
-        ocp_solver.hpp). One that did would make the problem infeasible for states
-        the machine is legitimately parked in -- a fully retracted telescope sits
+        crane_mpc/solver.py). One that did would make the problem infeasible for
+        states the machine is legitimately parked in -- a fully retracted telescope sits
         exactly on q_a_lower[3] = 0 -- and the fallback would then fire on every
         cycle forever. Softening the row instead is not available: constraint 1 is
         hard on purpose and crane_msgs/SolverHealth has no violation slot for it,
@@ -446,14 +492,21 @@ crane_mpc:
         lower_element_bounds<>: [0.0]
     dq_a_max:
       type: double_array
-      default_value: [0.802, 0.326, 0.344, 0.630, 2.122, 0.5]
+      default_value: [0.764, 0.239067, 0.325733, 0.400000, 2.121947, 0.5]
       read_only: true
-      description: "Constraint 2 of 3, |dq_a| <= dq_a^+. The boom and arm rows are
-        the deployed control config's 0.326 and 0.344 of parameters.md 2, which
-        records the URDF's own 0.526 and 0.866 as 1.6-3.4x too permissive and not
-        tracked since January 2026. The other four rows have no control-config
-        number anywhere in this workspace and are the description's; see
-        config/control_safe_limits.yaml."
+      description: "Constraint 2 of 3, |dq_a| <= dq_a^+. Every crane row is the
+        deployed control config's qDotMinCtrl/qDotMaxCtrl
+        (mp_parameter_pzs100.yaml:135-224); the tool row has no counterpart there
+        and is hand-set. See config/control_safe_limits.yaml.
+        **His box is asymmetric and this one cannot be**, since the row is a
+        single magnitude per axis, so each entry is the *smaller* of his two
+        (issue 128). It used to be the larger, which let the boom extend 36 % and
+        the telescope 58 % faster than the machine is driven: -0.325963/+0.239067
+        and -0.630189/+0.400000 read as 0.326 and 0.630. The claim this
+        description carried -- that no control-config number exists in this
+        workspace for the other four rows -- was false; qDotMaxCtrl[3] = 0.400000
+        is deployed. What retraction loses is real and is the price of one bound
+        per axis; a second bound is a change to the constraint row."
       validation:
         fixed_size<>: [6]
         lower_element_bounds<>: [0.0]
@@ -495,7 +548,17 @@ crane_mpc:
         feasible at rate one against these same limits
         (wiki/trajectory_planning.md 5.3), so a horizon spending it much faster is
         asking for something the planner already declared out of reach, and the
-        velocity, force and flow rows would refuse it anyway. Not tuned."
+        velocity, force and flow rows would refuse it anyway. Not tuned.
+        **'These same limits' is no longer true and is a known gap**, not a
+        licence to widen this box: crane_planning reads its own box off the
+        description (crane_planning/config.py:108-110, the URDF's
+        lower/upperPositionLimit and velocityLimit), so since issues 126 and 128
+        it certifies boom and arm poses that constraint 1 hard-refuses. A
+        reference outside the box is absorbed by the progress rate on the
+        velocity rows and is **not** absorbed on the position rows -- the axis
+        parks on the bound and the rate collapses, with no fault, because
+        constraint 1 has no slack row and crane_msgs/SolverHealth no slot for it.
+        Reconciling the two boxes is crane_planning's and needs its own issue."
       validation:
         gt_eq<>: [1.0]
     progress_accel_max:
@@ -511,7 +574,7 @@ crane_mpc:
         gt<>: [0.0]
     u_max:
       type: double_array
-      default_value: [0.802, 0.288, 0.305, 0.555, 2.122, 0.5]
+      default_value: [0.764, 0.239067, 0.305, 0.400000, 2.121947, 0.5]
       read_only: true
       description: "Constraint 5 of 3, |u| <= u^+. **u is a joint velocity in
         rad/s (m/s on the telescope) at Psi's input**, not an acceleration: C3
@@ -531,8 +594,9 @@ crane_mpc:
         the control-safe velocity asks in steady state for a velocity constraint
         2 forbids -- an input box wider than the state box it drives is an
         infeasibility waiting for a step reference.
-        The element-wise minimum, rounded inward, is this default: Psi's domain
-        binds on the boom, arm and telescope, dq_a_max on the slew and rotator.
+        The element-wise minimum, rounded inward, is this default. Issue 128's
+        narrowing of dq_a_max moved the boom and the telescope across, so Psi's
+        domain now binds on the arm alone and dq_a_max on the other four.
         Marc's `acceleration.limit_scale` has no separate home -- there it scaled
         limits that came from the model, here both arrays it would scale are
         themselves deployment parameters, so a global multiplier would be a

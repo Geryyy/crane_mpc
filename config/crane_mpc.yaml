@@ -51,21 +51,44 @@ crane_mpc:
       terminal_scale: 10.0
 
     limits:
-      q_a_lower: [-3.71, -1.2, -0.91, 0.0, -12.566370614359172, 0.2]
-      q_a_upper: [3.71, 1.563, 4.6, 2.236, 12.566370614359172, 0.7]
-      dq_a_max: [0.802, 0.326, 0.344, 0.630, 2.122, 0.5]
+      # The boom's lower is Marc's 0.0, not the description's -1.2 (issue 128).
+      # The four-bar stops closing at q2 = -1.1841609 -- below it the
+      # discriminant of wiki/hydraulics.md §2.2 is negative and the pose does not
+      # exist -- and the ratio is negative on (-1.18416, -1.15096), so -1.2
+      # admitted 0.0158 rad of nonexistent poses and a decade of under-reported
+      # cylinder force above them. Provenance in config/control_safe_limits.yaml.
+      q_a_lower: [-3.71, 0.0, -0.91, 0.0, -12.566370614359172, 0.2]
+      # The arm's upper is the **working branch**, not the description's 4.6:
+      # constraint 6 divides by the arm's transmission ratio and that ratio
+      # crosses zero at q3 = 1.8466647 (issue 126). Marc's 1.324864 sits 0.52 rad
+      # below it -- see the parameter description for the two sources.
+      q_a_upper: [3.71, 1.563, 1.324864, 2.236, 12.566370614359172, 0.7]
+      # Constraint 2 is one-sided, |dq_a| <= dq_a^+, so a symmetric box is all it
+      # can carry. Marc's is **asymmetric** and the rows here used to take his
+      # looser side: the boom allowed 36 % and the telescope 58 % more extension
+      # than he does. Each row is now the smaller of his two magnitudes, which is
+      # inward on both sides (issue 128). Retraction pays for it -- boom 0.326 ->
+      # 0.239, telescope 0.630 -> 0.400 -- and that is the price of one number
+      # per axis; a second bound is a constraint-row change and not this issue's.
+      # The velocity rows have no `position_box`, so inside that band the machine
+      # may legally be moving faster than this bound and engaging there asks the
+      # first interval to brake. See config/control_safe_limits.yaml.
+      dq_a_max: [0.764, 0.239067, 0.325733, 0.400000, 2.121947, 0.5]
       # Marc's `joint_limit.safety_thresh`, as a tightening of constraint 1's
       # bound rather than the point a penalty starts biting. dq_a_max times the
-      # 60 ms transport dead time: the travel the axis cannot react within.
+      # 60 ms transport dead time: the travel the axis cannot react within. Kept
+      # at the pre-128 dq_a_max, so on the four axes 128 narrowed it now exceeds
+      # that product -- recomputing would *widen* the effective box, which issue
+      # 128 forbids. The rotator's 0.127 is unchanged and is a rounding of it.
       q_a_margin: [0.048, 0.020, 0.021, 0.038, 0.127, 0.030]
       q_u_max: [0.2, 0.2]
       dq_u_max: [1.0, 0.5]
       # `u` is a **joint velocity** at Psi's input under C3, not an acceleration.
       # Per axis the smaller of Psi's own identified domain (compensator_map 3;
-      # sw 0.9357, ha 0.2880, ka 0.3059, sa 0.5551, ro 2.3969) and dq_a_max, so
-      # the boom, arm and telescope are bounded by the fit's domain and the slew
-      # and rotator by the control-safe velocity.
-      u_max: [0.802, 0.288, 0.305, 0.555, 2.122, 0.5]
+      # sw 0.9357, ha 0.2880, ka 0.3059, sa 0.5551, ro 2.3969) and dq_a_max. The
+      # narrowed dq_a_max moves the boom and the telescope over: only the arm is
+      # still bounded by the fit's domain, the other four by the velocity box.
+      u_max: [0.764, 0.239067, 0.305, 0.400000, 2.121947, 0.5]
       # `0 <= v_s <= progress_rate_max`. The floor is zero and structural: the
       # machine does not run the plan backwards. The ceiling is catch-up
       # headroom after a slowdown.
