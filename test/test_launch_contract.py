@@ -114,10 +114,23 @@ def test_neither_configuration_file_can_decide_the_others_values():
 
 
 def test_the_launch_leaves_the_node_in_shadow():
-    """Turning the shadow off is a separate, deliberate act (issue 146)."""
+    """Turning the shadow off is a separate, deliberate act (issue 146).
+
+    The launch now carries a `mode` argument, so the assertion is on its
+    default rather than on the word's absence: nothing an including profile
+    forgets to pass may leave shadow.
+    """
     assert (
         _parameters(yaml.safe_load(MPC_CONFIG.read_text(encoding="utf-8")))["mode"]
         == SHADOW
     )
-    source = _source()
-    assert '"mode"' not in source and "'mode'" not in source
+    declaration = next(
+        node
+        for node in ast.walk(ast.parse(_source()))
+        if isinstance(node, ast.Call)
+        and getattr(node.func, "id", None) == "DeclareLaunchArgument"
+        and node.args
+        and getattr(node.args[0], "value", None) == "mode"
+    )
+    assert _strings(_keyword(declaration, "default_value")) == [SHADOW]
+    assert _strings(_keyword(declaration, "choices")) == [SHADOW, "active"]

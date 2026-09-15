@@ -18,12 +18,26 @@ from launch_ros.substitutions import FindPackageShare
 
 def generate_launch_description():
     joint_states_topic = LaunchConfiguration("joint_states_topic")
+    mode = LaunchConfiguration("mode")
     use_sim_time = LaunchConfiguration("use_sim_time")
     share = FindPackageShare("crane_mpc")
 
     return LaunchDescription(
         [
             DeclareLaunchArgument("use_sim_time", default_value="false"),
+            # Shadow by default, and the shipped config says shadow too: leaving
+            # it is the caller's explicit act, never a default anything drifts
+            # into. Passed as a node parameter so it wins over both files.
+            DeclareLaunchArgument(
+                "mode",
+                default_value="shadow",
+                choices=["shadow", "active"],
+                description=(
+                    "Whether this node's horizon drives. 'shadow' publishes "
+                    "~/shadow_horizon and leaves /crane/mpc/horizon silent; "
+                    "'active' publishes the contract topic."
+                ),
+            ),
             # Absolute, like the name the node subscribes to: a relative default
             # would stop being the no-op it is today the moment this file is
             # included under a pushed namespace, while the remapped name would
@@ -54,7 +68,10 @@ def generate_launch_description():
                 parameters=[
                     PathJoinSubstitution([share, "config", "crane_mpc.yaml"]),
                     PathJoinSubstitution([share, "config", "hydraulic_limits.yaml"]),
-                    {"use_sim_time": ParameterValue(use_sim_time, value_type=bool)},
+                    {
+                        "use_sim_time": ParameterValue(use_sim_time, value_type=bool),
+                        "mode": ParameterValue(mode, value_type=str),
+                    },
                 ],
                 remappings=[("/joint_states", joint_states_topic)],
                 # acados parallelises over shooting nodes with OpenMP; measured
