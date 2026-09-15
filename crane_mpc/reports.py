@@ -59,9 +59,18 @@ def solver_health(cycle: Cycle, solution, why: str, joints, budget: float, stamp
         Outcome.BUDGET_EXCEEDED: SolverHealth.SOLVE_BUDGET_EXCEEDED,
         Outcome.FAILED: SolverHealth.SOLVE_FAILED,
     }[solution.outcome]
+    # A stalled plan is a *converged* solve -- the optimizer is answering, it is
+    # answering "wait" -- so without this it reports healthy forever. It reuses
+    # FAULT_SOLVER because `SolverHealth` has no code of its own for a stall and
+    # giving it one is a `crane_msgs` field add. **What a receiver then does
+    # about it is not settled here**: a stalled node keeps publishing, so it does
+    # not look like the producer that went quiet, and no node in this stack acts
+    # on the distinction yet. `health_is_due` exempts a changed verdict from the
+    # decimation, so it goes out on the cycle it is noticed; where the fault
+    # already stands the stall is carried in `message`.
     health.fault = (
         SupervisorStatus.FAULT_NONE
-        if solution.outcome is Outcome.CONVERGED
+        if solution.outcome is Outcome.CONVERGED and not cycle.progress_stalled
         else SupervisorStatus.FAULT_SOLVER
     )
     health.status = solution.status

@@ -410,8 +410,34 @@ class MpcNode(Node):
 
         self.complain(verdict)
         self.publish_horizon()
-        cycle.advance(solution)
-        self.report(solution, verdict.text)
+        was_stalled = cycle.progress_stalled
+        cycle.advance(
+            solution,
+            now,
+            float(self._values.min_progress_rate),
+            float(self._values.max_stall_time),
+        )
+        self.report(solution, self.say_stalled(verdict.text, was_stalled))
+
+    def say_stalled(self, text: str, was_stalled: bool) -> str:
+        """Add the stall to the verdict, and say it once on the transition."""
+        if not self._cycle.progress_stalled:
+            return text
+        text += (
+            "; and the plan has not progressed: virtual time has advanced by less "
+            f"than {self._values.min_progress_rate} of nominal for "
+            f"{self._values.max_stall_time} s of wall clock, so this plan is stalled "
+            "rather than merely slow"
+        )
+        if not was_stalled:
+            self.get_logger().error(
+                f"{text}. The horizon still goes out -- the machine is where the plan "
+                "says, it is just not moving through it -- but "
+                f"{SOLVER_HEALTH_TOPIC} now carries FAULT_SOLVER. This node reports "
+                "the stall and does not recover from it: releasing the arm claim is "
+                "the supervisor's and re-planning is the task layer's."
+            )
+        return text
 
     def complain(self, verdict) -> None:
         if verdict.severity == "error":

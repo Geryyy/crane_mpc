@@ -810,6 +810,72 @@ crane_mpc:
     validation:
       gt<>: [0.0]
 
+  min_progress_rate:
+    type: double
+    default_value: 0.1
+    read_only: true
+    description: "The realized progress rate below which a cycle counts as **not
+      progressing**, as a fraction of nominal -- so it is the progress rate
+      itself, dimensionless and 1.0 when the plan runs at the speed it was
+      planned at. It answers a different question from max_reference_age and on a
+      different clock: that one asks whether the plan is *finished*, properly in
+      plan time, this one asks whether it is *progressing*, which is only
+      meaningful against the wall clock. Since the MPC gained the progress state
+      the quantity max_reference_age measures is one the optimizer controls, and
+      a rate of zero is inside the feasible set, so a machine stalled mid-plan
+      slows that guard's own clock with it and never ages out.
+      The rate is per cycle, so it is what the optimizer chose and nothing else:
+      a node whose own loop runs slower than Ts also spends plan slower than real
+      time, and that is a timing fault with solve_budget for an oracle rather
+      than a stalled plan.
+      **Where 0.1 comes from.** Slowing down is the feature, so the threshold has
+      to sit below every legitimate slowdown that has been measured. Issue 119's
+      acceptance run is the calibration: a reference asking more of the slewing
+      axis than its control-safe limit allows, for six seconds -- a genuine
+      over-ask, not a stall -- holds the rate at 0.760 minimum re-measured. The
+      minimum is the number that matters, because one cycle at or above the
+      threshold clears the count. The same issue's weight sweep gives the other
+      end: at a time price 200x too low the controller dawdles at 0.319 minimum
+      on a move it can follow, which is a tuning defect this must not report as a
+      stall either. 0.1 is a third of that and a seventh of the acceptance run's
+      floor, and a plan that keeps running at 0.1 still finishes -- ten times
+      late. What it excludes is the machine that has stopped."
+    validation:
+      gt<>: [0.0]
+      lt<>: [1.0]
+
+  max_stall_time:
+    type: double
+    default_value: 2.0
+    read_only: true
+    description: "How long the progress rate may stay under min_progress_rate
+      before it is reported, **s of wall clock**. The bound is on *sustained*
+      near-zero progress: a cycle at or above the rate clears the count outright,
+      so a slowdown, however deep, costs nothing and only a machine that stays
+      stopped reports.
+      **Where 2.0 comes from.** It is one horizon at the shipped grid, N Ts =
+      50 x 40 ms, and that is the argument: a horizon is everything the optimizer
+      can see, so a full one spent without moving through the plan is not a
+      transient at the bottom of a slowdown -- it is the optimizer having looked
+      at all the plan it has and decided against all of it.
+      **Detection time.** Counted from the last cycle that progressed, it is this
+      bound exactly -- 2.00 s, the 50th held cycle on the shipped grid. The
+      issue's 'plus one cycle' is the cold-start case: the first cycle after a
+      new reference, a mode change or a silence has no wall-clock mark yet and so
+      charges no time, which puts that one at 2.04 s. Add at most one health
+      cadence on top: a stall on a solve that converged is a change of verdict
+      and exempt from solver_health_decimation, but where FAULT_SOLVER already
+      stands nothing in the numbering changes and the stall is carried in
+      `message` alone. SolverHealth has no code of its own for it; giving it one
+      is a crane_msgs field add.
+      **This is a report and not a recovery.** The horizon keeps going out -- the
+      machine is where the plan says it is, it is merely not moving through it --
+      and what changes is `fault` on /crane/mpc/solver_health. Nothing here
+      unsticks the machine, and no node in this stack acts on the fault yet, so
+      today a reported stall ends when a person ends it."
+    validation:
+      gt<>: [0.0]
+
   max_clock_skew:
     type: double
     default_value: 0.04

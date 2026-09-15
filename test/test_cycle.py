@@ -11,8 +11,14 @@ import pytest
 from crane_model import symbolic as cs
 from crane_mpc import horizon as hz
 from crane_mpc import reports
-from crane_mpc.cycle import HORIZON_TOPIC, Cycle, carry_actuated_velocity
+from crane_mpc.cycle import (
+    HORIZON_TOPIC,
+    Cycle,
+    carry_actuated_velocity,
+    watch_progress,
+)
 from crane_mpc.solver import Outcome, Solution, Violation
+from crane_msgs.msg import SolverHealth, SupervisorStatus
 from rclpy.time import Time
 
 KNOTS = 5
@@ -227,3 +233,126 @@ def test_a_carry_that_is_not_finite_falls_back_to_the_measurement():
     report = carry_actuated_velocity(x, carried, [False] * DOF, [1.0] * DOF)
     assert x == pytest.approx(measured_state())
     assert not any(report.carried)
+
+
+# -- the wall-clock stall watch -------------------------------------------------
+
+MIN_RATE = 0.1
+MAX_STALL = 2.0
+NOMINAL_NS = int(Ts * 1e9)
+
+
+def watch(held, rate, cycles):
+    """`cycles` cycles of a machine whose progress rate is `rate` times nominal."""
+    stalled = False
+    for _ in range(cycles):
+        held, stalled = watch_progress(held, rate * Ts, Ts, Ts, MIN_RATE, MAX_STALL)
+    return held, stalled
+
+
+def stall(one):
+    """
+    Publish converged cycles that spend no plan at all, from a cold start.
+
+    51 and not 50: the first cycle after a clear has no mark yet and so charges
+    no wall time. That is the issue's "max_stall_time plus one cycle" -- it is
+    the cold-start case, and in steady state the bound falls on the 50th.
+    """
+    for step in range(51):
+        one.advance(
+            solution(Outcome.CONVERGED, 0.0), step * NOMINAL_NS, MIN_RATE, MAX_STALL
+        )
+    return one
+
+
+def test_a_held_plan_reports_after_the_stall_time_and_not_before():
+    """With the mark already set, the bound is counted from the last good cycle."""
+    held, stalled = watch(0.0, 0.0, 49)
+    assert not stalled, "49 cycles is 1.96 s, inside the 2.0 s bound"
+    held, stalled = watch(held, 0.0, 1)
+    assert stalled, "the 50th is 2.00 s, the bound itself"
+    assert held == pytest.approx(MAX_STALL)
+    # It stays reported while it lasts, and the count does not run away.
+    held, stalled = watch(held, 0.0, 500)
+    assert stalled
+    assert held == pytest.approx(MAX_STALL)
+
+
+def test_a_rate_just_under_the_threshold_is_a_stall_and_just_over_is_not():
+    """AC1 is *below* min_rate, not zero; every other case here spends nothing."""
+    assert watch(0.0, 0.999 * MIN_RATE, 50)[1]
+    assert not watch(0.0, 1.001 * MIN_RATE, 10000)[1]
+
+
+def test_a_slowdown_is_not_a_stall_and_the_count_is_wall_clock():
+    """The watch must not fire on the feature working."""
+    # Issue 119's cannot-follow run: a legitimate over-ask on the slewing axis,
+    # held far longer than the stall time, at 0.760 minimum.
+    assert not watch(0.0, 0.760, 10000)[1]
+    # And the 0.319 a 200x-too-low time price dawdles at -- a tuning defect,
+    # which reporting here would name as the wrong thing.
+    assert not watch(0.0, 0.319, 10000)[1]
+
+    # Wall clock and not cycles: a node at half rate reports after the same 2 s,
+    # in half as many cycles.
+    held, stalled = 0.0, False
+    for _ in range(26):
+        held, stalled = watch_progress(held, 0.0, Ts, 2.0 * Ts, MIN_RATE, MAX_STALL)
+    assert stalled
+
+    # A nominal that is not a duration is not progress, and a number that is not
+    # finite buys neither progress nor wall time.
+    assert watch_progress(0.0, Ts, 0.0, Ts, MIN_RATE, MAX_STALL) == (Ts, False)
+    assert watch_progress(MAX_STALL, np.nan, Ts, np.nan, MIN_RATE, MAX_STALL) == (
+        MAX_STALL,
+        True,
+    )
+
+
+def test_one_progressing_cycle_inside_the_window_clears_the_count():
+    held, stalled = watch(0.0, 0.0, 60)
+    assert stalled
+    held, stalled = watch(held, 1.0, 1)
+    assert not stalled
+    assert held == 0.0
+    # A machine that crawls just above the threshold therefore never reports.
+    # That is the bound's own statement: 0.1 of nominal still finishes the plan.
+    assert not watch(held, MIN_RATE, 10000)[1]
+
+
+def test_a_stalled_plan_reports_fault_solver_on_a_converged_solve():
+    one = stall(cycle())
+    assert one.progress_stalled
+    joints = [f"axis{axis}" for axis in range(cs.K_ACTUATED_DOF)]
+    health = reports.solver_health(
+        one,
+        solution(Outcome.CONVERGED, 0.0),
+        "a verdict",
+        joints,
+        0.02,
+        Time().to_msg(),
+    )
+    assert health.outcome == SolverHealth.SOLVE_CONVERGED
+    assert health.fault == SupervisorStatus.FAULT_SOLVER
+
+
+def test_a_new_reference_and_a_mode_change_each_clear_the_stall():
+    one = stall(cycle())
+    one.adopt_reference(hz.Knots.zeros(KNOTS), 0)
+    assert not one.progress_stalled
+    assert one.progress_held == 0.0
+
+    one = stall(cycle())
+    one.adopt_mode("shadow")
+    assert not one.progress_stalled
+    assert one.progress_held == 0.0
+
+
+def test_a_silence_keeps_the_count_and_drops_the_wall_clock_mark():
+    """Silent seconds are charged to nobody; a stalled machine still reports."""
+    one = stall(cycle())
+    one.stay_silent("a gate refused")
+    assert one.progress_held == pytest.approx(MAX_STALL)
+    assert not one.progress_marked
+    # The field `reports.solver_health` reads stands through the silence too.
+    assert one.progress_stalled

@@ -164,6 +164,40 @@ def follower_input(follower: FollowerCommand, u_max) -> np.ndarray:
     return command
 
 
+def watch_progress(held, advance, nominal, wall_dt, min_rate, max_stall_time):
+    """
+    Fold one published cycle into the wall-clock stall watch. `(held, stalled)`.
+
+    `advance` is the virtual time this cycle spent, `nominal` what it would have
+    spent at `v_s = 1`, so their ratio is the realized progress rate. The gate in
+    `gates` asks whether the plan is **finished** and asks it in plan time, which
+    is the right clock for that question. This asks whether it is
+    **progressing**, and that one is only meaningful against the wall clock: the
+    progress rate is a decision variable with zero inside its feasible set, so an
+    optimizer that stops spending the plan also stops ageing it and the
+    max_reference_age gate slows down with the machine and never fires.
+
+    A cycle under `min_rate` adds its own wall-clock duration, capped at the
+    timeout so a long stall cannot run the count away; any other cycle clears it
+    outright. The verdict is therefore on *sustained* near-zero progress and not
+    on a slowdown -- slowing down is the feature working.
+
+    `nominal` is one grid step, so the rate is per cycle: it is the progress rate
+    the optimizer chose and nothing else. A node whose own loop runs slower than
+    `Ts` also spends plan slower than real time, and that is a timing fault with
+    `solve_budget` for an oracle.
+
+    Every comparison reads a NaN as *not progressing* and as *no wall time*.
+    Neither is reachable from `advance`, which sanitises both, but a guard that
+    reads a corrupt number as a healthy cycle is the one that costs something.
+    """
+    step = wall_dt if wall_dt > 0.0 else 0.0
+    progressing = nominal > 0.0 and advance >= min_rate * nominal
+    held = 0.0 if progressing else min(held + step, max_stall_time)
+    # The cap bounds the count; `>=` keeps it reported for as long as it lasts.
+    return held, not progressing and held >= max_stall_time
+
+
 class Cycle:
     """
     The MPC's own state between two solves, and the decisions it makes on it.
@@ -201,6 +235,12 @@ class Cycle:
         self.reference_stamp_ns = 0
         self.reference_progress = 0.0
         self.reference_anchored = False
+        # `watch_progress`'s state. Only cycles that published feed it, because
+        # only those spent a decision of this node's.
+        self.progress_held = 0.0
+        self.progress_stalled = False
+        self.progress_mark_ns = 0
+        self.progress_marked = False
         self.next_first_knot_ns = 0
         self.cadence_anchored = False
 
@@ -255,11 +295,20 @@ class Cycle:
         self.reference = reference
         self.reference_stamp_ns = stamp_ns
         self.reference_anchored = False
+        # The stall watch is per plan: a new reference is the re-plan a stall
+        # asks for, and counting the old plan's stall against it reports the
+        # answer.
+        self.forget_stall()
 
     def adopt_mode(self, requested: str) -> str:
         """Move to `requested` and cold start. Returns the mode left behind."""
         previous, self.mode = self.mode, requested
         self.forget_plan()
+        # In shadow this node's plan drives nothing, so its own progress may sit
+        # near zero for as long as the follower is doing something else. Carried
+        # into active that reports a stall on the first cycle that takes the
+        # machine, on evidence gathered while it did not.
+        self.forget_stall()
         self.consecutive_failures = 0
         self.escalated = False
         self.cadence_anchored = False
@@ -581,7 +630,13 @@ class Cycle:
         self.shadow_command = self.horizon.dq_a_ref[1].copy()
         self.shadow_command_valid = True
 
-    def advance(self, solution) -> None:
+    def advance(
+        self,
+        solution,
+        now_ns: int,
+        min_progress_rate: float,
+        max_stall_time: float,
+    ) -> None:
         """Carry what the next cycle starts from, now that a horizon went out."""
         self.last_horizon = self.horizon.copy()
         self.last_tcp_states = (
@@ -599,8 +654,29 @@ class Cycle:
 
         self.next_first_knot_ns += int(self.Ts * NANOSECONDS)
         advance = solution.progress_advance
-        self.reference_progress += (
-            advance if np.isfinite(advance) and advance >= 0.0 else self.Ts
+        spent = advance if np.isfinite(advance) and advance >= 0.0 else self.Ts
+        self.reference_progress += spent
+
+        # The liveness check, on the wall clock on purpose: what the plan cost in
+        # wall-clock seconds is the one quantity the optimizer does not choose,
+        # and how much plan that bought is exactly what it does. Reported and not
+        # recovered from -- the horizon keeps going out, the machine is where the
+        # plan says it is, it is merely not moving through it. A `Failed` cycle
+        # spends a nominal interval above and so clears the count, deliberately:
+        # "the optimizer did not answer" is `max_consecutive_failures`, and this
+        # one is about the answer "wait".
+        wall_dt = (
+            (now_ns - self.progress_mark_ns) / 1e9 if self.progress_marked else 0.0
+        )
+        self.progress_mark_ns = now_ns
+        self.progress_marked = True
+        self.progress_held, self.progress_stalled = watch_progress(
+            self.progress_held,
+            spent,
+            self.Ts,
+            wall_dt,
+            min_progress_rate,
+            max_stall_time,
         )
         self.last_silence = ""
 
@@ -617,6 +693,20 @@ class Cycle:
         if self.reference_anchored:
             # One nominal interval spent while nobody was driving.
             self.reference_progress += self.Ts
+        # **The stall count survives a silence; only the wall-clock mark does
+        # not.** A silent cycle is not evidence either way -- this node is not
+        # controlling, so no plan is being spent -- and charging its wall time to
+        # the stall would report a producer that died as a machine that stopped.
+        # But clearing the count would mean a stalled machine that drops one
+        # `/joint_states` sample a second never reports at all, which is this
+        # hole one level up.
+        self.progress_marked = False
+
+    def forget_stall(self) -> None:
+        """Drop the stall watch: what it was gathered about is gone."""
+        self.progress_held = 0.0
+        self.progress_stalled = False
+        self.progress_marked = False
 
     def forget_plan(self) -> None:
         """Drop the warm start and the horizon a shift would be taken from."""

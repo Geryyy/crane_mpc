@@ -103,4 +103,12 @@ crane_mpc:
 
     max_reference_age: 0.5
 
+    # The liveness pair, on wall clock. max_reference_age above asks whether the
+    # plan is finished and asks it in plan time, which the optimizer controls;
+    # these ask whether it is progressing at all. 0.1 is a seventh of the lowest
+    # rate any legitimate over-ask has been measured at (issue 119's acceptance
+    # run, 0.760 re-measured), and 2.0 s is one horizon.
+    min_progress_rate: 0.1
+    max_stall_time: 2.0
+
     max_clock_skew: 0.04
