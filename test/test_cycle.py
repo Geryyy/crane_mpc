@@ -105,9 +105,39 @@ def test_the_ceiling_escalates_and_stops_the_publisher():
     assert one.escalated
     assert not one.applied_previous
     assert "escalation" in one.last_silence
+    # The number that says why, on the cycle that hands control back.
+    assert "10 ms against a 20 ms budget" in verdict.text
     # Nothing may be shifted next cycle either.
     assert one.last_horizon is None
     assert one.guess is None
+
+
+def test_the_escalation_is_an_error_once_and_a_standing_warning_after():
+    """
+    Handing control back happens once. The cycles after it keep counting and
+    keep reporting `FAULT_SOLVER`, but an error each is how a wedged node wrote
+    a hundred identical lines in twenty seconds and never said the solve time.
+    """
+    one = cycle()
+    one.consecutive_failures = 3
+
+    first = one.ladder(solution(Outcome.BUDGET_EXCEEDED), 3, 0.02)
+    assert first.severity == "error"
+    assert "handed control back" in first.text
+
+    for _ in range(3):
+        one.consecutive_failures += 1
+        standing = one.ladder(solution(Outcome.BUDGET_EXCEEDED), 3, 0.02)
+        assert standing.severity == "warn"
+        assert not standing.published
+        assert "still holds" in standing.text
+
+    # Whatever clears the latch -- a gate, a converged solve, a mode change --
+    # arms the error again, so a second hand-back is not reported as the
+    # continuation of the first.
+    one.stay_silent("a gate")
+    one.consecutive_failures = 3
+    assert one.ladder(solution(Outcome.FAILED), 3, 0.02).severity == "error"
 
 
 def test_a_gate_clears_the_failure_count_and_the_ladder_does_not():

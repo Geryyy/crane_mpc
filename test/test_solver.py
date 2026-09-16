@@ -42,14 +42,36 @@ def ocp(parameters):
     )
 
 
-@pytest.fixture
-def state(ocp):
+@pytest.fixture(scope="module")
+def split_delay_ocp(parameters):
+    """
+    An OCP whose step is *below* `sensor_to_valve_delay`, which the shipped one
+    no longer is: at `Ts = 0.06 = delay` one command covers the whole window and
+    `replay_schedule` returns a single segment, so the shipped grid cannot
+    exercise a replay of two. Four knots, because nothing here solves.
+    """
+    values = dict(parameters)
+    values["Ts"] = 0.04
+    values["horizon_length"] = 4
+    return Ocp(
+        problem.default_description().read_text(),
+        values,
+        values["hydraulics"],
+    )
+
+
+def hold_state(ocp):
     x = np.zeros(cs.NX)
     x[cs.X_PLANNED_POSITION + 1] = 0.5
     x[cs.X_PROGRESS_RATE] = 1.0
     ocp.pin_tool(0.3)
     x[cs.X_ACTUATED_FORCE : cs.X_ACTUATED_FORCE + PLANNED] = ocp.static_hold_force(x)
     return x
+
+
+@pytest.fixture
+def state(ocp):
+    return hold_state(ocp)
 
 
 def horizon_holding(ocp, position):
@@ -100,14 +122,23 @@ def test_the_schedule_cuts_the_delay_between_the_commands_in_flight():
     for delay in (0.08, 0.04 + 0.04):
         assert [segment.age for segment in replay_schedule(delay, 0.04)] == [1, 0]
 
+    # The shipped grid: `Ts` equals the delay, so the command in flight covers
+    # the whole window on its own and no older one is replayed. Asserted rather
+    # than left implicit -- it is what a step at or above the delay means, and
+    # `config/crane_mpc.yaml` may not raise `Ts` past it without meeting this.
+    assert [segment.age for segment in replay_schedule(0.06, 0.06)] == [0]
+    assert [segment.age for segment in replay_schedule(0.06, 0.10)] == [0]
+
     # Nothing to replay, and a delay read in seconds where it was written in ms.
     assert replay_schedule(0.0, 0.04) == []
     assert replay_schedule(np.nan, 0.04) == []
     assert replay_schedule(60.0, 0.04) == []
 
 
-def test_the_prediction_replays_each_command_over_its_own_segment(ocp, state):
+def test_the_prediction_replays_each_command_over_its_own_segment(split_delay_ocp):
     """Issue 125: two commands are in flight over 60 ms, and both are integrated."""
+    ocp = split_delay_ocp
+    state = hold_state(ocp)
     command = np.zeros(cs.NU_PROGRESS)
     command[0] = 0.4
     older = -command

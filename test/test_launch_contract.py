@@ -134,3 +134,45 @@ def test_the_launch_leaves_the_node_in_shadow():
     )
     assert _strings(_keyword(declaration, "default_value")) == [SHADOW]
     assert _strings(_keyword(declaration, "choices")) == [SHADOW, "active"]
+
+
+def test_the_follower_stream_is_remappable_and_defaults_to_the_contract_name():
+    """Shadow mode is judged on it, and a profile that renames it says nothing.
+
+    Without the argument the node subscribes a name no bringup that reuses the
+    timber spawners publishes, and every comparison reports
+    `follower.velocity_source: none` while the solver looks healthy.
+    """
+    source = _source()
+    declaration = next(
+        node
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.Call)
+        and getattr(node.func, "id", None) == "DeclareLaunchArgument"
+        and node.args
+        and getattr(node.args[0], "value", None) == "controller_state_topic"
+    )
+    assert _strings(_keyword(declaration, "default_value")) == [
+        "/crane/controller_state"
+    ]
+    assert '("/crane/controller_state", controller_state_topic)' in source
+
+
+def test_the_start_gate_is_declared_and_defaults_to_no_gate():
+    """A gate that defaulted on would be a tree that plans and never moves.
+
+    The behaviour tree sends no FollowJointTrajectory goal whenever the MPC
+    drives (issue 148), so the only safe default for a gate keyed on that goal
+    is the empty string, and the node reads the empty string as no gate at all.
+    """
+    source = _source()
+    declaration = next(
+        node
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.Call)
+        and getattr(node.func, "id", None) == "DeclareLaunchArgument"
+        and node.args
+        and getattr(node.args[0], "value", None) == "start_signal_action"
+    )
+    assert _strings(_keyword(declaration, "default_value")) == [""]
+    assert '"start_signal_action": ParameterValue(' in source

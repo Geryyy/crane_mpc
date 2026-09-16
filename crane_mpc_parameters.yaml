@@ -39,6 +39,46 @@ crane_mpc:
     validation:
       one_of<>: [["shadow", "active"]]
 
+  start_signal_action:
+    type: string
+    default_value: ""
+    read_only: true
+    description: "The FollowJointTrajectory action whose accepted goal releases
+      this node to drive, or empty for no gate at all. Empty is the default and
+      is the deployed behaviour: /crane/reference arriving *is* the go signal,
+      because the planner publishes it and nothing else does, and the behaviour
+      tree that drives a deployment plans exactly when it wants motion.
+      **This exists for the human-driven bench.** The RViz motion-planning panel
+      splits those two into a 'Calculate' button and a 'Start trajectory' one,
+      and on the cbs_mpc_active profile the split stopped meaning anything: the
+      planner publishes the reference from inside its a2b_movement service, so
+      the machine left on Calculate and the Start button sent a second command
+      to a controller already moving. Named rather than a bool, because the node
+      cannot otherwise know *whose* goal to wait for -- the a2b and the grasping
+      trajectory controllers each have one -- and the name carries which.
+      What is subscribed is that action's own `<name>/_action/status` topic,
+      which is an ordinary latched GoalStatusArray, so nothing here is an action
+      client and no goal is sent, accepted or reported on by this node: it reads
+      whether the controller has one. ACCEPTED or EXECUTING opens the gate, and
+      anything else -- succeeded, aborted, cancelled, never sent -- closes it.
+      The reference is **not** anchored while the gate is closed, deliberately:
+      a plan held for a minute before a human presses the button must still
+      start at its first knot, and `max_reference_age` measures from the end of
+      a plan that has begun being spent.
+      **That protection is scoped to the wait before the first goal, and the
+      asymmetry is the one thing to know here.** A plan whose goal was accepted
+      and then aborted or cancelled part-way *has* been anchored, so it goes on
+      being spent while the gate is shut, and pressing the button again some
+      seconds later gets the `max_reference_age` refusal rather than the rest of
+      the motion. That is the aging contract and not an oversight -- a plan is
+      spent in virtual time whether or not anything is following it, and
+      restarting a half-executed one at its first knot would command the machine
+      back to where it set off -- but it does mean the recovery from an abort is
+      to plan again, not to press start again.
+      read_only because the subscription is made once, at configuration, and a
+      name that moved afterwards would leave this node watching a controller
+      nobody commands -- which reads exactly like a button that does nothing."
+
   Ts:
     type: double
     default_value: 0.04
@@ -693,17 +733,16 @@ crane_mpc:
       default_value: 1.4e-3
       read_only: true
       description: "Q_P^max of wiki/mpc.md, m^3/s, before the
-        planning factor below. wiki/implementation/parameters.md states it once
-        and states its provenance in the same sentence: measured 2023,
-        **pre-retrofit and not re-verified** -- the machine has since been rebuilt
-        and nobody has checked that the pump on it today still delivers it. 4 also
-        records that post-retrofit flow limits exist for the **boom and the
-        telescope only**; the other four axes carry datasheet values. So this
-        constraint is a sum of six terms of which two rest on a measurement of
-        this machine. The recordings under control_recordings/ cannot close it
-        either: /cranedata carries hydraulic pressures and encoder angles, not
-        pump displacement. Deployment value and the full provenance are in
-        config/hydraulic_limits.yaml."
+        planning factor below. The number is crane_model/config/hydraulics.yaml's
+        `pump.flow_max`, which is also what crane_planning reads and which carries
+        the provenance; test_parameters_are_declared pins this default and
+        config/hydraulic_limits.yaml to it. Measured 2023, **pre-retrofit and not
+        re-verified**. parameters.md 4 also records that post-retrofit flow limits
+        exist for the **boom and the telescope only**, the other four axes
+        carrying datasheet values, so this constraint is a sum of six terms of
+        which two rest on a measurement of this machine. The recordings under
+        control_recordings/ cannot close it: /cranedata carries hydraulic
+        pressures and encoder angles, not pump displacement."
       validation:
         gt<>: [0.0]
     pump_flow_planning_factor:
@@ -712,7 +751,8 @@ crane_mpc:
       read_only: true
       description: "parameters.md 4's 0.95x discount on the line above -- the
         margin that number's weak evidence has always carried, applied to
-        Q_P^max alone. **Not a second kappa**: kappa is
+        Q_P^max alone. Same source and same pin as the line above.
+        **Not a second kappa**: kappa is
         wiki/trajectory_planning.md reservation on every physical limit, it
         exists so the MPC has authority left to correct with, and this node is
         that consumer -- scaling by it here would hand the reservation back.

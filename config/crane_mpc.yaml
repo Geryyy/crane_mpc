@@ -3,8 +3,32 @@ crane_mpc:
   ros__parameters:
     mode: shadow
 
-    Ts: 0.04
-    horizon_length: 50
+    # Coarser than the 0.04/50 this used to ship, and for cost, not taste. At
+    # 0.04/50 the solve measures 17 ms median / 29.8 ms max on an idle box
+    # against a 30 ms budget -- no margin at all -- so under the sim's own load
+    # (gazebo server + gui + rviz, load 20+ on 8 cores) every solve runs over
+    # and mpc §6's escalation fires on cycle 5 and then every cycle after.
+    # 0.06/40 measures 12.8 ms median / 25.0 ms max on the same box and the same
+    # A2B move (scripts/mpc_a2b.py, 2026-09-16), and tracks *better* than the
+    # grid it replaces: final error norm 0.358 against 0.420, peak sway 0.157
+    # against 0.161 rad. 0.10/25 is cheaper still (7.3 ms median) and was
+    # measured and rejected: 21% more final error, 17% more sway, and the QP
+    # hits its iteration cap on a cold solve.
+    # The grid may be coarse because nothing downstream samples it: the horizon
+    # goes to the JTC as a JointTrajectory with per-point time_from_start and
+    # the PID plugin interpolates between knots.
+    # Two numbers this may not cross. 40 x 0.06 = 2.34 s still covers the
+    # order-2 s sway period wiki/mpc.md sizes N by, and control_architecture
+    # 3.3's 2 s fault-tolerance budget -- both of which the old 1.96 s only just
+    # missed. And Ts may not exceed `sensor_to_valve_delay` below: past 0.06 a
+    # single command is in flight for the whole delay window, `replay_schedule`
+    # collapses to one segment and the two-command prediction stops being a
+    # thing the predictor can express.
+    # ros2_interfaces 4 pins /crane/mpc/horizon at 25 Hz and this publishes at
+    # 16.7 Hz; the node says so at startup. That row wants reconciling with the
+    # measured cost, in its own issue -- 25 Hz was never achieved here.
+    Ts: 0.06
+    horizon_length: 40
 
     # C3 block 1, the transport dead time, pinned common to all six axes
     # (wiki/hydraulic_actuator_model.md:48). It is modelled **here**, in the
@@ -14,7 +38,13 @@ crane_mpc:
     max_state_age: 0.2
     levenberg_marquardt: 1.0e-6
 
-    solve_budget: 0.03
+    # A health threshold, not a period: above Ts on purpose. Idle, 0.06/40 costs
+    # 12.8 ms median / 25.0 ms max, but the same solve measured 2-4x that under
+    # the sim's own load, and a budget sized for an idle box is what made §6
+    # escalate on a box that was merely busy. Overrunning Ts costs cadence and
+    # not correctness -- the first knot is re-anchored at now + delay every
+    # cycle, and 2.34 s of horizon outlives a late one.
+    solve_budget: 0.08
 
     solver_health_decimation: 2
 

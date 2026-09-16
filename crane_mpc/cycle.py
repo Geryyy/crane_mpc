@@ -551,20 +551,43 @@ class Cycle:
             )
 
         if self.consecutive_failures >= max_consecutive_failures:
+            # Handing control back happens once; the cycles after it are this
+            # node waiting for a solve it can believe, and they are not further
+            # hand-backs. The count keeps rising and `SolverHealth` keeps
+            # carrying `FAULT_SOLVER` either way -- only how loudly this is said
+            # changes, because an error per cycle for as long as the condition
+            # holds buries the cycle that explains it.
+            handing_back = not self.escalated
             self.escalated = True
             self.applied_previous = False
-            text = (
-                f"mpc §6's repeated-failure escalation: {self.consecutive_failures} "
-                "consecutive solves did not converge against a ceiling of "
-                f"{max_consecutive_failures} (acados last answered "
-                f"{solution.status_word}, {solution.outcome}), so this node has "
-                "stopped publishing and handed control back rather than shifting a "
-                "plan it no longer believes"
+            spent = (
+                f"{round(1000 * solution.solve_time_s)} ms against a "
+                f"{round(1000 * solve_budget_s)} ms budget"
             )
+            if handing_back:
+                text = (
+                    f"mpc §6's repeated-failure escalation: "
+                    f"{self.consecutive_failures} consecutive solves did not "
+                    f"converge against a ceiling of {max_consecutive_failures} "
+                    f"(acados last answered {solution.status_word}, "
+                    f"{solution.outcome}, {spent}), so this node has stopped "
+                    "publishing and handed control back rather than shifting a "
+                    "plan it no longer believes"
+                )
+            else:
+                text = (
+                    f"mpc §6's escalation still holds: {self.consecutive_failures} "
+                    f"consecutive failures, the last one {spent}. Nothing goes out "
+                    f"on {destination} until a solve converges or the mode changes"
+                )
             self.stay_silent_after_failure(
                 "mpc §6's repeated-failure escalation has stopped the publisher"
             )
-            return Verdict(text, published=False, severity="error")
+            return Verdict(
+                text,
+                published=False,
+                severity="error" if handing_back else "warn",
+            )
 
         if self.shift_previous_horizon():
             self.applied_previous = True

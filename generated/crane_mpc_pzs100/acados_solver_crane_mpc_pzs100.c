@@ -457,63 +457,53 @@ void crane_mpc_pzs100_acados_create_setup_nlp_in_numerical_values(crane_mpc_pzs1
     {
         // set time_steps
 
-        double time_step = 0.04;
+        double time_step = 0.06;
         for (int i = 0; i < N; i++)
         {
             ocp_nlp_in_set(nlp_config, nlp_dims, nlp_in, i, "Ts", &time_step);
         }
         // set cost scaling
         double* cost_scaling = malloc((N+1)*sizeof(double));
-        cost_scaling[0] = 0.04;
-        cost_scaling[1] = 0.04;
-        cost_scaling[2] = 0.04;
-        cost_scaling[3] = 0.04;
-        cost_scaling[4] = 0.04;
-        cost_scaling[5] = 0.04;
-        cost_scaling[6] = 0.04;
-        cost_scaling[7] = 0.04;
-        cost_scaling[8] = 0.04;
-        cost_scaling[9] = 0.04;
-        cost_scaling[10] = 0.04;
-        cost_scaling[11] = 0.04;
-        cost_scaling[12] = 0.04;
-        cost_scaling[13] = 0.04;
-        cost_scaling[14] = 0.04;
-        cost_scaling[15] = 0.04;
-        cost_scaling[16] = 0.04;
-        cost_scaling[17] = 0.04;
-        cost_scaling[18] = 0.04;
-        cost_scaling[19] = 0.04;
-        cost_scaling[20] = 0.04;
-        cost_scaling[21] = 0.04;
-        cost_scaling[22] = 0.04;
-        cost_scaling[23] = 0.04;
-        cost_scaling[24] = 0.04;
-        cost_scaling[25] = 0.04;
-        cost_scaling[26] = 0.04;
-        cost_scaling[27] = 0.04;
-        cost_scaling[28] = 0.04;
-        cost_scaling[29] = 0.04;
-        cost_scaling[30] = 0.04;
-        cost_scaling[31] = 0.04;
-        cost_scaling[32] = 0.04;
-        cost_scaling[33] = 0.04;
-        cost_scaling[34] = 0.04;
-        cost_scaling[35] = 0.04;
-        cost_scaling[36] = 0.04;
-        cost_scaling[37] = 0.04;
-        cost_scaling[38] = 0.04;
-        cost_scaling[39] = 0.04;
-        cost_scaling[40] = 0.04;
-        cost_scaling[41] = 0.04;
-        cost_scaling[42] = 0.04;
-        cost_scaling[43] = 0.04;
-        cost_scaling[44] = 0.04;
-        cost_scaling[45] = 0.04;
-        cost_scaling[46] = 0.04;
-        cost_scaling[47] = 0.04;
-        cost_scaling[48] = 0.04;
-        cost_scaling[49] = 1;
+        cost_scaling[0] = 0.06;
+        cost_scaling[1] = 0.06;
+        cost_scaling[2] = 0.06;
+        cost_scaling[3] = 0.06;
+        cost_scaling[4] = 0.06;
+        cost_scaling[5] = 0.06;
+        cost_scaling[6] = 0.06;
+        cost_scaling[7] = 0.06;
+        cost_scaling[8] = 0.06;
+        cost_scaling[9] = 0.06;
+        cost_scaling[10] = 0.06;
+        cost_scaling[11] = 0.06;
+        cost_scaling[12] = 0.06;
+        cost_scaling[13] = 0.06;
+        cost_scaling[14] = 0.06;
+        cost_scaling[15] = 0.06;
+        cost_scaling[16] = 0.06;
+        cost_scaling[17] = 0.06;
+        cost_scaling[18] = 0.06;
+        cost_scaling[19] = 0.06;
+        cost_scaling[20] = 0.06;
+        cost_scaling[21] = 0.06;
+        cost_scaling[22] = 0.06;
+        cost_scaling[23] = 0.06;
+        cost_scaling[24] = 0.06;
+        cost_scaling[25] = 0.06;
+        cost_scaling[26] = 0.06;
+        cost_scaling[27] = 0.06;
+        cost_scaling[28] = 0.06;
+        cost_scaling[29] = 0.06;
+        cost_scaling[30] = 0.06;
+        cost_scaling[31] = 0.06;
+        cost_scaling[32] = 0.06;
+        cost_scaling[33] = 0.06;
+        cost_scaling[34] = 0.06;
+        cost_scaling[35] = 0.06;
+        cost_scaling[36] = 0.06;
+        cost_scaling[37] = 0.06;
+        cost_scaling[38] = 0.06;
+        cost_scaling[39] = 1;
         for (int i = 0; i <= N; i++)
         {
             ocp_nlp_cost_model_set(nlp_config, nlp_dims, nlp_in, i, "scaling", &cost_scaling[i]);
@@ -1278,7 +1268,7 @@ static void crane_mpc_pzs100_acados_create_set_opts(crane_mpc_pzs100_solver_caps
     ocp_nlp_solver_opts_set(nlp_config, nlp_opts, "levenberg_marquardt", &levenberg_marquardt);
 
     /* options QP solver */
-    int qp_solver_cond_N;const int qp_solver_cond_N_ori = 49;
+    int qp_solver_cond_N;const int qp_solver_cond_N_ori = 39;
     qp_solver_cond_N = N < qp_solver_cond_N_ori ? N : qp_solver_cond_N_ori; // use the minimum value here
     ocp_nlp_solver_opts_set(nlp_config, nlp_opts, "qp_cond_N", &qp_solver_cond_N);
 

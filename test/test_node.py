@@ -4,6 +4,8 @@ import math
 
 import pytest
 import rclpy
+from action_msgs.msg import GoalStatus, GoalStatusArray
+from control_msgs.msg import JointTrajectoryControllerState
 from crane_model import canonical_joints
 from crane_model import symbolic as cs
 from crane_mpc import problem
@@ -194,3 +196,125 @@ def test_a_non_finite_measurement_is_not_written_through(node):
     # groups are read and stamped apart, so one bad axis does not stop the sway
     # measurement.
     assert node._passive_stamp == Time.from_msg(broken.header.stamp)
+
+
+def controller_state(node, names, velocities):
+    message = JointTrajectoryControllerState()
+    message.header.stamp = node.get_clock().now().to_msg()
+    message.joint_names = list(names)
+    message.output.velocities = list(velocities)
+    return message
+
+
+def test_a_shared_controller_state_topic_keeps_only_the_actuated_one(node):
+    """The grasping controller shares the topic; its state is not the follower.
+
+    Interleaved, taking the last message would leave `follower_command` with a
+    state naming none of the six on every other cycle, and the comparison shadow
+    mode exists for would be empty there.
+    """
+    configured(node)
+    driving = controller_state(node, ACTUATED, [0.1] * 6)
+    node.on_controller_state(driving)
+    node.on_controller_state(controller_state(node, PASSIVE, [0.0, 0.0]))
+    assert node._controller_state is driving
+
+    follower = node.follower_command(node.get_clock().now().nanoseconds)
+    assert follower.source == "output.velocities"
+    assert follower.velocity[0] == pytest.approx(0.1)
+
+
+def gated(node, action="/trajectory_controller_a2b/follow_joint_trajectory"):
+    """
+    Put a configured node behind the start gate.
+
+    Set rather than passed: `start_signal_action` is read_only and the node
+    reads it once, in its constructor, so a fixture cannot move it afterwards.
+    What matters here is the gate `update()` runs, not how the name got in.
+    """
+    configured(node)
+    node._start_signal_action = action
+    node._start_signal_topic = f"{action}/_action/status"
+    node._start_signal_open = False
+    # A stand-in for the controller's own status publisher. The node closes an
+    # open gate when that publisher goes away, so the tests need one to exist.
+    node._status_publisher = node.create_publisher(
+        GoalStatusArray, node._start_signal_topic, 1
+    )
+    return node
+
+
+def goal_status(*statuses):
+    message = GoalStatusArray()
+    for status in statuses:
+        entry = GoalStatus()
+        entry.status = status
+        message.status_list.append(entry)
+    return message
+
+
+def test_a_gated_node_publishes_nothing_until_a_goal_is_accepted(node):
+    one = gated(node)
+    one.update()
+    assert one.published == {}
+    assert "no goal is live" in one._last_silence
+
+    one.on_start_signal(goal_status(GoalStatus.STATUS_EXECUTING))
+    one.update()
+    assert len(one.published["_shadow_horizon_publisher"]) == 1
+
+
+def test_a_finished_goal_closes_the_gate_again(node):
+    one = gated(node)
+    one.on_start_signal(goal_status(GoalStatus.STATUS_ACCEPTED))
+    one.update()
+    assert "_shadow_horizon_publisher" in one.published
+
+    one.on_start_signal(goal_status(GoalStatus.STATUS_SUCCEEDED))
+    published = len(one.published["_shadow_horizon_publisher"])
+    one.update()
+    assert len(one.published["_shadow_horizon_publisher"]) == published
+
+
+def test_a_held_plan_is_not_spent_while_the_gate_is_closed(node):
+    """
+    The reference waits for a human, so it may not age while it waits.
+
+    `max_reference_age` is measured from the end of a plan that has begun being
+    spent, and every silent cycle spends one nominal interval of an anchored
+    one. Thirty gated cycles are 1.2 s against a 0.5 s bound and a 4 s plan, so
+    a gate that ran after `Cycle.gates` would anchor here and refuse the plan it
+    was holding.
+    """
+    one = gated(node)
+    for _ in range(30):
+        one.update()
+    assert one.published == {}
+    assert not one._cycle.reference_anchored
+
+    one.on_start_signal(goal_status(GoalStatus.STATUS_EXECUTING))
+    one.update()
+    assert len(one.published["_shadow_horizon_publisher"]) == 1
+
+
+def test_a_vanished_controller_closes_the_gate_it_had_opened(node):
+    """
+    A status topic reports goals, not liveness.
+
+    The last status a dying controller published stays cached here, so an open
+    gate has to be closed by the graph going quiet rather than by a message
+    saying so -- otherwise a JTC that died mid-goal leaves this node driving a
+    controller that no longer exists.
+    """
+    one = gated(node)
+    one.on_start_signal(goal_status(GoalStatus.STATUS_EXECUTING))
+    assert one._start_signal_open
+
+    # The graph's own publisher count, which is what the node reads. Set here
+    # rather than by destroying the publisher above: rmw updates that count
+    # asynchronously, and a test that waits on discovery is a test that fails on
+    # a loaded box for reasons that have nothing to do with the gate.
+    one.count_publishers = lambda topic: 0
+    one.update()
+    assert not one._start_signal_open
+    assert one.published == {}

@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import numpy as np
 import rclpy
+from action_msgs.msg import GoalStatus, GoalStatusArray
 from control_msgs.msg import JointTrajectoryControllerState
 from crane_model import CraneModel, Payload, Tool, canonical_joints
 from crane_msgs.msg import PayloadEstimate, SolverHealth, SwaySettled
@@ -153,6 +154,17 @@ class MpcNode(Node):
         #: One instant per cycle, shared by every report that cycle writes.
         self._stamp = self.get_clock().now().to_msg()
 
+        #: The action whose accepted goal releases this node, `""` for no gate.
+        self._start_signal_action = str(self._values.start_signal_action)
+        #: Whether that action carries a goal now. `True` when there is no gate,
+        #: so every test below reads the same way in both configurations.
+        self._start_signal_open = not self._start_signal_action
+        self._start_signal_topic = (
+            f"{self._start_signal_action}/_action/status"
+            if self._start_signal_action
+            else ""
+        )
+
         self._create_publishers()
         self._create_subscriptions()
         self.create_timer(self.Ts, self.update)
@@ -265,6 +277,17 @@ class MpcNode(Node):
             _latched(),
         )
         self.create_service(SetPayload, SET_PAYLOAD_SERVICE, self.on_set_payload)
+        if self._start_signal_action:
+            # An action's status topic, not the action: this node sends no goal
+            # and answers for none. Latched and reliable is what an action
+            # server publishes its status with, so a node that starts after the
+            # goal was accepted still sees it.
+            self.create_subscription(
+                GoalStatusArray,
+                self._start_signal_topic,
+                self.on_start_signal,
+                _latched(),
+            )
 
     # -- what arrives ------------------------------------------------------------
 
@@ -297,12 +320,38 @@ class MpcNode(Node):
         self._reference_message = message
         self.adopt_reference()
 
+    def on_start_signal(self, message: GoalStatusArray) -> None:
+        """Is a goal live on the action this node is gated on."""
+        live = (GoalStatus.STATUS_ACCEPTED, GoalStatus.STATUS_EXECUTING)
+        was_open = self._start_signal_open
+        self._start_signal_open = any(
+            entry.status in live for entry in message.status_list
+        )
+        if self._start_signal_open == was_open:
+            return
+        self.get_logger().info(
+            f"{self._start_signal_action} "
+            + (
+                "accepted a goal, so this node drives"
+                if self._start_signal_open
+                else "has no goal left, so this node stops driving"
+            )
+        )
+
     def on_payload_estimate(self, message: PayloadEstimate) -> None:
         # Stored and reported at startup; the payload the OCP solves with moves
         # only through the service, exactly as the C++ node read it.
         self._payload_estimate = message
 
     def on_controller_state(self, message: JointTrajectoryControllerState) -> None:
+        # The profiles that reuse the timber bringup put *both* trajectory
+        # controllers on one topic, so a grasping state arrives interleaved with
+        # the a2b one. Keeping it would make `follower_command` read a message
+        # that names none of the actuated joints on roughly every second cycle,
+        # and report an empty comparison there. Names, not indices: the two
+        # controllers publish different joint sets.
+        if not set(self._joints) & set(message.joint_names):
+            return
         self._controller_state = message
 
     # -- configuration -----------------------------------------------------------
@@ -394,6 +443,14 @@ class MpcNode(Node):
             self.fall_silent(self.unconfigured(why))
             return
 
+        # Before `cycle.gates`, and that ordering is the whole point: a plan may
+        # wait as long as a human takes to press the button, and `gates` is what
+        # anchors a reference and starts spending it. Gated here it is never
+        # anchored, so it still starts at its first knot whenever the goal comes.
+        if not self.start_signal_still_open():
+            self.fall_silent(self.ungated())
+            return
+
         silence = cycle.gates(
             now,
             float(self._values.max_clock_skew),
@@ -462,7 +519,13 @@ class MpcNode(Node):
         if verdict.severity == "error":
             self.get_logger().error(verdict.text)
         elif verdict.severity:
-            self.warn(verdict.text)
+            # Its own call site, not `self.warn`: rclpy keys the throttle by
+            # caller, so the ladder used to share one five-second bucket with
+            # every silence this node reports. A run that had been silent for
+            # want of a reference then swallowed the rungs below the escalation
+            # -- the ones carrying the solve time against the budget -- and the
+            # first thing the log said about a failing solver was the ceiling.
+            self.get_logger().warn(verdict.text, throttle_duration_sec=WARN_PERIOD)
 
     def unconfigured(self, why: str) -> Silence:
         return Silence(
@@ -470,6 +533,40 @@ class MpcNode(Node):
             f"The MPC is not configured ({why}), so nothing is published on "
             f"{HORIZON_TOPIC}. Configuration requires one latched message on "
             f"{ROBOT_DESCRIPTION_TOPIC} and nothing else.",
+        )
+
+    def start_signal_still_open(self) -> bool:
+        """
+        Read the gate, and close it if its publisher has gone.
+
+        A status topic reports goals and not liveness: the last thing a dying
+        controller published stays in this node's cache, and a transient-local
+        one that comes back with nothing to report publishes nothing at all. So
+        an open gate whose publisher has gone is closed here rather than driven
+        on -- the controller that was executing the goal no longer exists, and
+        everything else in this node fails closed.
+        """
+        if not self._start_signal_open:
+            return False
+        if self._start_signal_topic and not self.count_publishers(
+            self._start_signal_topic
+        ):
+            self._start_signal_open = False
+            self.get_logger().warn(
+                f"{self._start_signal_action} has no status publisher left, so its "
+                "goal cannot still be live and this node stops driving."
+            )
+            return False
+        return True
+
+    def ungated(self) -> Silence:
+        return Silence(
+            f"no goal is live on {self._start_signal_action}",
+            f"{self._start_signal_action} carries no goal, so nothing is published "
+            f"on {HORIZON_TOPIC}. This node runs gated on that action "
+            "(start_signal_action): a reference is held, unanchored and unspent, "
+            "until the controller is given a goal -- which is what the panel's "
+            "'Start trajectory' button sends.",
         )
 
     def fall_silent(self, silence) -> None:
