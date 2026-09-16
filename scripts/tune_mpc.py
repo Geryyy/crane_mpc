@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import os
 import sys
 from pathlib import Path
 
@@ -69,7 +70,11 @@ tune_planner = _sibling("crane_planning", "tune_planner")
 plan_example = sys.modules["plan_example"]
 
 from crane_model.conventions import PASSIVE_INDICES  # noqa: E402
-from crane_model.mujoco_plant import NX_RIGID, MujocoPlant  # noqa: E402
+from crane_model.mujoco_plant import (  # noqa: E402
+    NX_RIGID,
+    MujocoPlant,
+    viewer_was_opened,
+)
 from crane_planning import Planner, PlanningError  # noqa: E402
 
 
@@ -110,6 +115,21 @@ def arguments(argv: list[str]) -> tuple[argparse.Namespace, list[str]]:
             "seconds between exchanges of force and state between the C3 block "
             "and MuJoCo. C3 is stiff at the control sample, so this is sized "
             "for it and not for the control rate"
+        ),
+    )
+    parser.add_argument(
+        "--viewer",
+        action="store_true",
+        help="watch it in MuJoCo's passive viewer while it runs; there is "
+        "nothing to watch under --model-matched",
+    )
+    parser.add_argument(
+        "--realtime",
+        type=float,
+        default=1.0,
+        help=(
+            "viewer playback factor: 1.0 is a simulated second per second, 0 is "
+            "as fast as it computes. Pacing only, the run is the same either way"
         ),
     )
     parser.add_argument(
@@ -180,6 +200,8 @@ def mujoco_plant(description: str, model, start_q, options):
         nonlocal seeded
         if not seeded:
             plant.set_rigid_state(state[:NX_RIGID], float(start_q[-1]))
+            if options.viewer:
+                plant.open_viewer(realtime=options.realtime)
             seeded = True
         exchanges = max(1, int(round(dt / options.cosim_step)))
         step = dt / exchanges
@@ -192,6 +214,9 @@ def mujoco_plant(description: str, model, start_q, options):
             carried[:NX_RIGID] = plant.state
         return carried
 
+    # The caller needs the plant itself to hold the window open once the run is
+    # over, and a closure is otherwise the only reference to it.
+    advance.mujoco = plant
     return advance
 
 
@@ -233,15 +258,13 @@ def main(argv: list[str] | None = None) -> int:
     if mpc.output == mpc_a2b.PACKAGE / "build" / "mpc_a2b.png":
         mpc.output = mpc_a2b.PACKAGE / "build" / "tune_mpc.png"
 
+    plant = None
     try:
         parameters, hydraulics = mpc_a2b.load_settings(mpc)
         a, b = mpc_a2b.validate_movement(mpc, parameters)
         solver, model, scale = mpc_a2b.create_solver(mpc, parameters, hydraulics)
-        plant = (
-            None
-            if options.model_matched
-            else mujoco_plant(description, model, start.q, options)
-        )
+        if not options.model_matched:
+            plant = mujoco_plant(description, model, start.q, options)
         data = mpc_a2b.simulate(
             mpc,
             parameters,
@@ -270,8 +293,21 @@ def main(argv: list[str] | None = None) -> int:
         f"plant: {'the exported model' if options.model_matched else 'MuJoCo'}; "
         f"reference: {plan.duration:.2f} s plan, {plan.time.size} samples"
     )
+    if plant is not None:
+        # The summary comes first; the window stays until it is closed.
+        if options.viewer:
+            print("close the viewer window to finish")
+        plant.mujoco.hold_viewer()
     return 0
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    status = main()
+    # A viewer run would otherwise exit 139: MuJoCo's viewer segfaults on
+    # interpreter teardown here, after every file is written. `os._exit` leaves
+    # without tearing down.
+    if viewer_was_opened():
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os._exit(status)
+    raise SystemExit(status)
