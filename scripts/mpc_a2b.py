@@ -378,11 +378,9 @@ def minimum_jerk_reference(a: np.ndarray, b: np.ndarray, duration: float):
     """
     Wrap the A-to-B quintic as a callable of virtual time.
 
-    Everything downstream asks the reference for `(q, dq, ddq)` at a virtual
-    time and nothing else, so this is the whole contract a driver has to meet to
-    put a different curve through the same controller --
-    `crane_planning/scripts/tune_planner.py`'s sibling `tune_mpc.py` hands over
-    a `crane_planning` plan through exactly this signature.
+    `(q, dq, ddq)` at a virtual time is the whole contract, so a driver can put
+    a different curve through the same controller -- `tune_mpc.py` hands over a
+    `crane_planning` plan through this signature.
     """
 
     def sample(time: float) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -424,10 +422,8 @@ def rk4_step(
     """
     Integrate one model-matched plant sample with substepped ERK4.
 
-    `substeps` is the count above, and is an argument only so a co-simulation
-    can hand over a `dt` that is already short: a driver stepping the model
-    alongside another integrator sizes its own step for stability and would
-    otherwise pay ten inner steps for each of its own.
+    `substeps` is an argument so a co-simulation handing over an already short
+    `dt` does not pay ten inner steps for each of its own.
     """
 
     def evaluate(value: np.ndarray) -> np.ndarray:
@@ -458,12 +454,11 @@ def equilibrium_table(
     reads the same table at a slower rate rather than needing a second one. The
     grid is the horizon's own, and `equilibrium_at` interpolates between knots.
 
-    `guess` seeds the first solve and every later one continues from its
-    predecessor, so it picks the branch the whole table sits on. Zero is right
-    for a pose hanging near the origin and wrong for one that is not: a start
-    with the tilt near pi/2 -- `initialization_outside.yaml` is one -- converges
-    from zero onto another solution entirely, and the run then simulates a
-    machine holding its load sideways without ever saying so.
+    `guess` seeds the first solve and the rest continue from their
+    predecessors, so it picks the branch the whole table sits on. Zero suits a
+    pose hanging near the origin; one with the tilt near pi/2 --
+    `initialization_outside.yaml` is one -- converges onto another solution
+    entirely and the run simulates a machine holding its load sideways.
     """
     times = dt * np.arange(count)
     q_eq = np.zeros((count, cs.K_PASSIVE_DOF))
@@ -545,19 +540,14 @@ def simulate(
     """
     Run the receding-horizon controller against a plant.
 
-    `reference` and `plant` both default to what this script has always used:
-    the A-to-B quintic of `minimum_jerk_reference`, and the model-matched ERK4
-    rollout of `rk4_step`. Passing either replaces one half of the run without
-    touching the controller, which is the whole point -- the solver, the
-    weights, the constraints and the integrator stay the deployed ones.
+    `reference` and `plant` default to this script's own: the A-to-B quintic and
+    the model-matched ERK4 rollout. Passing either replaces one half of the run
+    and leaves the controller alone.
 
-    A `plant` is `(state, control, parameter, dt) -> state`, over the full
-    `cs.NX`: whatever integrates the rigid rows still has to carry C3's command
-    lag, progress and force rows, because the controller reads them back.
-
-    `passive_guess` seeds the equilibrium branch -- see `equilibrium_table`. It
-    also decides where the run starts, because the initial passive pose is read
-    off that table.
+    A `plant` is `(state, control, parameter, dt) -> state` over the full
+    `cs.NX`: whatever integrates the rigid rows still carries C3's lag, progress
+    and force rows, because the controller reads them back. `passive_guess`
+    picks the equilibrium branch and so where the run starts.
     """
     dt = float(parameters["Ts"])
     intervals = export_ocp.shooting_intervals(parameters)
