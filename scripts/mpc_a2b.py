@@ -98,7 +98,7 @@ class RunData:
     timing: dict[str, np.ndarray]
 
 
-def parse_arguments() -> argparse.Namespace:
+def parse_arguments(argv: list[str] | None = None) -> argparse.Namespace:
     """Parse standalone simulation and tuning arguments."""
     parser = argparse.ArgumentParser(
         description="Run and plot the real crane MPC on an offline A-to-B simulation."
@@ -206,7 +206,7 @@ def parse_arguments() -> argparse.Namespace:
         help="recompile even when an identical solver is cached",
     )
     parser.add_argument("--verbose-build", action="store_true")
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
 def positive(value: float, name: str, allow_zero: bool = False) -> None:
@@ -374,6 +374,23 @@ def reference_at(
     )
 
 
+def minimum_jerk_reference(a: np.ndarray, b: np.ndarray, duration: float):
+    """
+    Wrap the A-to-B quintic as a callable of virtual time.
+
+    Everything downstream asks the reference for `(q, dq, ddq)` at a virtual
+    time and nothing else, so this is the whole contract a driver has to meet to
+    put a different curve through the same controller --
+    `crane_planning/scripts/tune_planner.py`'s sibling `tune_mpc.py` hands over
+    a `crane_planning` plan through exactly this signature.
+    """
+
+    def sample(time: float) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        return reference_at(time, a, b, duration)
+
+    return sample
+
+
 def make_numeric_functions(
     model: object,
 ) -> tuple[ca.Function, ca.Function, ca.Function, ca.Function]:
@@ -402,14 +419,22 @@ def rk4_step(
     control: np.ndarray,
     parameter: np.ndarray,
     dt: float,
+    substeps: int = PLANT_SUBSTEPS,
 ) -> np.ndarray:
-    """Integrate one model-matched plant sample with substepped ERK4."""
+    """
+    Integrate one model-matched plant sample with substepped ERK4.
+
+    `substeps` is the count above, and is an argument only so a co-simulation
+    can hand over a `dt` that is already short: a driver stepping the model
+    alongside another integrator sizes its own step for stability and would
+    otherwise pay ten inner steps for each of its own.
+    """
 
     def evaluate(value: np.ndarray) -> np.ndarray:
         return np.asarray(dynamics(value, control, parameter)).reshape(-1)
 
-    step = dt / PLANT_SUBSTEPS
-    for _ in range(PLANT_SUBSTEPS):
+    step = dt / substeps
+    for _ in range(substeps):
         k1 = evaluate(state)
         k2 = evaluate(state + 0.5 * step * k1)
         k3 = evaluate(state + 0.5 * step * k2)
@@ -421,11 +446,10 @@ def rk4_step(
 def equilibrium_table(
     bias_u: ca.Function,
     parameter: np.ndarray,
-    a: np.ndarray,
-    b: np.ndarray,
-    duration: float,
+    reference,
     dt: float,
     count: int,
+    guess=None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """
     Precompute continuous-branch passive equilibria over **virtual** time.
@@ -433,13 +457,24 @@ def equilibrium_table(
     Indexed by seconds of nominal plan, so a run that spends the plan slowly
     reads the same table at a slower rate rather than needing a second one. The
     grid is the horizon's own, and `equilibrium_at` interpolates between knots.
+
+    `guess` seeds the first solve and every later one continues from its
+    predecessor, so it picks the branch the whole table sits on. Zero is right
+    for a pose hanging near the origin and wrong for one that is not: a start
+    with the tilt near pi/2 -- `initialization_outside.yaml` is one -- converges
+    from zero onto another solution entirely, and the run then simulates a
+    machine holding its load sideways without ever saying so.
     """
     times = dt * np.arange(count)
     q_eq = np.zeros((count, cs.K_PASSIVE_DOF))
-    guess = np.zeros(cs.K_PASSIVE_DOF)
+    guess = (
+        np.zeros(cs.K_PASSIVE_DOF)
+        if guess is None
+        else np.asarray(guess, dtype=float).reshape(cs.K_PASSIVE_DOF).copy()
+    )
 
     for index, time in enumerate(times):
-        q_ref_index, _, _ = reference_at(time, a, b, duration)
+        q_ref_index, _, _ = reference(time)
 
         def residual(passive: np.ndarray, q_ref_index=q_ref_index) -> np.ndarray:
             state = np.zeros(cs.NX)
@@ -503,20 +538,46 @@ def simulate(
     scale: np.ndarray,
     a: np.ndarray,
     b: np.ndarray,
+    reference=None,
+    plant=None,
+    passive_guess=None,
 ) -> RunData:
-    """Run the receding-horizon controller against the model-matched plant."""
+    """
+    Run the receding-horizon controller against a plant.
+
+    `reference` and `plant` both default to what this script has always used:
+    the A-to-B quintic of `minimum_jerk_reference`, and the model-matched ERK4
+    rollout of `rk4_step`. Passing either replaces one half of the run without
+    touching the controller, which is the whole point -- the solver, the
+    weights, the constraints and the integrator stay the deployed ones.
+
+    A `plant` is `(state, control, parameter, dt) -> state`, over the full
+    `cs.NX`: whatever integrates the rigid rows still has to carry C3's command
+    lag, progress and force rows, because the controller reads them back.
+
+    `passive_guess` seeds the equilibrium branch -- see `equilibrium_table`. It
+    also decides where the run starts, because the initial passive pose is read
+    off that table.
+    """
     dt = float(parameters["Ts"])
     intervals = export_ocp.shooting_intervals(parameters)
     steps = int(math.ceil((arguments.move_duration + arguments.settle_duration) / dt))
     base_parameter = parameter_vector(arguments)
     dynamics, bias_u, outputs, static_force = make_numeric_functions(model)
+    if reference is None:
+        reference = minimum_jerk_reference(a, b, arguments.move_duration)
+    if plant is None:
+
+        def plant(state, control, parameter, step_s):
+            return rk4_step(dynamics, state, control, parameter, step_s)
+
     # The equilibrium table is over **virtual** time and is read at whatever
     # virtual time the horizon has reached, so a run that spends the plan slowly
     # walks the same table more slowly rather than needing a second one. It is
     # sized for the worst case, a horizon that never slows down at all.
     table_count = steps + intervals + 1
     eq_times, q_eq_table = equilibrium_table(
-        bias_u, base_parameter, a, b, arguments.move_duration, dt, table_count
+        bias_u, base_parameter, reference, dt, table_count, passive_guess
     )
     u_max, extend, retract = configure_fixed_data(
         solver, model, scale, parameters, hydraulics
@@ -564,9 +625,7 @@ def simulate(
 
     for step in range(steps):
         virtual_time[step] = origin
-        q_ref_log[step], dq_ref_log[step], _ = reference_at(
-            origin, a, b, arguments.move_duration
-        )
+        q_ref_log[step], dq_ref_log[step], _ = reference(origin)
         q_eq_log[step] = equilibrium_at(eq_times, q_eq_table, origin)
         # One evaluation per cycle at the measured state, held across the
         # horizon -- what `ocp_solver.cpp` does, and the trade `mpc_node.cpp`
@@ -583,9 +642,7 @@ def simulate(
             # notes for issue 119 carry the numbers -- so this is `k T_s`.
             nominal = stage * dt
             tau_virtual = origin + nominal
-            q_ref, dq_ref, ddq_ref = reference_at(
-                tau_virtual, a, b, arguments.move_duration
-            )
+            q_ref, dq_ref, ddq_ref = reference(tau_virtual)
             equilibrium = equilibrium_at(eq_times, q_eq_table, tau_virtual)
             solver.set(
                 stage,
@@ -699,7 +756,7 @@ def simulate(
         hydraulics_used[step] = hydraulic_utilisation(
             outputs, state, control, base_parameter, extend, retract, hydraulics
         )
-        state = rk4_step(dynamics, state, control, base_parameter, dt)
+        state = plant(state, control, base_parameter, dt)
         states[step + 1] = state
         origin += advance if math.isfinite(advance) and advance >= 0.0 else dt
 
@@ -708,7 +765,7 @@ def simulate(
             or (step + 1) % max(1, int(round(1.0 / dt))) == 0
             or step + 1 == steps
         ):
-            reached, _, _ = reference_at(origin, a, b, arguments.move_duration)
+            reached, _, _ = reference(origin)
             error = np.linalg.norm(state[: cs.K_PLANNED_DOF] - reached)
             print(
                 f"t={(step + 1) * dt:6.2f} s  s={origin:6.2f} s  "
@@ -717,9 +774,7 @@ def simulate(
             )
 
     virtual_time[steps] = origin
-    q_ref_log[steps], dq_ref_log[steps], _ = reference_at(
-        origin, a, b, arguments.move_duration
-    )
+    q_ref_log[steps], dq_ref_log[steps], _ = reference(origin)
     q_eq_log[steps] = equilibrium_at(eq_times, q_eq_table, origin)
 
     # `u` is a joint velocity at Psi's input under C3, not an acceleration, so
