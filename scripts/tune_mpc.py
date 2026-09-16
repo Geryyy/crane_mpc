@@ -48,11 +48,9 @@ def _sibling(package: str, module: str):
 
 
 tune_planner = _sibling("crane_planning", "tune_planner")
-plan_example = sys.modules["plan_example"]
 
 from crane_model.conventions import PASSIVE_INDICES  # noqa: E402
 from crane_model.mujoco_plant import NX_RIGID, MujocoPlant, leave  # noqa: E402
-from crane_planning import Planner, PlanningError  # noqa: E402
 
 
 def arguments(argv: list[str]) -> tuple[argparse.Namespace, list[str]]:
@@ -153,35 +151,13 @@ def mujoco_plant(description: str, model, q_tool: float, options):
             carried[:NX_RIGID] = plant.state
         return carried
 
-    advance.mujoco = plant
-    return advance
+    return advance, plant
 
 
 def main(argv: list[str] | None = None) -> int:
     options, forwarded = arguments(sys.argv[1:] if argv is None else argv)
     mpc = mpc_a2b.parse_arguments(forwarded)
-
-    description = plan_example.description()
-    planner = Planner(description, plan_example.configure(options))
-    start = tune_planner.start_of(planner, options)
-    position, yaw = tune_planner.goal_of(planner, start, options)
-    print(
-        f"goal: [{position[0]:.3f} {position[1]:.3f} {position[2]:.3f}] m, "
-        f"yaw {np.degrees(yaw):.1f} deg"
-    )
-    try:
-        plan = planner.plan(
-            start,
-            position,
-            yaw,
-            scene=[],
-            avoid_collisions=True,
-            speed_scale=options.speed_scale,
-        )
-    except PlanningError as refusal:
-        print(f"refused: {refusal}", file=sys.stderr)
-        return 1
-    print(plan.message)
+    description, _, start, plan = tune_planner.plan_for(options)
 
     # The plan decides the movement, so what `mpc_a2b` took from the command
     # line is overwritten: A and B are the plan's endpoints, still what the
@@ -197,7 +173,7 @@ def main(argv: list[str] | None = None) -> int:
         parameters, hydraulics = mpc_a2b.load_settings(mpc)
         a, b = mpc_a2b.validate_movement(mpc, parameters)
         solver, model, scale = mpc_a2b.create_solver(mpc, parameters, hydraulics)
-        plant = mujoco_plant(description, model, mpc.tool_position, options)
+        plant, mujoco = mujoco_plant(description, model, mpc.tool_position, options)
         data = mpc_a2b.simulate(
             mpc,
             parameters,
@@ -225,7 +201,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"reference: {plan.duration:.2f} s plan, {plan.time.size} samples")
     if options.viewer:
         print("close the viewer window to finish")
-    plant.mujoco.hold_viewer()
+    mujoco.hold_viewer()
     return 0
 
 

@@ -374,21 +374,6 @@ def reference_at(
     )
 
 
-def minimum_jerk_reference(a: np.ndarray, b: np.ndarray, duration: float):
-    """
-    Wrap the A-to-B quintic as a callable of virtual time.
-
-    `(q, dq, ddq)` at a virtual time is the whole contract, so a driver can put
-    a different curve through the same controller -- `tune_mpc.py` hands over a
-    `crane_planning` plan through this signature.
-    """
-
-    def sample(time: float) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        return reference_at(time, a, b, duration)
-
-    return sample
-
-
 def make_numeric_functions(
     model: object,
 ) -> tuple[ca.Function, ca.Function, ca.Function, ca.Function]:
@@ -540,8 +525,8 @@ def simulate(
     """
     Run the receding-horizon controller against a plant.
 
-    `reference` and `plant` default to this script's own: the A-to-B quintic and
-    the model-matched ERK4 rollout. Passing either replaces one half of the run
+    `reference` and `plant` default to this script's own: the A-to-B quintic of
+    `reference_at` and the model-matched ERK4 rollout. Passing either replaces one half of the run
     and leaves the controller alone.
 
     A `plant` is `(state, control, parameter, dt) -> state` over the full
@@ -555,7 +540,11 @@ def simulate(
     base_parameter = parameter_vector(arguments)
     dynamics, bias_u, outputs, static_force = make_numeric_functions(model)
     if reference is None:
-        reference = minimum_jerk_reference(a, b, arguments.move_duration)
+        # `(q, dq, ddq)` at a virtual time is the whole contract a driver meets
+        # to put a different curve through the same controller.
+        def reference(time):
+            return reference_at(time, a, b, arguments.move_duration)
+
     if plant is None:
 
         def plant(state, control, parameter, step_s):
