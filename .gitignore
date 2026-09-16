@@ -7,3 +7,5 @@ __pycache__/
 .ruff_cache/
 # setup.py generates it from crane_mpc_parameters.yaml, into the source package
 crane_mpc/parameters.py*
+# MuJoCo appends its warnings here, in whatever directory a run started in.
+MUJOCO_LOG.TXT
