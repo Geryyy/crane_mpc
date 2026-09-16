@@ -13,7 +13,7 @@ from __future__ import annotations
 import numpy as np
 from crane_model import Frame, Payload
 from crane_model import symbolic as cs
-from crane_msgs.msg import SolverHealth, SupervisorStatus
+from crane_msgs.msg import SolverHealth, SupervisorStatus, SwaySettled
 from diagnostic_msgs.msg import DiagnosticArray, DiagnosticStatus, KeyValue
 from geometry_msgs.msg import PoseStamped
 from nav_msgs.msg import Path
@@ -25,6 +25,7 @@ from .cycle import (
     ACTUATED_DOF,
     ACTUATED_INDICES,
     CONTROLLER_STATE_TOPIC,
+    JOINT_STATE_TOPIC,
     NANOSECONDS,
     PASSIVE_DOF,
     PASSIVE_INDICES,
@@ -90,18 +91,83 @@ def solver_health(cycle: Cycle, solution, why: str, joints, budget: float, stamp
     return health
 
 
-def health_is_due(solves: int, decimation: int, last, health) -> bool:
+def report_is_due(count: int, decimation: int, changed: bool) -> bool:
     """
-    Decimated, because the consumer is the 20 Hz supervisor.
+    Decimated, because the consumer runs at 20 Hz and the cycle at 25.
 
     Never a change of verdict, though, which is what decimation exists not to
     drop.
     """
-    on_cadence = (solves - 1) % max(1, decimation) == 0
-    changed = last is None or (
-        last.fault != health.fault or last.outcome != health.outcome
+    return changed or (count - 1) % max(1, decimation) == 0
+
+
+def health_is_due(solves: int, decimation: int, last, health) -> bool:
+    return report_is_due(
+        solves,
+        decimation,
+        last is None or last.fault != health.fault or last.outcome != health.outcome,
     )
-    return on_cadence or changed
+
+
+def settled_is_due(cycles: int, decimation: int, last, verdict) -> bool:
+    """Count in cycles and not in solves: this stream reports the machine."""
+    return report_is_due(
+        cycles, decimation, last is None or last.settled != verdict.settled
+    )
+
+
+def sway_settled(dq_u, age: float | None, max_state_age: float, dq_u_settled, stamp):
+    """
+    `crane_msgs/SwaySettled` for one cycle: has the load stopped swinging.
+
+    A pure function of the two measured passive rates and how old they are.
+    Reported and never acted on -- damping, stopping and refusing on it are the
+    task layer's.
+
+    **Every path that is not a measurement is SETTLED_UNKNOWN with NaN rates.**
+    A degraded estimate that read as settled is a grip descending onto a
+    swinging block, which is the two-valued defect the third value exists to
+    prevent. `age` is therefore the age of the **rate** and not of the passive
+    pose -- a `/joint_states` message with no velocity array advances one and
+    not the other, and the zeros the node carries until a rate arrives are a
+    perfectly ordinary reading of a still crane, so absence has to look
+    different from them.
+    """
+    verdict = SwaySettled()
+    verdict.header.stamp = stamp
+    verdict.velocity = [float("nan")] * PASSIVE_DOF
+    verdict.settled = SwaySettled.SETTLED_UNKNOWN
+
+    dq_u = np.asarray(dq_u, dtype=float).reshape(-1)
+    if age is None:
+        verdict.message = (
+            f"no passive sway rate has arrived on {JOINT_STATE_TOPIC}, so whether "
+            "the load is swinging is unknown rather than settled"
+        )
+        return verdict
+    if age > max_state_age:
+        verdict.message = (
+            f"the passive sway rate is {age:.3f} s old against a max_state_age of "
+            f"{max_state_age} s, so it is not a reading of the machine now"
+        )
+        return verdict
+    if dq_u.size != PASSIVE_DOF or not np.all(np.isfinite(dq_u)):
+        verdict.message = (
+            f"the sway rate on {JOINT_STATE_TOPIC} is not two finite numbers, so "
+            "there is nothing to compare against dq_u_settled"
+        )
+        return verdict
+
+    verdict.velocity = [float(rate) for rate in dq_u]
+    bound = np.asarray(dq_u_settled, dtype=float)
+    settled = bool(np.all(np.abs(dq_u) <= bound))
+    verdict.settled = SwaySettled.SETTLED_YES if settled else SwaySettled.SETTLED_NO
+    verdict.message = (
+        f"the measured sway rate {np.abs(dq_u).round(4).tolist()} rad/s is "
+        f"{'inside' if settled else 'outside'} dq_u_settled "
+        f"{bound.tolist()} on the passive pair, measured {age:.3f} s ago"
+    )
+    return verdict
 
 
 def fill_cost_terms(health, terms) -> None:

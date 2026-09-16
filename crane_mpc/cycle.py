@@ -34,6 +34,7 @@ CONTROLLER_STATE_TOPIC = "/crane/controller_state"
 ROBOT_DESCRIPTION_TOPIC = "/robot_description"
 HORIZON_TOPIC = "/crane/mpc/horizon"
 SOLVER_HEALTH_TOPIC = "/crane/mpc/solver_health"
+SWAY_SETTLED_TOPIC = "/crane/sway_settled"
 TCP_HORIZON_TOPIC = "/crane/mpc/tcp_horizon"
 TCP_HORIZON_FRAME = "K0_mounting_base"
 SET_PAYLOAD_SERVICE = "/crane/mpc/set_payload"
@@ -275,6 +276,10 @@ class Cycle:
         self.tool_position = 0.0
 
         self.solves = 0
+        # Every cycle, silent ones included. `solves` is the wrong clock for a
+        # stream that reports the machine rather than the solve: it stops
+        # advancing on a silent cycle and would freeze that stream's cadence.
+        self.cycles = 0
         self.consecutive_failures = 0
         self.escalated = False
         self.applied_previous = False
@@ -288,6 +293,7 @@ class Cycle:
 
     def begin(self) -> None:
         """Nothing has been compared or costed yet this cycle."""
+        self.cycles += 1
         self.shadow_command_valid = False
         self.cost_terms = None
 

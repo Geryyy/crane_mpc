@@ -259,6 +259,37 @@ crane_mpc:
     validation:
       gt_eq<>: [0.0]
 
+  sway:
+    dq_u_settled:
+      type: double_array
+      default_value: [0.04, 0.04]
+      read_only: true
+      description: "The sway rate below which this node calls the load settled,
+        per passive row [tip, tilt], rad/s. wiki/nomenclature.md 9 registers the
+        symbol and this value; the producer moved here from the archived
+        supervisor because this node already reads the passive pair every cycle
+        and already has max_state_age to decide whether the reading is usable.
+        |dq_u| <= this on **both** rows is SETTLED_YES on /crane/sway_settled,
+        over it is SETTLED_NO, and an absent, stale or non-finite reading is
+        SETTLED_UNKNOWN. The rate and not the angle: the published angle carries
+        an uncalibrated constant offset and the rate does not.
+        Measured against the four control_recordings bags, on the /joint_states
+        velocity of theta6_tip_joint and theta7_tilt_joint over the 406 s in
+        which every actuated joint read under 0.01 rad/s for at least 3 s: the
+        pair sits at 0.0046 rad/s RMS with p99 = 0.012 and a maximum of 0.039,
+        so a quiescent machine never crosses this and the verdict does not
+        flicker. The retired producer's 0.02 was an RMS over a 0.75 s window and
+        crossing it instantaneously happens 28 times in those 406 s -- this
+        verdict has no dwell and no hysteresis to absorb that, and adding either
+        is a mechanism the issue that shipped this one does not carry.
+        **It is a threshold on the rate alone, so a swinging load reads
+        SETTLED_YES at its turning points.** A consumer gating a grip on it owes
+        itself the dwell (nomenclature 9's settle_dwell); this stream reports and
+        refuses nothing."
+      validation:
+        fixed_size<>: [2]
+        lower_element_bounds<>: [0.0]
+
   weights:
     q_a:
       type: double_array

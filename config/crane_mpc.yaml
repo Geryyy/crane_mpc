@@ -20,6 +20,13 @@ crane_mpc:
 
     max_consecutive_failures: 5
 
+    sway:
+      # rad/s per passive row. nomenclature 9's registered value, and what the
+      # four control_recordings bags say a still machine reads: 0.0046 rad/s RMS
+      # on theta6_tip_joint/theta7_tilt_joint over 406 s of quiescence, maximum
+      # 0.039. See the parameter description -- this verdict is instantaneous.
+      dq_u_settled: [0.04, 0.04]
+
     weights:
       q_a: [4.0, 4.0, 4.0, 4.0, 1.0, 1.0]
       dq_a: [0.4, 0.4, 0.4, 0.4, 0.1, 0.1]

@@ -135,6 +135,17 @@ def test_in_shadow_the_horizon_goes_to_the_private_topic(node):
     assert health.joint_names == ACTUATED
 
 
+def test_the_two_status_streams_are_stamped_with_the_cycle_they_share(node):
+    """One instant per cycle: a panel reading either cannot disagree with the other."""
+    settled = []
+    node._settled_publisher.publish = settled.append
+    configured(node)
+    node.update()
+    health = node.published["_health_publisher"][0]
+    assert len(settled) == 1
+    assert settled[0].header.stamp == health.header.stamp
+
+
 def test_the_measurement_is_keyed_by_name_and_not_by_index(node):
     configured(node)
     node.on_joint_state(joint_state(node, permuted=True))

@@ -21,7 +21,7 @@ import numpy as np
 import rclpy
 from control_msgs.msg import JointTrajectoryControllerState
 from crane_model import CraneModel, Payload, Tool, canonical_joints
-from crane_msgs.msg import PayloadEstimate, SolverHealth
+from crane_msgs.msg import PayloadEstimate, SolverHealth, SwaySettled
 from crane_msgs.srv import SetPayload
 from diagnostic_msgs.msg import DiagnosticArray
 from nav_msgs.msg import Path
@@ -50,6 +50,7 @@ from .cycle import (
     SHADOW_COMPARISON_TOPIC,
     SHADOW_HORIZON_TOPIC,
     SOLVER_HEALTH_TOPIC,
+    SWAY_SETTLED_TOPIC,
     TCP_HORIZON_TOPIC,
     Cycle,
     FollowerCommand,
@@ -138,12 +139,19 @@ class MpcNode(Node):
         self._dq_u = np.zeros(PASSIVE_DOF)
         self._actuated_stamp: Time | None = None
         self._passive_stamp: Time | None = None
+        #: When a passive *velocity* was last written, which is not when the
+        #: passive pose was: a position-only message advances one and not the
+        #: other, and the settled verdict is aged against this one.
+        self._passive_velocity_stamp: Time | None = None
 
         self._reference_message: JointTrajectory | None = None
         self._payload = Payload()
         self._payload_estimate: PayloadEstimate | None = None
         self._controller_state: JointTrajectoryControllerState | None = None
         self._last_health: SolverHealth | None = None
+        self._last_settled: SwaySettled | None = None
+        #: One instant per cycle, shared by every report that cycle writes.
+        self._stamp = self.get_clock().now().to_msg()
 
         self._create_publishers()
         self._create_subscriptions()
@@ -227,6 +235,9 @@ class MpcNode(Node):
         self._health_publisher = self.create_publisher(
             SolverHealth, SOLVER_HEALTH_TOPIC, _qos()
         )
+        self._settled_publisher = self.create_publisher(
+            SwaySettled, SWAY_SETTLED_TOPIC, _qos()
+        )
         self._comparison_publisher = self.create_publisher(
             DiagnosticArray, SHADOW_COMPARISON_TOPIC, _qos()
         )
@@ -279,6 +290,7 @@ class MpcNode(Node):
             self._q_u, velocity = measured
             if velocity is not None:
                 self._dq_u = velocity
+                self._passive_velocity_stamp = stamp
             self._passive_stamp = stamp
 
     def on_reference(self, message: JointTrajectory) -> None:
@@ -364,6 +376,14 @@ class MpcNode(Node):
         self.refresh_parameters()
         cycle = self._cycle
         cycle.begin()
+        clock = self.get_clock().now()
+        now = clock.nanoseconds
+        self._stamp = clock.to_msg()
+        # Before every gate below, and in both modes: the verdict is a
+        # measurement of the machine and not of the command path, so a cycle
+        # that publishes no horizon still has one to report -- and the cycles
+        # that report UNKNOWN are exactly the ones a gate would have swallowed.
+        self.report_sway_settled(now)
 
         if not self.ready():
             why = (
@@ -374,7 +394,6 @@ class MpcNode(Node):
             self.fall_silent(self.unconfigured(why))
             return
 
-        now = self.get_clock().now().nanoseconds
         silence = cycle.gates(
             now,
             float(self._values.max_clock_skew),
@@ -542,6 +561,30 @@ class MpcNode(Node):
         elif path is not None:
             self._tcp_publisher.publish(path)
 
+    def report_sway_settled(self, now_ns: int) -> None:
+        """Say whether the load has stopped swinging, on this cycle's stamp."""
+        cycle = self._cycle
+        measured = self._passive_velocity_stamp
+        verdict = reports.sway_settled(
+            self._dq_u,
+            None if measured is None else (now_ns - measured.nanoseconds) / 1e9,
+            float(self._values.max_state_age),
+            list(self._values.sway.dq_u_settled),
+            self._stamp,
+        )
+        # `solver_health_decimation` and not a second knob: both streams are
+        # this cycle reporting itself to a 20 Hz consumer, and two numbers for
+        # one decision is a way for them to disagree.
+        if not reports.settled_is_due(
+            cycle.cycles,
+            int(self._values.solver_health_decimation),
+            self._last_settled,
+            verdict,
+        ):
+            return
+        self._settled_publisher.publish(verdict)
+        self._last_settled = verdict
+
     def report(self, solution, why: str) -> None:
         """Write both reports, in the order every exit from `update` writes them."""
         self.report_solver_health(solution, why)
@@ -553,7 +596,7 @@ class MpcNode(Node):
                     solution,
                     self._joints,
                     float(self._values.solve_budget),
-                    self.get_clock().now().to_msg(),
+                    self._stamp,
                 )
             )
 
@@ -565,7 +608,7 @@ class MpcNode(Node):
             why,
             self._joints,
             float(self._values.solve_budget),
-            self.get_clock().now().to_msg(),
+            self._stamp,
         )
         if not reports.health_is_due(
             cycle.solves,

@@ -417,6 +417,42 @@ policy (`control_architecture` §5.3: every input it holds by topic carries a
 freshness deadline of its own), and inventing a report for a cycle that did
 nothing would make a wedged producer indistinguishable from a healthy one.
 
+## The settled verdict
+
+| Property | Value |
+|---|---|
+| Topic | `/crane/sway_settled`, `crane_msgs/SwaySettled` |
+| Rate and QoS | 12.5 Hz; reliable, depth 1, volatile |
+| Contents | the three-valued predicate, the two rates it was decided from, why |
+
+Has the load stopped swinging: `|dq_u| <= sway.dq_u_settled` on both passive
+rows. The producer was `crane_supervisor` and moved here with its archival
+(issue 147), because this node already reads the passive pair every cycle and
+already has `max_state_age` to decide whether that reading is usable at all.
+
+It shares the stamp of the cycle's solver health and the same decimation, and a
+change of verdict is exempt for the same reason. Three differences from that
+stream, all deliberate:
+
+* it is published on **every** cycle, including the ones the silence gates
+  swallow, and in **both** modes. The verdict measures the machine and not the
+  command path, and the cycles a gate swallows are exactly the ones whose
+  verdict is `SETTLED_UNKNOWN`—which is the one a consumer most needs to hear;
+* an absent, stale or non-finite passive rate is `SETTLED_UNKNOWN` with NaN
+  rates and never `SETTLED_YES`. The zeros the node carries before anything has
+  arrived are a perfectly ordinary reading of a still crane, so absence has to
+  look different from them—which is why the age this verdict is held to is the
+  age of the **rate** and not of the passive pose. `sensor_msgs/JointState`'s
+  velocity array is optional and the two stamps are not the same stamp;
+* it carries the **rate** and not the angle. The published angle carries an
+  uncalibrated constant offset; the rate is composed through the known chain and
+  does not.
+
+Nothing here damps, stops or refuses on it—that is the task layer's
+(`control_architecture` §5 row 7). And the verdict is instantaneous: a load
+still swinging reads `SETTLED_YES` twice a period at its turning points, so
+whatever gates a motion on this owes itself the dwell.
+
 ## Shadow mode (`mpc` §5.3's judgement, PRD §2's "shadow → active")
 
 **This node ships in shadow and publishes no horizon.** PRD §2 puts slice 6 at
