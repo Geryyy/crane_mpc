@@ -93,7 +93,7 @@ crane_mpc:
       # discriminant of wiki/hydraulics.md §2.2 is negative and the pose does not
       # exist -- and the ratio is negative on (-1.18416, -1.15096), so -1.2
       # admitted 0.0158 rad of nonexistent poses and a decade of under-reported
-      # cylinder force above them. Provenance in config/control_safe_limits.yaml.
+      # cylinder force above them. Provenance in crane_model/config/control_safe_limits.yaml.
       q_a_lower: [-3.71, 0.0, -0.91, 0.0, -12.566370614359172, 0.2]
       # The arm's upper is the **working branch**, not the description's 4.6:
       # constraint 6 divides by the arm's transmission ratio and that ratio
@@ -109,7 +109,7 @@ crane_mpc:
       # per axis; a second bound is a constraint-row change and not this issue's.
       # The velocity rows have no `position_box`, so inside that band the machine
       # may legally be moving faster than this bound and engaging there asks the
-      # first interval to brake. See config/control_safe_limits.yaml.
+      # first interval to brake. See crane_model/config/control_safe_limits.yaml.
       dq_a_max: [0.764, 0.239067, 0.325733, 0.400000, 2.121947, 0.5]
       # Marc's `joint_limit.safety_thresh`, as a tightening of constraint 1's
       # bound rather than the point a penalty starts biting. dq_a_max times the

@@ -530,7 +530,7 @@ crane_mpc:
         These are the **control-safe** limits of
         wiki/implementation/parameters.md and explicitly not the URDF's, which
         is why they are written down here rather than read off the description --
-        see config/control_safe_limits.yaml for where each number comes from and
+        see crane_model/config/control_safe_limits.yaml for where each number comes from and
         which of them is weak.
         **The boom's 0.0 is the row that is narrower than the description**
         (issue 128). -1.2 was the URDF's, and the boom's four-bar stops closing
@@ -619,7 +619,7 @@ crane_mpc:
       description: "Constraint 2 of 3, |dq_a| <= dq_a^+. Every crane row is the
         deployed control config's qDotMinCtrl/qDotMaxCtrl
         (mp_parameter_pzs100.yaml:135-224); the tool row has no counterpart there
-        and is hand-set. See config/control_safe_limits.yaml.
+        and is hand-set. See crane_model/config/control_safe_limits.yaml.
         **His box is asymmetric and this one cannot be**, since the row is a
         single magnitude per axis, so each entry is the *smaller* of his two
         (issue 128). It used to be the larger, which let the boom extend 36 % and

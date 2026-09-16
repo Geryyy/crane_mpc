@@ -69,3 +69,27 @@ def test_the_pump_is_the_one_in_crane_model():
     ):
         assert declared[here]["default_value"] == pump[there], here
         assert deployed[here] == pump[there], here
+
+
+# --- the control-safe box is one box ------------------------------------------
+#
+# The same rows bound `crane_planning`, which used to read its box off the
+# description and so certified poses and speeds constraint 1 refuses. The box
+# lives in crane_model now; this pins the declaration and the deployed config to
+# it, in the actuated order of wiki/nomenclature.md 4.
+ACTUATED = ("slewing", "boom", "arm", "telescope", "rotator", "tool")
+BOX_ROWS = ("q_a_lower", "q_a_upper", "dq_a_max", "q_a_margin")
+
+
+def test_the_control_safe_box_is_the_one_in_crane_model():
+    from crane_model.conventions import control_safe_limits
+
+    box = control_safe_limits()
+    declared = yaml.safe_load(DECLARATION.read_text())["crane_mpc"]["limits"]
+    deployed = yaml.safe_load((PACKAGE / "config" / "crane_mpc.yaml").read_text())
+    deployed = deployed["crane_mpc"]["ros__parameters"]["limits"]
+
+    for row in BOX_ROWS:
+        expected = [box[row][axis] for axis in ACTUATED]
+        assert declared[row]["default_value"] == expected, row
+        assert deployed[row] == expected, row
