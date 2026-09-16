@@ -21,7 +21,6 @@ state that MuJoCo is driven with.
 from __future__ import annotations
 
 import argparse
-import importlib.util
 import sys
 from pathlib import Path
 
@@ -35,47 +34,18 @@ import mpc_a2b  # noqa: E402
 cs = mpc_a2b.cs
 
 
-def _sibling(package: str, module: str):
-    """Import a script out of a sibling package's `scripts/`; there is no path."""
-    path = PACKAGE.parent / package / "scripts" / f"{module}.py"
-    if not path.is_file():
-        raise SystemExit(f"no {module}.py at {path}")
-    spec = importlib.util.spec_from_file_location(module, path)
-    loaded = importlib.util.module_from_spec(spec)
-    sys.modules[module] = loaded
-    spec.loader.exec_module(loaded)
-    return loaded
+# The tuning scripts are scripts, not installed modules, so there is no import
+# path between the packages. `tune_planner` bootstraps the rest itself.
+sys.path.insert(0, str(PACKAGE.parent / "crane_planning" / "scripts"))
 
-
-tune_planner = _sibling("crane_planning", "tune_planner")
-
+import tune_planner  # noqa: E402
 from crane_model.conventions import PASSIVE_INDICES  # noqa: E402
 from crane_model.mujoco_plant import NX_RIGID, MujocoPlant, leave  # noqa: E402
 
 
 def arguments(argv: list[str]) -> tuple[argparse.Namespace, list[str]]:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[1])
-    parser.add_argument(
-        "--goal",
-        choices=("out", "here"),
-        default="out",
-        help="'out' = (4, 0, 2) m; 'here' = start x, y lifted to z = 2 m",
-    )
-    parser.add_argument(
-        "--goal-pose",
-        type=float,
-        nargs=4,
-        default=None,
-        metavar=("X", "Y", "Z", "YAW"),
-        help="TCP pose in K0_mounting_base instead of a preset goal",
-    )
-    parser.add_argument("--speed-scale", type=float, default=1.0)
-    parser.add_argument("--kappa", type=float, default=None)
-    parser.add_argument("--ocp-duration-max", type=float, default=None)
-    parser.add_argument("--ocp-integrator", choices=("ERK", "IRK"), default=None)
-    parser.add_argument("--margin-safety", type=float, default=None)
-    parser.add_argument("--margin-interp", type=float, default=None)
-    parser.add_argument("--resettle-start", action="store_true")
+    tune_planner.plan_arguments(parser)
     parser.add_argument("--timestep", type=float, default=5.0e-4)
     parser.add_argument(
         "--cosim-step",
