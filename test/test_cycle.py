@@ -1,9 +1,9 @@
 """
-`mpc` §6's ladder and its shift, without a node.
+The escalation ladder and its shift, without a node.
 
-The two paths `architecture-audit.md` §4 names as both load-bearing and
-unreachable from a node test: the escalation that hands control back, and the
-shift that keeps driving on a solve that did not converge.
+Two paths load-bearing but unreachable from a node test: the escalation
+that hands control back, and the shift that keeps driving on a solve that
+did not converge.
 """
 
 import numpy as np
@@ -74,7 +74,6 @@ def test_the_first_failures_shift_the_previous_horizon():
     assert verdict.published
     assert one.applied_previous
     assert not one.escalated
-    # One knot on, the last duplicated: mpc §6.
     assert one.horizon.q_a_ref[:, 0] == pytest.approx([1.0, 2.0, 3.0, 4.0, 4.0])
     assert one.tcp_states[0] == pytest.approx(one.last_tcp_states[1])
     assert one.tcp_states[-1] == pytest.approx(one.last_tcp_states[-1])
@@ -92,8 +91,8 @@ def test_without_a_previous_horizon_nothing_is_published():
 
 def test_the_ceiling_escalates_and_stops_the_publisher():
     one = cycle()
-    # A shiftable previous horizon is deliberately present: the ceiling is
-    # checked before the shift, so escalation must win over it.
+    # Shiftable previous horizon deliberately present: ceiling is checked
+    # before the shift, so escalation must win over it.
     one.last_horizon = hz.Knots.zeros(KNOTS)
     one.last_tcp_states = np.zeros((KNOTS, cs.NX))
     one.consecutive_failures = 3
@@ -105,18 +104,16 @@ def test_the_ceiling_escalates_and_stops_the_publisher():
     assert one.escalated
     assert not one.applied_previous
     assert "escalation" in one.last_silence
-    # The number that says why, on the cycle that hands control back.
     assert "10 ms against a 20 ms budget" in verdict.text
-    # Nothing may be shifted next cycle either.
     assert one.last_horizon is None
     assert one.guess is None
 
 
 def test_the_escalation_is_an_error_once_and_a_standing_warning_after():
     """
-    Handing control back happens once. The cycles after it keep counting and
-    keep reporting `FAULT_SOLVER`, but an error each is how a wedged node wrote
-    a hundred identical lines in twenty seconds and never said the solve time.
+    Handing control back happens once; later cycles keep reporting
+    `FAULT_SOLVER` as a warning, not an error -- a wedged node once wrote a
+    hundred identical error lines in twenty seconds.
     """
     one = cycle()
     one.consecutive_failures = 3
@@ -132,9 +129,7 @@ def test_the_escalation_is_an_error_once_and_a_standing_warning_after():
         assert not standing.published
         assert "still holds" in standing.text
 
-    # Whatever clears the latch -- a gate, a converged solve, a mode change --
-    # arms the error again, so a second hand-back is not reported as the
-    # continuation of the first.
+    # Clearing the latch (gate, solve, mode change) re-arms the error.
     one.stay_silent("a gate")
     one.consecutive_failures = 3
     assert one.ladder(solution(Outcome.FAILED), 3, 0.02).severity == "error"
@@ -245,7 +240,6 @@ def test_a_carried_axis_reports_its_divergence_on_the_comparison():
 
     assert float(keys["axis1.dq_a_divergence"]) == pytest.approx(0.5)
     assert keys["axis1.dq_a_diverged"] == "true"
-    # The other five are on measurement, so they carry no row at all.
     assert not [key for key in keys if key.startswith("axis0.dq_a")]
 
 
@@ -284,9 +278,8 @@ def stall(one):
     """
     Publish converged cycles that spend no plan at all, from a cold start.
 
-    51 and not 50: the first cycle after a clear has no mark yet and so charges
-    no wall time. That is the issue's "max_stall_time plus one cycle" -- it is
-    the cold-start case, and in steady state the bound falls on the 50th.
+    51 not 50: the first cycle after a clear has no mark yet, so charges no
+    wall time (cold-start case; in steady state the bound falls on the 50th).
     """
     for step in range(51):
         one.advance(
@@ -302,7 +295,6 @@ def test_a_held_plan_reports_after_the_stall_time_and_not_before():
     held, stalled = watch(held, 0.0, 1)
     assert stalled, "the 50th is 2.00 s, the bound itself"
     assert held == pytest.approx(MAX_STALL)
-    # It stays reported while it lasts, and the count does not run away.
     held, stalled = watch(held, 0.0, 500)
     assert stalled
     assert held == pytest.approx(MAX_STALL)
@@ -316,22 +308,21 @@ def test_a_rate_just_under_the_threshold_is_a_stall_and_just_over_is_not():
 
 def test_a_slowdown_is_not_a_stall_and_the_count_is_wall_clock():
     """The watch must not fire on the feature working."""
-    # Issue 119's cannot-follow run: a legitimate over-ask on the slewing axis,
-    # held far longer than the stall time, at 0.760 minimum.
+    # Issue 119's cannot-follow run: legitimate over-ask on the slewing axis,
+    # held longer than the stall time, at 0.760 minimum.
     assert not watch(0.0, 0.760, 10000)[1]
-    # And the 0.319 a 200x-too-low time price dawdles at -- a tuning defect,
-    # which reporting here would name as the wrong thing.
+    # 0.319 is what a 200x-too-low time price dawdles at -- a tuning defect
+    # this watch should not name as a stall.
     assert not watch(0.0, 0.319, 10000)[1]
 
-    # Wall clock and not cycles: a node at half rate reports after the same 2 s,
-    # in half as many cycles.
+    # Wall clock, not cycles: half rate reports after the same 2s wall time.
     held, stalled = 0.0, False
     for _ in range(26):
         held, stalled = watch_progress(held, 0.0, Ts, 2.0 * Ts, MIN_RATE, MAX_STALL)
     assert stalled
 
-    # A nominal that is not a duration is not progress, and a number that is not
-    # finite buys neither progress nor wall time.
+    # A non-duration nominal isn't progress; non-finite buys neither progress
+    # nor wall time.
     assert watch_progress(0.0, Ts, 0.0, Ts, MIN_RATE, MAX_STALL) == (Ts, False)
     assert watch_progress(MAX_STALL, np.nan, Ts, np.nan, MIN_RATE, MAX_STALL) == (
         MAX_STALL,
@@ -345,8 +336,8 @@ def test_one_progressing_cycle_inside_the_window_clears_the_count():
     held, stalled = watch(held, 1.0, 1)
     assert not stalled
     assert held == 0.0
-    # A machine that crawls just above the threshold therefore never reports.
-    # That is the bound's own statement: 0.1 of nominal still finishes the plan.
+    # A machine crawling just above the threshold never reports: 0.1 of
+    # nominal still finishes the plan.
     assert not watch(held, MIN_RATE, 10000)[1]
 
 

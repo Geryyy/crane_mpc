@@ -31,8 +31,7 @@ def test_the_resample_reproduces_the_reference_at_its_own_knots():
     rejection, horizon = resample(reference, 0.0, Grid(0.4, 4))
     assert rejection is None
     assert np.allclose(horizon.q_a_ref, reference.q_a_ref)
-    # The last knot lands on the plan's own end, which is the held goal at rest
-    # rather than an interpolation.
+    # Last knot lands on the plan's own end: held goal at rest, not interpolation.
     assert np.allclose(horizon.dq_a_ref[:-1], reference.dq_a_ref[:-1])
     assert np.allclose(horizon.dq_a_ref[-1], 0.0)
     # The horizon's own time is knot-local, not the reference's.
@@ -111,9 +110,8 @@ def test_the_wire_form_carries_positions_velocities_and_no_accelerations():
 
 def test_the_wire_form_names_the_canonical_eight_and_carries_the_sway():
     """
-    The JTC's `joints` is eight wide and `allow_partial_joints_goal: false`
-    rejects a six-name trajectory outright, so the two passive columns go out
-    with the six -- in their canonical rows, not appended.
+    JTC's `joints` is eight wide; `allow_partial_joints_goal: false` rejects a
+    six-name trajectory outright, so passive columns go out in canonical rows.
     """
     from builtin_interfaces.msg import Time
 

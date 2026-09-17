@@ -1,14 +1,10 @@
 """
-The export's guards on the C3 fit, failure paths only.
+The export's guards on the C3 fit, failure paths only: a bad fit is never
+checked in, so `test_generated_is_current.py`'s `export_ocp.py --check` never
+covers one.
 
-The happy path is `test_generated_is_current.py`: it runs `export_ocp.py
---check`, so a fit that passes these guards and a tree that matches it are
-checked there. What is *not* checked there is a bad fit, because a bad fit is
-never checked in -- hence this file.
-
-`check_fit` is given a stub rather than a `CraneSymbolicModel`: it reads two
-attributes, and building the real model means pinocchio, the URDF and a second
-of work for no extra coverage.
+`check_fit` gets a stub, not a `CraneSymbolicModel`: it reads two attributes;
+the real model costs pinocchio, the URDF and a second of work for nothing extra.
 """
 
 from __future__ import annotations
@@ -92,10 +88,10 @@ def test_damping_from_another_fit_is_refused(model, fit):
 @pytest.mark.parametrize("value", [np.nan, np.inf])
 def test_a_non_finite_d_is_refused_by_axis_name(model, fit, value):
     """
-    A NaN `d` used to *pass*: the tolerance comparison is `nan > nan`, i.e. False.
+    A NaN `d` used to pass: `nan > nan` is False.
 
-    Nothing upstream covers `d` -- `load_actuator_fit` never reads it, because it
-    reaches the dynamics through the description -- so this guard is the only one.
+    Nothing upstream covers `d` -- `load_actuator_fit` never reads it, it
+    reaches the dynamics via the description -- so this guard is the only one.
     """
     fit["axes"]["ha"]["d"] = value
     with pytest.raises(ValueError, match=r"axis 'ha' has d="):
@@ -111,11 +107,11 @@ def test_a_missing_d_is_refused_by_axis_name(model, fit):
 
 def test_a_stale_install_copy_stops_generation(fit, tmp_path, monkeypatch):
     """
-    The copy `load_actuator_fit` prefers is the installed one.
+    `load_actuator_fit` prefers the installed copy.
 
-    Editing the source fit and rebuilding only `crane_mpc` leaves the export
-    reading the stale install, so `k` and `d` come from different revisions with
-    every other guard green. Only comparing the copies catches it.
+    Editing the source and rebuilding only `crane_mpc` leaves export reading
+    the stale install, so `k`/`d` differ by revision with every other guard
+    green. Only comparing copies catches it.
     """
     edited = copy.deepcopy(fit)
     edited["axes"]["sw"]["k"] += 1.0
@@ -133,7 +129,7 @@ def test_the_two_copies_drifting_stops_generation(fit, tmp_path, monkeypatch):
     other = tmp_path / "c3_full_model.json"
     other.write_text(json.dumps(drifted))
     monkeypatch.setattr(eo, "WIKI_FIT", other)
-    # Pinned to a path that does not exist, so this asserts the wiki copy alone.
+    # Pinned to a nonexistent path, so this asserts the other copy alone.
     monkeypatch.setattr(eo, "SOURCE_FIT", tmp_path / "absent.json")
     with pytest.raises(ValueError, match=r"one identification in two files"):
         eo.check_fit_is_one_artifact(fit)
@@ -142,8 +138,8 @@ def test_the_two_copies_drifting_stops_generation(fit, tmp_path, monkeypatch):
 def test_the_digest_is_over_the_numbers_and_not_the_bytes(fit):
     """The two copies differ by a trailing newline and are the same fit."""
     assert eo.fit_digest(fit) == eo.fit_digest(json.loads(json.dumps(fit, indent=4)))
-    # `gr.d` is a number nothing in the model reads, and it still moves the
-    # digest -- that is what makes a refit fail `--check` rather than ship.
+    # `gr.d` is unread by the model but still moves the digest -- what makes
+    # a refit fail `--check` rather than ship.
     moved = copy.deepcopy(fit)
     moved["axes"]["gr"]["d"] = 99.0
     assert eo.fit_digest(moved) != eo.fit_digest(fit)

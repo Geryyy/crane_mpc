@@ -1,11 +1,8 @@
 """
 What the cycle says about itself, as messages.
 
-Pure marshalling: the solver-health report, the shadow comparison of user story
-68, the TCP horizon drawn through the forward kinematics, and the payload read
-off a service request. Every function here takes a `Cycle` and returns a
-message; nothing publishes, so the node keeps its publishers and this keeps the
-field-by-field detail out of it.
+Pure marshalling: solver health, shadow comparison, TCP horizon, payload. Every
+function takes a `Cycle` and returns a message; nothing publishes here.
 """
 
 from __future__ import annotations
@@ -60,15 +57,10 @@ def solver_health(cycle: Cycle, solution, why: str, joints, budget: float, stamp
         Outcome.BUDGET_EXCEEDED: SolverHealth.SOLVE_BUDGET_EXCEEDED,
         Outcome.FAILED: SolverHealth.SOLVE_FAILED,
     }[solution.outcome]
-    # A stalled plan is a *converged* solve -- the optimizer is answering, it is
-    # answering "wait" -- so without this it reports healthy forever. It reuses
-    # FAULT_SOLVER because `SolverHealth` has no code of its own for a stall and
-    # giving it one is a `crane_msgs` field add. **What a receiver then does
-    # about it is not settled here**: a stalled node keeps publishing, so it does
-    # not look like the producer that went quiet, and no node in this stack acts
-    # on the distinction yet. `health_is_due` exempts a changed verdict from the
-    # decimation, so it goes out on the cycle it is noticed; where the fault
-    # already stands the stall is carried in `message`.
+    # A stalled plan is a *converged* solve (answering "wait"); without this it reads
+    # healthy forever. Reuses FAULT_SOLVER (no dedicated stall code, a crane_msgs
+    # field add); no node here acts on the distinction yet. `health_is_due` exempts a
+    # changed verdict from decimation, so a new stall goes out immediately.
     health.fault = (
         SupervisorStatus.FAULT_NONE
         if solution.outcome is Outcome.CONVERGED and not cycle.progress_stalled
@@ -92,12 +84,7 @@ def solver_health(cycle: Cycle, solution, why: str, joints, budget: float, stamp
 
 
 def report_is_due(count: int, decimation: int, changed: bool) -> bool:
-    """
-    Decimated, because the consumer runs at 20 Hz and the cycle at 25.
-
-    Never a change of verdict, though, which is what decimation exists not to
-    drop.
-    """
+    """Decimated (consumer at 20 Hz, cycle at 25), but never a change of verdict."""
     return changed or (count - 1) % max(1, decimation) == 0
 
 
@@ -120,18 +107,10 @@ def sway_settled(dq_u, age: float | None, max_state_age: float, dq_u_settled, st
     """
     `crane_msgs/SwaySettled` for one cycle: has the load stopped swinging.
 
-    A pure function of the two measured passive rates and how old they are.
-    Reported and never acted on -- damping, stopping and refusing on it are the
-    task layer's.
-
-    **Every path that is not a measurement is SETTLED_UNKNOWN with NaN rates.**
-    A degraded estimate that read as settled is a grip descending onto a
-    swinging block, which is the two-valued defect the third value exists to
-    prevent. `age` is therefore the age of the **rate** and not of the passive
-    pose -- a `/joint_states` message with no velocity array advances one and
-    not the other, and the zeros the node carries until a rate arrives are a
-    perfectly ordinary reading of a still crane, so absence has to look
-    different from them.
+    Reported, never acted on (damping/stopping/refusing is the task layer's). Every
+    non-measurement path is SETTLED_UNKNOWN with NaN rates: a degraded estimate
+    read as settled is a grip descending onto a swinging block. `age` is the
+    **rate**'s age, not the pose's -- a still crane's zeros must not read as fresh.
     """
     verdict = SwaySettled()
     verdict.header.stamp = stamp
@@ -221,9 +200,7 @@ def shadow_comparison(cycle: Cycle, verdict: str, solution, joints, budget, stam
         put("constraint.sway_rate", _text(solution.violation.dq_u))
         put("constraint.cylinder_force", _text(solution.violation.cylinder_force))
         put("constraint.pump_flow", _text(solution.violation.pump_flow))
-        # The two cost rows `crane_msgs/SolverHealth` has no field for. 119 made
-        # them the interesting ones, so they are reported here rather than
-        # computed and left invisible as the C++ left them.
+        # The two cost rows `SolverHealth` has no field for (issue 119 made them interesting).
         if cycle.cost_terms is not None:
             put("cost.lag", _text(cycle.cost_terms.lag))
             put("cost.progress", _text(cycle.cost_terms.progress))
@@ -245,9 +222,7 @@ def shadow_comparison(cycle: Cycle, verdict: str, solution, joints, budget, stam
                 f"{joint}.follower_velocity_error",
                 _text(follower.velocity_error[axis]),
             )
-        # The machine-readable half of the divergence warning, on the axes that
-        # run open-loop in velocity: how far the state the OCP was solved from
-        # sits from the state the machine reports.
+        # Machine-readable divergence, open-loop-velocity axes: OCP state vs machine state.
         if cycle.velocity_carry.carried[axis]:
             put(
                 f"{joint}.dq_a_divergence", _text(cycle.velocity_carry.divergence[axis])
@@ -282,11 +257,9 @@ def shadow_comparison(cycle: Cycle, verdict: str, solution, joints, budget, stam
 
 def tcp_path(cycle: Cycle, model):
     """
-    Draw the horizon through the forward kinematics, as `nav_msgs/Path`.
+    Draw the horizon through forward kinematics as `nav_msgs/Path`.
 
-    Returns `(path, why)`. `(None, None)` is nothing to draw; a `why` that is
-    not None is a kinematics refusal the node logs -- including the empty
-    string, which is what an exception with no message says.
+    Returns `(path, why)`: `(None, None)` is nothing to draw, `why` a refusal.
     """
     if (
         model is None
@@ -329,11 +302,7 @@ def tcp_path(cycle: Cycle, model):
 
 
 def payload_from_message(message):
-    """
-    Read `crane_msgs/Payload` as the model's own.
-
-    A point mass: the message carries no inertia.
-    """
+    """Read `crane_msgs/Payload` as the model's own: a point mass, no inertia."""
     payload = Payload()
     payload.valid = True
     if message.shape == message.SHAPE_NONE:

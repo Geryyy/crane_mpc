@@ -1,14 +1,11 @@
 """
 Carry the horizon as data.
 
-The reference read off the wire, resampled onto the OCP's grid, and written
-back out as `trajectory_msgs/JointTrajectory`.
-
-The Python of `src/horizon_source.cpp`, knot-for-knot. Arrays rather than a
-vector of structs: the resample is one Hermite evaluation over all N knots
-instead of N of them, which is where a Python port would otherwise pay.
-ROS-free apart from the two marshalling functions at the end, so the maths is
-tested offline.
+Read off the wire, resampled onto the OCP's grid, written back as
+`trajectory_msgs/JointTrajectory`. Python port of `src/horizon_source.cpp`,
+knot-for-knot: arrays, not a vector of structs, since resample is one
+Hermite evaluation over all N knots, not N of them. ROS-free apart from the
+two marshalling functions, so the maths is tested offline.
 """
 
 from __future__ import annotations
@@ -58,9 +55,8 @@ class Knots:
     """
     N knots. In a reference `t` is time_from_start; in a horizon, index*Ts.
 
-    The sway pair is the solved one, written by `Cycle.adopt_solution` and
-    shifted with the rest. A *reference* carries no sway, so there it stays
-    zero and nothing reads it.
+    Sway pair is the solved one, shifted by `Cycle.adopt_solution`; a
+    reference carries no sway, so it stays zero there.
     """
 
     t: np.ndarray  # (N,)
@@ -112,9 +108,9 @@ def resample(reference: Knots, offset: float, grid: Grid):
     """
     Evaluate the reference at `offset + index*Ts`.
 
-    Cubic Hermite in position and velocity. Past the plan's last point every
-    knot holds the goal at rest. Returns `(rejection, horizon)`; exactly one of
-    the two is None.
+    Cubic Hermite in position and velocity; past the plan's last point every
+    knot holds the goal at rest. Returns `(rejection, horizon)`, exactly one
+    of which is None.
     """
     if grid.horizon_length < 2 or not np.isfinite(grid.Ts) or grid.Ts <= 0.0:
         return Rejection.DEGENERATE_GRID, None
@@ -137,15 +133,15 @@ def resample(reference: Knots, offset: float, grid: Grid):
     horizon.t[:] = np.arange(grid.horizon_length) * grid.Ts
     t = offset + horizon.t
 
-    # Past the end: the goal, at rest. `hold` is never empty when the plan is
-    # spent, and `t` is increasing, so the two halves are contiguous.
+    # Past the end: goal at rest. `hold` is never empty once the plan is
+    # spent, and `t` increasing keeps the two halves contiguous.
     hold = t >= reference.t[-1]
     horizon.q_a_ref[hold] = reference.q_a_ref[-1]
 
     live = ~hold
     if np.any(live):
-        # The C++ walks `segment` forward while ref[segment+1].t <= t and stops
-        # at len-2; searchsorted on increasing t is the same index.
+        # C++ walks `segment` forward while ref[segment+1].t <= t, stops at
+        # len-2; searchsorted on increasing t gives the same index.
         left = np.clip(
             np.searchsorted(reference.t, t[live], side="right") - 1,
             0,
@@ -189,8 +185,8 @@ def reference_from_message(message: JointTrajectory, joints):
     """
     Lift the six named joints out of the wire order.
 
-    Returns `(reference, why)`, or `(None, why)`: a reference missing a joint, a
-    position or a velocity is refused whole -- a partial plan is not a plan.
+    Returns `(reference, why)` or `(None, why)`: missing a joint, position or
+    velocity refuses the whole reference -- a partial plan is not a plan.
     """
     if not message.points:
         return None, "the reference carries no points"
@@ -222,14 +218,12 @@ def reference_from_message(message: JointTrajectory, joints):
 
 def horizon_to_message(horizon: Knots, joints, first_knot_valid_at):
     """
-    Write the horizon in the form `wiki/implementation/ros2_interfaces.md` §4 fixes.
+    Write the horizon as a `JointTrajectory`.
 
-    `joints` is the **canonical eight**, in contract order, and the columns are
-    laid out to match: the JTC's `dof_` is its own `joints` list, eight wide
-    here, and with `allow_partial_joints_goal: false` a six-name trajectory is
-    rejected whole. It commands only the six, but it tracks tip and tilt, so the
-    two passive columns are the solved sway -- a fill, not a computation. Same
-    call `crane_planning` makes for its `a2b_movement` answer.
+    `joints` is the canonical eight, in contract order; JTC's `dof_` list is
+    eight wide, and `allow_partial_joints_goal: false` rejects six names
+    whole. The two passive columns are the solved sway -- a fill, not a
+    computation.
 
     No accelerations: `ddq_a_ref` is the OCP's stage residual, not a command.
     """

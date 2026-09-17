@@ -1,18 +1,9 @@
 """
 The `crane_mpc` node: `src/mpc_node.cpp` in Python.
 
-Nothing on the wire changes -- the topics, their types, their QoS, the service
-and the 25 Hz cadence are the contract `wiki/implementation/ros2_interfaces.md`
-§4 fixes, and this is the same node behind them.
-
-What does change is that the state never leaves the OCP's own coordinates. The
-C++ carried a 16-wide `crane_model::State` between the node and the solver and
-rebuilt the actuator rows on each crossing; here `x` is the problem's 25 rows
-from `/joint_states` to the published horizon.
-
-An adapter and nothing else: parameters, subscriptions, publishers, the service,
-the timer and the conversions at the boundary. `cycle.py` decides, `reports.py`
-marshals, `config.py` shapes the parameters.
+Wire (topics, types, QoS, 25 Hz cadence) is unchanged; state now stays in the
+OCP's 25-row `x` end to end instead of C++'s 16-wide `crane_model::State`
+rebuilt each crossing. An adapter: `cycle.py` decides, `reports.py` marshals.
 """
 
 from __future__ import annotations
@@ -77,17 +68,11 @@ def _latched() -> QoSProfile:
 
 def _measured(message: JointState, index: dict, names: list):
     """
-    `(q, dq)` for `names`, or `None` if the message does not carry them finitely.
+    `(q, dq)` for `names`, or `None` if the message doesn't carry them finitely.
 
-    `dq` is `None` where the message carries no velocity for them, which leaves
-    the last one standing.
-
-    **A non-finite row is dropped rather than written through**
-    (`mpc_node.cpp:360-364`). A NaN that reaches `x0` comes back as a solve
-    failure: it counts against `max_consecutive_failures` and is reported as
-    FAULT_SOLVER, when what happened is that one sensor went stale. Dropped
-    here, the group's stamp does not advance and it surfaces as staleness
-    through `max_state_age`, which is what it is.
+    `dq` is `None` where the message carries no velocity (last one stands). A
+    non-finite row is dropped, not written through (`mpc_node.cpp:360-364`): it
+    surfaces as staleness via `max_state_age` instead of a solve failure.
     """
     rows = [index.get(name) for name in names]
     if any(row is None for row in rows) or len(message.position) <= max(rows):
@@ -132,17 +117,14 @@ class MpcNode(Node):
         #: The canonical eight, in contract order: what the horizon is named by.
         self._canonical_joints: list[str] = []
 
-        # The measurement, by name and never by index: the two stacks publish
-        # different `/joint_states` name sets in different orders.
+        # By name, never index -- the two stacks publish different `/joint_states` sets.
         self._q_a = np.zeros(ACTUATED_DOF)
         self._dq_a = np.zeros(ACTUATED_DOF)
         self._q_u = np.zeros(PASSIVE_DOF)
         self._dq_u = np.zeros(PASSIVE_DOF)
         self._actuated_stamp: Time | None = None
         self._passive_stamp: Time | None = None
-        #: When a passive *velocity* was last written, which is not when the
-        #: passive pose was: a position-only message advances one and not the
-        #: other, and the settled verdict is aged against this one.
+        #: When a passive *velocity* (not pose) was last written; settled verdict ages against this.
         self._passive_velocity_stamp: Time | None = None
 
         self._reference_message: JointTrajectory | None = None
@@ -156,8 +138,7 @@ class MpcNode(Node):
 
         #: The action whose accepted goal releases this node, `""` for no gate.
         self._start_signal_action = str(self._values.start_signal_action)
-        #: Whether that action carries a goal now. `True` when there is no gate,
-        #: so every test below reads the same way in both configurations.
+        #: Whether that action carries a goal now; `True` with no gate.
         self._start_signal_open = not self._start_signal_action
         self._start_signal_topic = (
             f"{self._start_signal_action}/_action/status"
@@ -217,9 +198,7 @@ class MpcNode(Node):
         for axis, joint in enumerate(self._joints):
             if not carry.diverged[axis]:
                 continue
-            # Its own call site, not `self.warn`: rclpy keys the throttle by
-            # caller, so sharing that one would put the divergence in the same
-            # five-second bucket as every silence this node reports.
+            # Own call site: rclpy throttles by caller, not shared with `self.warn`.
             self.get_logger().warn(
                 f"The model-carried velocity of {joint} has walked "
                 f"{carry.divergence[axis]:g} away from the measured one, past the "
@@ -278,10 +257,8 @@ class MpcNode(Node):
         )
         self.create_service(SetPayload, SET_PAYLOAD_SERVICE, self.on_set_payload)
         if self._start_signal_action:
-            # An action's status topic, not the action: this node sends no goal
-            # and answers for none. Latched and reliable is what an action
-            # server publishes its status with, so a node that starts after the
-            # goal was accepted still sees it.
+            # Status topic, not the action -- latched+reliable so a late-starting
+            # node still sees an accepted goal.
             self.create_subscription(
                 GoalStatusArray,
                 self._start_signal_topic,
@@ -339,17 +316,13 @@ class MpcNode(Node):
         )
 
     def on_payload_estimate(self, message: PayloadEstimate) -> None:
-        # Stored and reported at startup; the payload the OCP solves with moves
-        # only through the service, exactly as the C++ node read it.
+        # Stored and reported at startup; the OCP's payload only moves via the service.
         self._payload_estimate = message
 
     def on_controller_state(self, message: JointTrajectoryControllerState) -> None:
-        # The profiles that reuse the timber bringup put *both* trajectory
-        # controllers on one topic, so a grasping state arrives interleaved with
-        # the a2b one. Keeping it would make `follower_command` read a message
-        # that names none of the actuated joints on roughly every second cycle,
-        # and report an empty comparison there. Names, not indices: the two
-        # controllers publish different joint sets.
+        # Timber bringup profiles put both trajectory controllers on one topic;
+        # without this, `follower_command` reads a message naming no actuated
+        # joint every other cycle. Names, not indices.
         if not set(self._joints) & set(message.joint_names):
             return
         self._controller_state = message
@@ -428,10 +401,7 @@ class MpcNode(Node):
         clock = self.get_clock().now()
         now = clock.nanoseconds
         self._stamp = clock.to_msg()
-        # Before every gate below, and in both modes: the verdict is a
-        # measurement of the machine and not of the command path, so a cycle
-        # that publishes no horizon still has one to report -- and the cycles
-        # that report UNKNOWN are exactly the ones a gate would have swallowed.
+        # Before every gate: measures the machine, not the command path.
         self.report_sway_settled(now)
 
         if not self.ready():
@@ -443,10 +413,8 @@ class MpcNode(Node):
             self.fall_silent(self.unconfigured(why))
             return
 
-        # Before `cycle.gates`, and that ordering is the whole point: a plan may
-        # wait as long as a human takes to press the button, and `gates` is what
-        # anchors a reference and starts spending it. Gated here it is never
-        # anchored, so it still starts at its first knot whenever the goal comes.
+        # Before `cycle.gates` deliberately: it anchors the reference, so a held
+        # plan still starts at its first knot whenever the goal comes.
         if not self.start_signal_still_open():
             self.fall_silent(self.ungated())
             return
@@ -519,12 +487,8 @@ class MpcNode(Node):
         if verdict.severity == "error":
             self.get_logger().error(verdict.text)
         elif verdict.severity:
-            # Its own call site, not `self.warn`: rclpy keys the throttle by
-            # caller, so the ladder used to share one five-second bucket with
-            # every silence this node reports. A run that had been silent for
-            # want of a reference then swallowed the rungs below the escalation
-            # -- the ones carrying the solve time against the budget -- and the
-            # first thing the log said about a failing solver was the ceiling.
+            # Own call site: sharing `self.warn`'s bucket used to swallow the
+            # ladder's rungs below the escalation.
             self.get_logger().warn(verdict.text, throttle_duration_sec=WARN_PERIOD)
 
     def unconfigured(self, why: str) -> Silence:
@@ -539,12 +503,8 @@ class MpcNode(Node):
         """
         Read the gate, and close it if its publisher has gone.
 
-        A status topic reports goals and not liveness: the last thing a dying
-        controller published stays in this node's cache, and a transient-local
-        one that comes back with nothing to report publishes nothing at all. So
-        an open gate whose publisher has gone is closed here rather than driven
-        on -- the controller that was executing the goal no longer exists, and
-        everything else in this node fails closed.
+        A status topic reports goals, not liveness, so a vanished publisher's
+        gate is closed here rather than driven on -- fails closed.
         """
         if not self._start_signal_open:
             return False
@@ -669,9 +629,8 @@ class MpcNode(Node):
             list(self._values.sway.dq_u_settled),
             self._stamp,
         )
-        # `solver_health_decimation` and not a second knob: both streams are
-        # this cycle reporting itself to a 20 Hz consumer, and two numbers for
-        # one decision is a way for them to disagree.
+        # Reuses `solver_health_decimation`, not a second knob -- two numbers
+        # for one decision could disagree.
         if not reports.settled_is_due(
             cycle.cycles,
             int(self._values.solver_health_decimation),

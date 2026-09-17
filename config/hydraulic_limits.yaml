@@ -1,6 +1,6 @@
-# Machine hydraulic limits used by the MPC. The two pump rows are
-# crane_model/config/hydraulics.yaml's `pump` block, pinned to it by
-# test_parameters_are_declared; crane_planning declares the same pair.
+# Hydraulic limits for the MPC. Pump rows mirror
+# crane_model/config/hydraulics.yaml's `pump` block, pinned by
+# test_parameters_are_declared; crane_planning shares it.
 crane_mpc:
   ros__parameters:
     hydraulics:

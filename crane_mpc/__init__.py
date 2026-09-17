@@ -1,9 +1,4 @@
-"""
-The acados RTI MPC: the problem, the solver wrapper, the cycle and the node.
-
-`node` is not re-exported: importing it costs rclpy, and everything below it is
-ROS-free enough to be driven from a test or a script.
-"""
+"""The acados RTI MPC: problem, solver wrapper, cycle, node (`node` unexported -- costs rclpy)."""
 
 from .config import (
     MpcConfigError,

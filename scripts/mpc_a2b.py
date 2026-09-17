@@ -2,10 +2,9 @@
 """
 Run the crane MPC offline on a joint-space A-to-B movement and plot it.
 
-This is a developer tuning tool, not a second controller.  It imports
-``export_ocp.py`` so the dynamics, cost residuals, constraints, integrator and
-RTI backend are the same ones used to generate the deployed solver.  ROS, DDS
-and a running controller manager are not required.
+Developer tuning tool, not a second controller: imports ``export_ocp.py`` so
+dynamics, cost residuals, constraints, integrator and RTI backend match the
+deployed solver. No ROS, DDS or controller manager required.
 """
 
 from __future__ import annotations
@@ -29,18 +28,15 @@ from scipy.optimize import root
 PACKAGE = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PACKAGE / "scripts"))
 
-# Pinocchio registers an old and a new bool converter while the shared symbolic
-# model imports.  That harmless binding warning otherwise obscures CLI help and
-# every tuning summary.
+# pinocchio's bool-converter warning is harmless but clutters CLI help/summaries
 warnings.filterwarnings(
     "ignore", message="to-Python converter for pinocchio.*", category=RuntimeWarning
 )
 
 import export_ocp  # noqa: E402
 
-# The pieces this driver and the node write onto the same solver, defined once.
-# `crane_mpc.solver` is installed; a from-scratch build has not installed it yet,
-# so the source tree is the fallback, exactly as `export_ocp` resolves `cs`.
+# same solver-config pieces the node writes, defined once; source tree is the
+# fallback for a from-scratch build, same as export_ocp resolves cs
 try:
     from crane_mpc import solver as ocp_runtime  # noqa: E402
 except ImportError:
@@ -59,14 +55,9 @@ weight_matrices = ocp_runtime.weight_matrices
 cs = export_ocp.cs
 
 AXIS_NAMES = ("slew", "boom", "arm", "telescope", "rotator")
-# acados' own split of `time_tot`, plus the QP iteration count, per cycle. Issue
-# 129: `time_tot` alone cannot say which part of a cycle is expensive, and
-# `time_lin` versus `time_qp` is what decides whether the model or the QP is the
-# thing to attack. Seconds, except `qp_iter`.
-#
-# `time_sim` is the one that is not per-cycle: acados accumulates it over the
-# life of the solver, so it is differenced below and the column carries the
-# increment like the others. It is the integrator's share of `time_lin`.
+# acados' split of time_tot + QP iterations, per cycle (issue 129: time_tot alone
+# can't say model vs QP cost). Seconds except qp_iter; time_sim accumulates over
+# the solver's life so it's differenced below like the others.
 TIMING_FIELDS = ("time_lin", "time_sim", "time_qp", "time_qp_xcond", "qp_iter")
 CUMULATIVE_FIELDS = ("time_sim",)
 PASSIVE_NAMES = ("sway 1", "sway 2")
@@ -79,9 +70,8 @@ class RunData:
     """Closed-loop samples, including the terminal sample at ``time[-1]``."""
 
     time: np.ndarray
-    #: Virtual time, in seconds of nominal plan: where the reference origin sat
-    #: at each wall-clock sample. It advances by `T_s` only while the progress
-    #: rate is one; the gap between the two is what the MPC bought.
+    #: virtual time (s of plan): reference origin per wall-clock sample; advances
+    #: by T_s only at progress rate one -- the gap is what the MPC bought
     virtual_time: np.ndarray
     state: np.ndarray
     q_ref: np.ndarray
@@ -219,16 +209,15 @@ def positive(value: float, name: str, allow_zero: bool = False) -> None:
 
 def load_settings(arguments: argparse.Namespace) -> tuple[dict, dict]:
     """Load deployment YAML and apply command-line tuning overrides."""
-    # Same two reads `export_ocp.generate` makes, through the same helper, so the
-    # harness cannot drift from the exporter about what a deployment is.
+    # same two reads export_ocp.generate makes, through the same helper -- harness
+    # can't drift from the exporter about what a deployment is
     parameters = export_ocp.ox.read_ros_parameters(
         PACKAGE / "config" / "crane_mpc.yaml", "crane_mpc"
     )
     hydraulics = export_ocp.ox.read_ros_parameters(
         PACKAGE / "config" / "hydraulic_limits.yaml", "crane_mpc"
     )["hydraulics"]
-    # Deep-copy through YAML because the source mapping is nested and is also
-    # used to form the cache signature below.
+    # deep-copy through YAML: nested mapping also used to form the cache signature below
     parameters = yaml.safe_load(yaml.safe_dump(parameters))
     if arguments.dt is not None:
         parameters["Ts"] = arguments.dt
@@ -304,8 +293,7 @@ def parameter_vector(arguments: argparse.Namespace) -> np.ndarray:
     parameter[cs.P_TOOL_POSITION] = arguments.tool_position
     parameter[cs.P_PAYLOAD_MASS] = arguments.payload_mass
     parameter[cs.P_PAYLOAD_COM : cs.P_PAYLOAD_COM + 3] = arguments.payload_com
-    # Payload inertia remains zero: crane_msgs/Payload is a point mass in this
-    # stack, matching the runtime node's interpretation.
+    # payload inertia stays zero: crane_msgs/Payload is a point mass, matching the node
     return parameter
 
 
@@ -313,16 +301,14 @@ def create_solver(
     arguments: argparse.Namespace, parameters: dict, hydraulics: dict
 ) -> tuple[AcadosOcpSolver, object, np.ndarray]:
     """
-    Open this problem's compiled solver, compiling it once if need be.
+    Open this problem's compiled solver, compiling once if needed.
 
-    The node opens the same one out of the same cache: two callers of one
-    problem, so a driver run does not compile a second copy of it.
+    Node opens the same cache: two callers, one compile.
     """
     description = (export_ocp.DEFAULT_DESCRIPTIONS / export_ocp.DESCRIPTION).read_text()
     cache = ocp_runtime.solver_cache(parameters, hydraulics, description)
     if arguments.rebuild and cache.is_dir():
-        # A generated, ignored directory under this run's own cache root; no
-        # source and no user output can be selected here.
+        # generated, gitignored cache dir; no source/user output can land here
         shutil.rmtree(cache)
     ocp, scale, model = export_ocp.build_ocp(description, parameters, hydraulics)
     solver, _ = ocp_runtime.load_or_build(
@@ -335,8 +321,8 @@ def solver_stat(solver: AcadosOcpSolver, field: str) -> float:
     """
     One acados statistic per solve, as a scalar.
 
-    `qp_iter` comes back per SQP iteration, which under RTI is one entry; summing
-    keeps the column meaningful if that ever stops being true.
+    `qp_iter` comes back per SQP iteration (one entry under RTI); summing keeps
+    the column meaningful if that changes.
     """
     return float(np.sum(np.asarray(solver.get_stats(field), dtype=float)))
 
@@ -360,10 +346,9 @@ def reference_at(
     """
     Evaluate the reference and its first two derivatives at a **virtual** time.
 
-    The MPC evaluates the reference at its progress state, so what it needs per
-    stage is a local second-order model of the curve and not a sample of it. The
-    quintic is analytic, so both derivatives are exact here; the node takes them
-    off the cubic Hermite it already resamples with.
+    MPC needs a local second-order model per stage, not a sample -- quintic is
+    analytic so both derivatives are exact; node takes them off its own cubic
+    Hermite resample instead.
     """
     progress, rate, accel = minimum_jerk(time, duration)
     displacement = b - a
@@ -387,12 +372,10 @@ def make_numeric_functions(
     return dynamics, bias_u, outputs, static
 
 
-#: ERK4 substeps per control sample in the plant. C3 is stiff at `T_s`: the
-#: fastest eigenvalue of the linearised plant is `|lambda| T_s = 8.5` at an
-#: ordinary pose -- the telescope's `k = 3.5e6 N/m` against its effective mass --
-#: and ERK4 is stable only to about 2.8, so a single explicit step diverges in
-#: three samples and hands the solver a NaN guess. The solver itself is IRK and
-#: does not need this; the plant here is explicit and does.
+#: ERK4 substeps per control sample. Fastest eigenvalue of the linearised plant
+#: is `|lambda| T_s = 8.5` at an ordinary pose (telescope `k = 3.5e6 N/m` vs its
+#: effective mass), ERK4 stable only to ~2.8 -- one explicit step diverges in 3
+#: samples, NaN to the solver. Solver itself is IRK and doesn't need this.
 PLANT_SUBSTEPS = 10
 
 
@@ -407,8 +390,8 @@ def rk4_step(
     """
     Integrate one model-matched plant sample with substepped ERK4.
 
-    `substeps` is an argument so a co-simulation handing over an already short
-    `dt` does not pay ten inner steps for each of its own.
+    `substeps` is an argument so a co-simulation with an already short `dt`
+    doesn't pay ten inner steps per its own.
     """
 
     def evaluate(value: np.ndarray) -> np.ndarray:
@@ -435,15 +418,14 @@ def equilibrium_table(
     """
     Precompute continuous-branch passive equilibria over **virtual** time.
 
-    Indexed by seconds of nominal plan, so a run that spends the plan slowly
-    reads the same table at a slower rate rather than needing a second one. The
-    grid is the horizon's own, and `equilibrium_at` interpolates between knots.
+    Indexed by seconds of nominal plan, so a slow-spending run reads the same
+    table more slowly rather than needing a second one; grid is the horizon's
+    own, `equilibrium_at` interpolates between knots.
 
-    `guess` seeds the first solve and the rest continue from their
-    predecessors, so it picks the branch the whole table sits on. Zero suits a
-    pose hanging near the origin; one with the tilt near pi/2 --
-    `initialization_outside.yaml` is one -- converges onto another solution
-    entirely and the run simulates a machine holding its load sideways.
+    `guess` seeds the first solve, later ones continue from their predecessor,
+    picking the branch the table sits on. Zero suits a pose near the origin; a
+    tilt near pi/2 (`initialization_outside.yaml`) converges onto a different
+    solution, simulating a machine holding its load sideways.
     """
     times = dt * np.arange(count)
     q_eq = np.zeros((count, cs.K_PASSIVE_DOF))
@@ -525,14 +507,12 @@ def simulate(
     """
     Run the receding-horizon controller against a plant.
 
-    `reference` and `plant` default to this script's own: the A-to-B quintic of
-    `reference_at` and the model-matched ERK4 rollout. Passing either replaces one half of the run
-    and leaves the controller alone.
+    `reference`/`plant` default to this script's own quintic and model-matched
+    ERK4 rollout; passing either replaces that half, leaves the controller alone.
 
-    A `plant` is `(state, control, parameter, dt) -> state` over the full
-    `cs.NX`: whatever integrates the rigid rows still carries C3's lag, progress
-    and force rows, because the controller reads them back. `passive_guess`
-    picks the equilibrium branch and so where the run starts.
+    `plant` is `(state, control, parameter, dt) -> state` over the full `cs.NX`
+    -- must carry C3's lag/progress/force rows since the controller reads them
+    back. `passive_guess` picks the equilibrium branch, i.e. where the run starts.
     """
     dt = float(parameters["Ts"])
     intervals = export_ocp.shooting_intervals(parameters)
@@ -540,8 +520,7 @@ def simulate(
     base_parameter = parameter_vector(arguments)
     dynamics, bias_u, outputs, static_force = make_numeric_functions(model)
     if reference is None:
-        # `(q, dq, ddq)` at a virtual time is the whole contract a driver meets
-        # to put a different curve through the same controller.
+        # (q, dq, ddq) at a virtual time is the whole contract for a driver to swap curves
         def reference(time):
             return reference_at(time, a, b, arguments.move_duration)
 
@@ -550,10 +529,8 @@ def simulate(
         def plant(state, control, parameter, step_s):
             return rk4_step(dynamics, state, control, parameter, step_s)
 
-    # The equilibrium table is over **virtual** time and is read at whatever
-    # virtual time the horizon has reached, so a run that spends the plan slowly
-    # walks the same table more slowly rather than needing a second one. It is
-    # sized for the worst case, a horizon that never slows down at all.
+    # table is over virtual time, read at whatever virtual time the horizon reached;
+    # sized for the worst case, a horizon that never slows down
     table_count = steps + intervals + 1
     eq_times, q_eq_table = equilibrium_table(
         bias_u, base_parameter, reference, dt, table_count, passive_guess
@@ -569,9 +546,8 @@ def simulate(
     )
     # The plan is spent at nominal rate until a solve says otherwise.
     state[cs.X_PROGRESS_RATE] = export_ocp.K_PROGRESS_RATE_REFERENCE
-    # C3 block 3 starts where the machine starts: holding its own weight. There
-    # is no force measurement in the stack, so h_eff at the initial pose is the
-    # seed, and zero would start the run with the hydraulics switched off.
+    # C3 block 3 starts holding its own weight; no force measurement in the stack,
+    # so h_eff at the initial pose seeds it (zero would start with hydraulics off)
     state[cs.X_ACTUATED_FORCE : cs.X_ACTUATED_FORCE + cs.K_PLANNED_DOF] = np.asarray(
         static_force(state, base_parameter)
     ).reshape(-1)
@@ -595,30 +571,27 @@ def simulate(
     budget = float(parameters["solve_budget"])
     rate_max = float(parameters["limits"]["progress_rate_max"])
 
-    # **The reference origin, in virtual time.** This is what the progress state
-    # buys: the horizon is sampled from the reference here and not at the wall
-    # clock, and each cycle it advances by what the last solve decided its first
-    # interval was worth. Indexing by wall clock is what let the reference run
-    # away from a machine that had fallen behind.
+    # reference origin, in virtual time -- what the progress state buys: horizon
+    # samples from here, not wall clock; each cycle advances by what the last
+    # solve's first interval was worth. Wall-clock indexing let the reference
+    # run away from a machine that fell behind.
     origin = 0.0
 
     for step in range(steps):
         virtual_time[step] = origin
         q_ref_log[step], dq_ref_log[step], _ = reference(origin)
         q_eq_log[step] = equilibrium_at(eq_times, q_eq_table, origin)
-        # One evaluation per cycle at the measured state, held across the
-        # horizon -- what `ocp_solver.cpp` does, and the trade `mpc_node.cpp`
-        # already makes for `q_eq`.
+        # one evaluation per cycle at measured state, held across horizon --
+        # ocp_solver.cpp's approach, same trade mpc_node.cpp makes for q_eq
         tau_hold = np.asarray(static_force(state, base_parameter)).reshape(-1)
-        # The progress restart: `s` is pinned at zero every cycle and the origin
-        # above carries what the last one bought (`timber_crane_mpc.cpp:173-181`).
+        # progress restart: s pinned at zero every cycle, origin above carries
+        # what the last one bought (timber_crane_mpc.cpp:173-181)
         state[cs.X_PROGRESS] = 0.0
         solver.reset(reset_qp_solver_mem=1)
         for stage in range(intervals + 1):
-            # The stage's nominal virtual time: where `s` would be if nothing had
-            # slipped. Anchoring the reference expansion on the previous
-            # solution's progress instead was tried and measured worse -- the
-            # notes for issue 119 carry the numbers -- so this is `k T_s`.
+            # stage's nominal virtual time: where s would be if nothing slipped.
+            # anchoring on the previous solution's progress instead was tried and
+            # measured worse (issue 119 notes) -- so this is k*T_s
             nominal = stage * dt
             tau_virtual = origin + nominal
             q_ref, dq_ref, ddq_ref = reference(tau_virtual)
@@ -639,8 +612,7 @@ def simulate(
                 lower, upper = state_bounds(
                     parameters, equilibrium, state[: cs.K_PLANNED_DOF]
                 )
-                # `s`'s ceiling is what `nominal` seconds at the fastest rate
-                # allowed can have reached; the box is the caller's to close.
+                # s's ceiling: what nominal seconds at the fastest allowed rate can reach
                 upper[cs.X_PROGRESS] = nominal * rate_max
             solver.constraints_set(stage, "lbx", lower)
             solver.constraints_set(stage, "ubx", upper)
@@ -672,8 +644,8 @@ def simulate(
                     parameters, equilibrium, state[: cs.K_PLANNED_DOF]
                 )
                 upper[cs.X_PROGRESS] = stage * dt * rate_max
-                # Only the boxed prefix has bounds; the force states are held by
-                # constraint 6 and are left as the rollout produced them.
+                # only boxed prefix has bounds; force states held by constraint 6,
+                # left as the rollout produced them
                 boxed = lower.size
                 value[:boxed] = np.clip(value[:boxed], lower, upper)
             solver.set(stage, "x", value)
@@ -704,11 +676,10 @@ def simulate(
 
         if accepted:
             control = candidate_u[0]
-            # The QP's own iterate at node one, so it satisfies the linearised
-            # dynamics and not the integrated ones. Clamped to what the rate box
-            # makes reachable over one interval, exactly as `ocp_solver.cpp` does:
-            # an origin that jumped would skip plan the machine never tracked, and
-            # every state would still be finite while it did.
+            # QP's own iterate at node one (satisfies linearised, not integrated,
+            # dynamics), clamped to what the rate box reaches in one interval --
+            # same as ocp_solver.cpp; an unclamped jump would skip plan the machine
+            # never tracked, while staying finite
             advance = float(
                 np.clip(
                     candidate_x[1][cs.X_PROGRESS],
@@ -756,8 +727,8 @@ def simulate(
     q_ref_log[steps], dq_ref_log[steps], _ = reference(origin)
     q_eq_log[steps] = equilibrium_at(eq_times, q_eq_table, origin)
 
-    # `u` is a joint velocity at Psi's input under C3, not an acceleration, so
-    # the desired velocity is the command and nothing is integrated to get it.
+    # u is a joint velocity at Psi's input under C3, not acceleration -- desired
+    # velocity is the command directly
     desired_velocity = np.vstack(
         [
             states[0, cs.X_PLANNED_VELOCITY : cs.X_PLANNED_VELOCITY + cs.K_PLANNED_DOF],
@@ -1147,8 +1118,7 @@ def print_summary(data: RunData, parameters: dict) -> None:
     )
     print(f"  acados median ms:     {split}")
     print(f"  qp iterations median: {np.nanmedian(data.timing['qp_iter']):.0f}")
-    # This box is shared and the same solver has measured 12.6 ms at idle and 73
-    # at load 7.9, so a timing without its load is not a measurement.
+    # box is shared; same solver measured 12.6ms idle vs 73ms at load 7.9 -- load matters
     print(
         f"  load average 1/5 min: {os.getloadavg()[0]:.2f} / {os.getloadavg()[1]:.2f}"
     )

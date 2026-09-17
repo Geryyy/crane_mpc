@@ -1,15 +1,11 @@
 """
-The configured boom and arm boxes stay on the working branch of constraint 6
+Configured boom and arm boxes stay on the working branch of constraint 6
 (issues 126 and 128, ported here by 141).
 
-Constraint 6 reaches force space by dividing the joint torque by the diagonal
-transmission ratio, so a box that admits a sign change admits a row that bounds
-nothing: `wiki/mpc.md` §3 writes the extend and retract limits as acados' two
-separate sides, and a negative ratio exchanges them. Both ratios leave the
-working branch inside the *declared* range -- the arm at a dead point, the boom
-where its four-bar stops closing and the pose ceases to exist at all -- so what
-keeps the row well formed is the box and nothing else; the exported CasADi graph
-carries no guard. Hence a test on the configuration rather than on the code.
+A box admitting a sign change in the transmission ratio bounds nothing. Both
+ratios cross inside the declared range (arm dead point, boom four-bar
+closure), so the box alone keeps constraint 6 well formed -- the exported
+CasADi graph carries no guard. Test on configuration, not code.
 """
 
 from __future__ import annotations
@@ -25,14 +21,12 @@ PACKAGE = Path(__file__).resolve().parent.parent
 BOOM_ROW = 1
 ARM_ROW = 2
 
-# Where the arm's moment arm reverses, measured in issue 126 and reproduced by
-# `test_the_dead_point_has_not_moved`. Pivot and both cylinder attachments are
-# collinear there.
+# Where the arm's moment arm reverses (issue 126), reproduced by
+# `test_the_dead_point_has_not_moved`: pivot and both cylinder attachments collinear.
 ARM_DEAD_POINT = 1.8466647
 
-# Where the boom's four-bar stops closing: d = r_13 - r_23, the discriminant of
-# `wiki/hydraulics.md` §2.2 turns negative and `boom_ratio` is not finite below
-# it. Issue 128; `wiki/hydraulics.md` §2.2 rounds it to -1.184.
+# Where the boom's four-bar stops closing: d = r_13 - r_23's discriminant
+# turns negative and `boom_ratio` is not finite below it (issue 128).
 BOOM_CLOSURE = -1.1841609
 
 
@@ -75,11 +69,11 @@ def boom_box() -> tuple:
 
 def test_the_declared_default_box_is_the_shipped_one():
     """
-    The box has two homes and the tests above read one of them.
+    The box has two homes; the tests above read one of them.
 
-    `crane_mpc_parameters.yaml`'s default is what runs when the config file is not
-    passed, so a number fixed in one place only puts the singularities back in
-    reach with the suite green -- issue 137's divergence on a different row.
+    `crane_mpc_parameters.yaml`'s default runs when no config file is passed,
+    so fixing the number in only one place puts the singularities back in
+    reach with the suite green (issue 137's divergence, on a different row).
     """
     with open(PACKAGE / "crane_mpc_parameters.yaml") as stream:
         declared = yaml.safe_load(stream)["crane_mpc"]["limits"]
@@ -105,11 +99,11 @@ def test_the_configured_boom_box_is_inside_the_four_bars_closing_range(
     boom_ratio, boom_box
 ):
     """
-    The boom fails harder than the arm: below the closure the pose does not exist.
+    The boom fails harder than the arm: below the closure the pose doesn't exist.
 
-    A non-finite ratio makes constraint 6 non-finite, so the finiteness assert is
-    the one that matters; the sign assert covers the 0.033 rad above the closure
-    where the ratio is negative and large.
+    Non-finite ratio makes constraint 6 non-finite, so finiteness is what
+    matters; the sign assert covers the 0.033 rad above closure where the
+    ratio is negative and large.
     """
     lower, upper = boom_box
     values = np.array([float(boom_ratio(q)) for q in np.linspace(lower, upper, 2001)])
@@ -134,10 +128,10 @@ def test_the_four_bar_closure_has_not_moved(boom_ratio):
 
 def test_the_dead_point_has_not_moved(ratio):
     """
-    The box is pinned to a number, so the number it is clear of must be pinned too.
+    The box is pinned to a number, so the number it's clear of must be pinned too.
 
-    A hydraulics constant that moves the crossing down toward the configured
-    upper is otherwise silent until the sign test above starts failing.
+    A hydraulics constant moving the crossing toward the configured upper is
+    otherwise silent until the sign test above starts failing.
     """
     low, high = 1.5, 2.0
     for _ in range(60):

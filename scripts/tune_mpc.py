@@ -2,20 +2,18 @@
 """
 Run the MPC on a real plan, against a plant that is not its own model.
 
-`mpc_a2b.py` closes the loop on a quintic it invents and on the dynamics its own
-solver was generated from. This replaces both halves and keeps the controller:
-the reference is a `crane_planning` plan, the same one the node would be handed
-on `/crane/reference`, and the plant is MuJoCo.
+Replaces `mpc_a2b.py`'s invented quintic and generated-model plant: reference is
+a `crane_planning` plan (same as `/crane/reference`), plant is MuJoCo.
 
     ./scripts/tune_mpc.py --goal out
     ./scripts/tune_mpc.py --goal here --sway-scale 4 --viewer
 
-Any flag this parser does not know goes to `mpc_a2b`'s own, so every cost
-multiplier, `--horizon-knots`, `--dt` and `--enforce-budget` mean the same.
+Unknown flags pass through to `mpc_a2b` (cost multipliers, --horizon-knots, --dt,
+--enforce-budget, ...).
 
-C3 stays in Python: MuJoCo carries the rigid fourteen, the command lag, progress
-and force rows are rolled forward by the exported model, and it is that force
-state that MuJoCo is driven with.
+C3 stays in Python: MuJoCo carries the rigid fourteen; command lag, progress and
+force rows are rolled forward by the exported model, which drives MuJoCo via
+that force state.
 """
 
 from __future__ import annotations
@@ -34,8 +32,7 @@ import mpc_a2b  # noqa: E402
 cs = mpc_a2b.cs
 
 
-# The tuning scripts are scripts, not installed modules, so there is no import
-# path between the packages. `tune_planner` bootstraps the rest itself.
+# scripts, not installed modules -- no import path between packages; bootstrap manually
 sys.path.insert(0, str(PACKAGE.parent / "crane_planning" / "scripts"))
 
 import tune_planner  # noqa: E402
@@ -68,10 +65,9 @@ def plan_reference(plan):
     """
     Wrap a `crane_planning` plan as the callable `mpc_a2b.simulate` asks for.
 
-    The MPC evaluates at its progress state, between the plan's 40 ms samples,
-    so they are interpolated -- linearly, because the node itself resamples with
-    a cubic Hermite and a third curve here would be a third answer. Past the end
-    `np.interp` clamps onto the last sample, which is pinned to rest.
+    Interpolates linearly between the plan's 40ms samples (the node itself uses
+    cubic Hermite; a third curve here would be a third answer). Past the end
+    `np.interp` clamps onto the last sample, pinned to rest.
     """
     rows = list(cs.K_PLANNED_ROWS)
 
@@ -88,15 +84,12 @@ def mujoco_plant(description: str, model, q_tool: float, options):
     """
     Build the plant: MuJoCo for the rigid fourteen, the model for the rest.
 
-    C3's command lag, progress and force rows are states of the actuator, not of
-    the body, so the full state is still rolled forward by `rk4_step` and only
-    rows 0..13 are replaced -- consistent because the force rows integrate off
-    the positions MuJoCo just produced.
+    Full state still rolled forward by `rk4_step`, only rows 0..13 replaced --
+    force rows integrate off the positions MuJoCo just produced.
 
-    The two interleave every `--cosim-step` rather than once per control sample.
-    C3 block 3 is a stiffness and is stiff at `Ts`; holding the force across a
-    whole 60 ms while MuJoCo moves under it diverges, measured, by 7.5 rad on
-    the rotator.
+    Interleaved every `--cosim-step`, not once per control sample: holding the
+    force across a full 60ms while MuJoCo moves under it diverges, measured, by
+    7.5 rad on the rotator (C3 block 3 is stiff at `Ts`).
     """
     dynamics, _, _, _ = mpc_a2b.make_numeric_functions(model)
     plant = MujocoPlant(description, timestep=options.timestep)
@@ -129,9 +122,8 @@ def main(argv: list[str] | None = None) -> int:
     mpc = mpc_a2b.parse_arguments(forwarded)
     description, _, start, plan = tune_planner.plan_for(options)
 
-    # The plan decides the movement, so what `mpc_a2b` took from the command
-    # line is overwritten: A and B are the plan's endpoints, still what the
-    # control-safe box is checked against, and the duration is the plan's.
+    # plan overrides mpc_a2b's CLI: A/B are the plan's endpoints (still checked
+    # against the control-safe box), duration is the plan's
     rows = list(cs.K_PLANNED_ROWS)
     mpc.a, mpc.b = plan.q[0, rows], plan.q[-1, rows]
     mpc.move_duration = plan.duration

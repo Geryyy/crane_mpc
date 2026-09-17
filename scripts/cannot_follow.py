@@ -2,29 +2,27 @@
 """
 Give the MPC a reference it cannot follow, and show it spends time instead.
 
-This is issue 119's acceptance test and it is the whole point of the progress
-state. The same move is run twice on the **same generated solver**, differing
-only in the runtime price of spending time:
+Issue 119's acceptance test for the progress state. Same move run twice on the
+**same generated solver**, differing only in the price of spending time:
 
-* **time-scaling** -- the shipped `weights.progress_rate`. The optimizer may let
-  the progress rate fall below one, which holds the reference back and stops the
-  tracking residual from growing;
-* **time-indexed** -- the same problem with that weight raised until the rate is
-  pinned at one to several decimals. That *is* the controller this design
-  replaces: `wiki/robot_model.md` §4.4 before issue 119, and `crane_mpc` before
-  it, indexed the horizon by wall clock off the reference stamp.
+* **time-scaling** -- shipped `weights.progress_rate`. The optimizer may let the
+  progress rate fall below one, holding the reference back so the tracking
+  residual does not grow;
+* **time-indexed** -- same problem with that weight raised until the rate pins
+  at one to several decimals. This is the controller this design replaces: it
+  indexed the horizon by wall clock off the reference stamp.
 
-The reference is the ordinary A-to-B move compressed into a duration the machine
-cannot achieve, so the demanded joint velocities exceed `dq_a_max` and no input
-sequence tracks it. What has to come out is the progress rate dropping below one
-in the first run and **not** in the second, with the tracking error and its cost
-lower in the first -- the machine arriving late rather than never.
+Reference is the ordinary A-to-B move compressed into a duration the machine
+cannot achieve, so demanded joint velocities exceed `dq_a_max` and no input
+sequence tracks it. Expected: progress rate drops below one in the first run
+and not the second, with lower tracking error and cost in the first -- the
+machine arriving late rather than never.
 
     ./scripts/cannot_follow.py                     # the shipped weights
     ./scripts/cannot_follow.py --move-duration 1.0 # harder still
 
-Everything is reused from `mpc_a2b.py`: the same plant, the same solver cache,
-the same reference and the same closed loop. Nothing is simulated twice here.
+Reuses `mpc_a2b.py`'s plant, solver cache, reference and closed loop; nothing
+simulated twice here.
 """
 
 from __future__ import annotations
@@ -51,24 +49,19 @@ cs = mpc_a2b.cs
 #: this problem's other terms, small enough that the Hessian is not degenerate.
 PINNED_PROGRESS_SCALE = 1.0e6
 
-#: The move. It is deliberately **long, unreachable, and otherwise ordinary.**
+#: The move: deliberately **long, unreachable, and otherwise ordinary.**
 #:
-#: A pure slew sweep from -1.8 rad to +1.8 rad in six seconds. The quintic's peak
-#: rate is 1.875 x 3.6 / 6 = 1.125 rad/s against the slewing axis' control-safe
-#: 0.802, so the reference asks for **1.40x** what constraint 2 allows, and it
-#: asks for it for most of the six seconds. Every other axis holds the pose
-#: `mpc_a2b`'s default A-to-B starts in, which is the pose issues 116 and 117
-#: measured on.
+#: Pure slew -1.8 to +1.8 rad in six seconds. Quintic peak rate 1.875*3.6/6 =
+#: 1.125 rad/s vs the slewing axis' control-safe 0.802 -- **1.40x** the limit,
+#: for most of the six seconds. Other axes hold the pose `mpc_a2b`'s default
+#: A-to-B starts in (measured by issues 116/117).
 #:
-#: Two earlier shapes of this test were wrong and are worth not repeating.
-#: **Short and violent is the wrong test**: `mpc_a2b`'s default move compressed
-#: into 1.5 s does ask for 1.45x the arm's limit, but the reference is *finished*
-#: 1.5 s in, so from then on holding the plan back changes nothing -- there is no
-#: plan left to hold. **Large and multi-axis is a different test**: a six-second
-#: move to `(2.4, 1.4, 2.4, 1.8, 2.0)` folds the boom and arm toward the region
-#: `docs/features/mpc-full-authority/brief.md` says the MPC does not drive and
-#: issue 126 is about, and what it measures is that configuration and not the
-#: reference. This one moves one axis, inside its range, in the ordinary pose.
+#: Two earlier shapes were wrong. **Short and violent**: `mpc_a2b`'s default
+#: move compressed to 1.5s asks 1.45x the limit, but the reference *finishes*
+#: at 1.5s, so holding back changes nothing after. **Large and multi-axis**: a
+#: six-second move to `(2.4, 1.4, 2.4, 1.8, 2.0)` folds boom/arm into the region
+#: `docs/features/mpc-full-authority/brief.md` says the MPC does not drive --
+#: measures that configuration, not the reference.
 UNREACHABLE_START = (-1.80, 0.30, 0.80, 0.60, 0.00)
 UNREACHABLE_GOAL = (1.80, 0.30, 0.80, 0.60, 0.00)
 UNREACHABLE_DURATION = 6.0
@@ -254,11 +247,8 @@ def main() -> int:
             "and completes the move, so 'no NaN' is not the check",
         ),
     ]
-    # The pinned run's own convergence is **reported, not required**. It is the
-    # controller this design replaces, run against a reference that defeats it,
-    # and it failing to converge is a finding rather than a defect in this
-    # change: the QP it is handed has no good answer, so it hits HPIPM's
-    # iteration limit and the node falls back on the previous plan.
+    # pinned run's convergence is reported, not required: the QP has no good
+    # answer, hits HPIPM's iteration limit, node falls back -- a finding, not a defect
     print(
         f"\n  the time-indexed baseline: {indexed['not_converged']} non-converged "
         f"and {indexed['fallback']} fallback of {indexed['samples']} cycles"

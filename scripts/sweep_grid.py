@@ -8,7 +8,7 @@ writes beside its plot. Nothing here reimplements the problem.
 
 A cell is only a candidate if its horizon covers a sway period; a grid that does
 not cover one lets the optimizer excite an oscillation that develops after the
-horizon ends, whatever it times at (`wiki/mpc.md` Section 4).
+horizon ends, whatever it times at.
 """
 
 from __future__ import annotations
@@ -27,13 +27,10 @@ PACKAGE = Path(__file__).resolve().parent.parent
 HARNESS = PACKAGE / "scripts" / "mpc_a2b.py"
 OUT_ROOT = PACKAGE / "build" / "sweep_grid"
 
-# `crane_mpc/README.md`: the design value for the slowest sway period, order two
-# seconds. It has never been computed, and this script does not pretend otherwise
-# -- it is a screen, not a proof.
+# crane_mpc/README.md design value, slowest sway period ~2s, never computed. Screen, not proof.
 SWAY_PERIOD_S = 2.0
 
-# `config/crane_mpc.yaml`. Read rather than hardcoded would be better, but the
-# budget is the one number a caller most often wants to override per run.
+# config/crane_mpc.yaml value; hardcoded since callers most often override budget per run.
 DEFAULT_BUDGET_S = 0.03
 
 
@@ -59,7 +56,7 @@ def run_cell(knots: int, dt: float, extra: list[str]) -> dict | None:
     command = [
         sys.executable,
         str(HARNESS),
-        # Nobody reads these figures and they are most of a cell's wall clock.
+        # figures unused, dominate a cell's wall clock
         "--no-plot",
         "--horizon-knots",
         str(knots),
@@ -70,9 +67,7 @@ def run_cell(knots: int, dt: float, extra: list[str]) -> dict | None:
         *extra,
     ]
     completed = subprocess.run(command, capture_output=True, text=True)
-    # Sampled while this cell was the load: the box is shared and the same solver
-    # has measured 12.6 ms idle against 73 at load 7.9, so the number without its
-    # load says nothing.
+    # shared box; same solver measured 12.6ms idle vs 73ms at load 7.9 -- load matters
     load = os.getloadavg()[0]
     if completed.returncode != 0:
         tail = (completed.stderr or completed.stdout).strip().splitlines()
@@ -85,9 +80,7 @@ def run_cell(knots: int, dt: float, extra: list[str]) -> dict | None:
     if not rows:
         return {"failed": "the harness wrote no rows"}
 
-    # A run can carry a non-finite solve time -- a refused or fallback cycle
-    # reports one. Count them rather than letting a NaN poison the order, which
-    # silently makes `max` meaningless.
+    # non-finite solve time = refused/fallback cycle; count separately, a NaN would poison max
     raw = [float(row["solve_time_s"]) for row in rows]
     times = sorted(value for value in raw if math.isfinite(value))
     non_finite = len(raw) - len(times)
@@ -95,16 +88,14 @@ def run_cell(knots: int, dt: float, extra: list[str]) -> dict | None:
         return {
             "failed": f"every one of {len(raw)} cycles reported a non-finite solve time"
         }
-    # A status the harness reports as anything but converged is the number that
-    # matters, so carry the count rather than averaging it away.
+    # non-converged count matters more than an average that would hide it
     not_converged = sum(
         1 for row in rows if row.get("status", "") not in ("0", "ACADOS_SUCCESS")
     )
     fallbacks = sum(
         1 for row in rows if row.get("fallback", "").lower() in ("1", "true")
     )
-    # acados' own split, whatever of it the harness wrote. Read off the header so
-    # the two files cannot disagree about the column set.
+    # acados' own timing split; read off the header so files can't disagree on columns
     breakdown = {
         f"{column}_ms": 1e3 * median_column(rows, column)
         for column in rows[0]

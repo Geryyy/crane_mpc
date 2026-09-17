@@ -31,10 +31,8 @@ def refusal(parameters) -> str:
 def test_the_shipped_configuration_is_accepted(shipped):
     """A guard that rejects what the repo ships is a bug in the guard."""
     check_settings(shipped, shipped["hydraulics"])
-    # The guard on the weights is non-negativity, so the shipped zero sway offset
-    # weight passes. Issue 137 established that the zero is the value that should
-    # ship and moved the declared default onto it; the guard stays non-negative,
-    # because a positive one would refuse the configuration this repo ships.
+    # Guard on weights is non-negativity, so shipped zero sway offset weight
+    # passes (issue 137 moved the declared default to zero; guard stays >= 0).
     assert list(shipped["weights"]["q_u"]) == [0.0, 0.0]
 
 
@@ -60,7 +58,7 @@ def test_a_negative_weight_is_refused_and_names_the_entry(shipped):
 
 def test_the_only_price_on_spending_time_may_not_be_zero(shipped):
     """
-    Checked strictly, unlike every other weight: at zero the optimizer stops the
+    Checked strictly, unlike other weights: at zero the optimizer stops the
     plan for free wherever tracking is hard.
     """
     shipped["weights"]["progress_rate"] = 0.0
@@ -113,7 +111,7 @@ def test_a_hydraulic_number_that_is_not_physical_is_refused(shipped):
 
 
 def test_a_payload_the_dynamics_cannot_carry_is_refused():
-    # A declared empty payload is what an empty gripper is, and it is accepted.
+    # Declared empty payload is an empty gripper, and is accepted.
     check_payload(0.0, np.zeros(3))
     check_payload(120.0, [0.1, 0.0, -0.4])
 

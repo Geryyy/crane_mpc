@@ -1,91 +1,61 @@
 #!/usr/bin/env python3
 """
-Write the optimal control problem of `wiki/mpc.md` §1 as a generated acados solver.
+Write the crane MPC optimal control problem as a generated acados solver.
 
-This is `docs/features/cbs-ocp-python/grill.md` D1 and D8 for `crane_mpc`: the
-problem is *defined* here, in Python, over `crane_model/scripts/crane_symbolic.py`,
-and *shipped* as generated C under `generated/`. Nothing in this package assembles
-an OCP against the raw acados C API any more, and nothing hands acados a live
-`casadi::Function`.
+`docs/features/cbs-ocp-python/grill.md` D1/D8 for `crane_mpc`: problem defined
+here in Python over `crane_model/scripts/crane_symbolic.py`, shipped as
+generated C under `generated/`.
 
     ./scripts/export_ocp.py                # rewrite `generated/`
     ./scripts/export_ocp.py --check        # regenerate into a scratch tree and diff
 
-The algebra is **imported and never restated**. `crane_symbolic` carries the
-dynamics, the transmission and the output map; what is added here is the four
-things that make those an OCP and that the model has no opinion about:
-`wiki/mpc.md` §1's shooting problem, §2's nonlinear-least-squares residual, §3's
-seven constraints with §3.1's smoothing already inside the output map, and §4's
-grid. If this file ever needs an expression the module does not expose, the
-expression belongs in the module.
+Algebra is imported, never restated: `crane_symbolic` carries dynamics,
+transmission, output map; this file adds the shooting problem, the
+nonlinear-least-squares residual, seven constraints, and the grid.
 
-## What is baked and what stays runtime-settable
+## Baked vs runtime-settable
 
-Baked, because acados fixes them at code generation:
+Baked at code generation: constraint structure (boxed/soft rows, `h` row
+order), each `h` row's conditioning divisor (`constraint_scale` below), and
+the dynamics/description the solver was built from.
 
-* the *structure* of every constraint: which rows are boxed, which are soft, and
-  the row order of `h`;
-* the conditioning divisor of each `h` row -- see `constraint_scale` below;
-* the dynamics, and with them the description the solver was built from.
+**Payload is not baked** (issue 072): mass, COM and the six entries of
+`Theta_L` ride in `p`, written every stage by `crane_mpc/solver.py` -- lets a
+block picked up mid-run change the model with no reconfigure/regeneration,
+what `crane_msgs/SetPayload` at grasp/release needs.
 
-The **payload is not baked** (issue 072). It rides in `p` beside the pinned tool
-coordinate -- mass, centre of mass and the six independent entries of `Theta_L`,
-which is `crane_symbolic`'s own parameter vector bound whole -- and
-`crane_mpc/solver.py` writes it onto every stage before each solve. A block picked
-up mid-run therefore changes the model without a reconfigure and without a
-regeneration, which is what a behaviour tree calling `crane_msgs/SetPayload` at
-grasp and release needs.
+Runtime-settable at configure time: `W`, `yref`, `lbx`/`ubx`, `lbu`/`ubu`,
+`lh`/`uh`, slack prices, Levenberg-Marquardt, **and `N`/`T_s`** -- acados
+generates `<name>_acados_create_with_discretization(capsule, N, steps)`
+beside the fixed-`N` entry point, so the grid is a runtime argument (grill D5
+expected regenerate-only; it isn't).
 
-Runtime-settable on the generated solver, and set by `crane_mpc/solver.py` at
-configure time from the deployment's own parameters: `W`, `yref`, `lbx`/`ubx`,
-`lbu`/`ubu`, `lh`/`uh`, the `L1` slack prices `zl`/`zu`, the Levenberg-Marquardt
-term, **and `N` and `T_s`**. The last pair is the one grill D5 expected to become
-regenerate-only and did not: acados generates
-`<name>_acados_create_with_discretization(capsule, N, steps)` beside the fixed-`N`
-entry point, so the grid is an argument and the offline tests keep the short
-horizons they need. `N` and `T_s` are read from `config/crane_mpc.yaml` here only
-to write the artifact's *default* into `crane_mpc_ocp_generated.h`, off the same
-key the node reads.
+## `constraint_scale`: conditioning, not a limit
 
-## `constraint_scale`, and why it is a constant rather than a limit
+`h` rows are divided by a fixed number: in physical units they span eight
+decades (newtons ~1e5, m^3/s ~1e-3) and HPIPM fails on that Jacobian.
+`|F_cyl,i| <= F_i^max` goes in as `lh_i = -F_i^max / scale_i`, so a
+relief-pressure change moves `lh`/`uh`, not the generated expression. One
+derivation (`crane_mpc.problem`); the header just records it. Its C++ reader
+(`ocp_solver.cpp`) was deleted by issue 132, so the header is reviewer-only now.
 
-Every row of `h` is divided by a fixed number before it reaches acados, because
-written in physical units the rows span eight decades -- newtons near `1e5`
-beside cubic metres per second near `1e-3` -- and HPIPM fails on the constraint
-Jacobian that produces.
-
-The divisor is **conditioning and not a bound**. It is baked, and the bound is
-not: `|F_cyl,i| <= F_i^max` goes in as `lh_i = -F_i^max / scale_i`, so a
-deployment that moves its relief pressure moves `lh`/`uh` and leaves the
-generated expression alone. There is one derivation of it, in
-`crane_mpc.problem`, which both the artifact and the node's own startup build
-call; the header written beside the tree is that number *recorded*, not a second
-derivation of it. Its reader was `ocp_solver.cpp` and issue 132 deleted that, so
-the header is now part of what a reviewer diffs and nothing else.
-
-## There is no staleness guard, by decision -- except on the fit
+## No staleness guard, by decision -- except on the fit
 
 `config/hydraulics.yaml`, `config/hydraulic_limits.yaml` and the description
-all require this script to be re-run and the workspace rebuilt. **Nothing fails
-when one of them and the checked-in tree disagree.** grill §4 records that the
-alternative -- hashing the inputs into the generated code and comparing in a test,
-which is what `crane_model`'s own fixture does -- was considered and rejected, and
-that this is therefore a deliberate divergence from both existing generator
-scripts in this repository. `generated/README.md` says the same thing where a
-reader of the tree will find it.
+all require a re-run and rebuild; **nothing fails when one of them and the
+checked-in tree disagree** -- rejected hashing inputs into generated code and
+comparing in a test.
 
-**`c3_full_model.json` is the exception**, because it is the one input that
-exists twice and reaches the solver by two routes. Its digest is in the generated
-header, so a refit fails `--check`; its copies are compared, so a drift between
-them fails generation; and the description's damping is held against the fit's
-own `d`, so a refit that moved `k` and left `d` behind is refused, not shipped.
+**`c3_full_model.json` is the exception**: it exists in two copies reaching
+the solver by two routes. Digest is in the header (refit fails `--check`);
+copies are compared (drift fails generation); description damping is checked
+against the fit's `d` (moved `k` without `d` is refused, not shipped).
 
-## What is boilerplate lives in `crane_ocp`
+## Boilerplate lives in `crane_ocp`
 
-The scratch-JSON code generation, the pruning, the whitespace normalisation and
-the `--check` byte-compare are `crane_ocp/scripts/crane_ocp_export.py` -- the same
-module `crane_planning/scripts/export_timing_ocp.py` uses, because that half of
-the two exporters was the same code twice. What is left here is the problem.
+Scratch-JSON generation, pruning, whitespace normalisation and `--check`
+byte-compare are `crane_ocp/scripts/crane_ocp_export.py`, shared with
+`crane_planning/scripts/export_timing_ocp.py`.
 """
 
 from __future__ import annotations
@@ -100,18 +70,16 @@ import numpy as np
 
 PACKAGE = Path(__file__).resolve().parent.parent
 
-# Neither `crane_ocp`'s nor `crane_model`'s `scripts/` is installed (issue 070's
-# notes), so both shared modules are imported by path out of the source tree.
+# neither crane_ocp's nor crane_model's scripts/ is installed (issue 070); import by path
 sys.path.insert(0, str(PACKAGE.parent / "crane_ocp" / "scripts"))
 
 import crane_ocp_export as ox  # noqa: E402
 
 cs = ox.import_crane_symbolic(PACKAGE)
 
-# The problem itself is in the installed package, because the node builds it at
-# startup and `scripts/` is on no installed path. A from-scratch build runs this
-# script before `crane_mpc` is installed, so the source tree is the fallback --
-# `ox.import_crane_symbolic` does the same for `cs`.
+# problem lives in the installed package (node builds it at startup); a from-scratch
+# build runs this before crane_mpc is installed, so source tree is the fallback --
+# same as import_crane_symbolic does for cs
 try:
     from crane_mpc import problem  # noqa: F401
 except ImportError:
@@ -139,24 +107,20 @@ from crane_mpc.problem import (  # noqa: E402
     shooting_intervals,
 )
 
-# Where the description lives by default, so `scripts/mpc_a2b.py` can reach the
-# same file without re-deriving the path.
+# default description location, shared with scripts/mpc_a2b.py
 DEFAULT_DESCRIPTIONS = ox.default_descriptions(PACKAGE)
 
-# The header this script writes beside the solver, recording the numbers the
-# export chose.
+# header written beside the solver, recording the numbers the export chose
 GENERATED_HEADER = "crane_mpc_ocp_generated.h"
 
 # --- the C3 fit, and the places it lives --------------------------------------
 #
-# `load_actuator_fit` opens whichever copy `crane_model` carries -- the install
-# prefix by preference -- so the path it returns is a machine's and cannot go in
-# a generated header. This is the repository's name for the same file.
+# `load_actuator_fit` prefers the install-prefix copy; its path is machine-local,
+# can't go in a generated header -- this is the repo's name for the same file.
 FIT_LABEL = "crane_model/config/c3_full_model.json"
 
-# The fit's other homes. `wiki/` is not reachable from an installed package, so
-# `crane_model` carries a byte copy: one identification in several files with
-# nothing failing when they drift. This export is what fails now.
+# installed packages can't reach the source tree, so crane_model carries a byte
+# copy -- one identification, several files, nothing failed on drift until this export
 WIKI_FIT = (
     PACKAGE.parents[2]
     / "wiki"
@@ -165,18 +129,14 @@ WIKI_FIT = (
     / "c3_full_model.json"
 )
 
-# The copy that bites. `default_actuator_path` prefers the **install prefix**
-# while the description comes off the source tree unconditionally, so editing the
-# source fit and rebuilding only `crane_mpc` used to regenerate nothing and
-# report "current": `k` from one revision, `d` from another, every guard green.
+# default_actuator_path prefers the install prefix, description comes off source
+# tree unconditionally -- editing the source fit and rebuilding only crane_mpc used
+# to report "current" with k from one revision, d from another
 SOURCE_FIT = PACKAGE.parent / "crane_model" / "config" / "c3_full_model.json"
 
-# How far the description's damping may sit from the fit's `d` and still be the
-# same identification. A rounding allowance and nothing wider -- a refit moves
-# these by tens of percent, not tenths. The description states `d` to four
-# significant figures except for the rotator, which gets three (`484` for
-# `483.671816`), so the budget is 2e-3: measured gaps, worst last, are sw 1.8e-5,
-# sa 5.4e-5, ka 6.1e-5, ha 1.4e-4, ro 6.8e-4.
+# rounding allowance on damping vs fit's d (refit moves these by tens of percent);
+# d stated to 4 figures (3 for rotator: 484 for 483.671816) -> budget 2e-3;
+# measured gaps sw 1.8e-5, sa 5.4e-5, ka 6.1e-5, ha 1.4e-4, ro 6.8e-4.
 FIT_DAMPING_TOLERANCE = 2.0e-3
 
 
@@ -193,14 +153,11 @@ def fit_digest(fit: dict) -> str:
     """
     Return a content digest of the whole fit: which identification this is.
 
-    Over the **parsed** document rather than the bytes, because the two copies
-    differ by a trailing newline and are the same fit.
-
-    Every number is in it, including the `d` that reaches the dynamics through
-    the description and the diagnostics this export never reads. That is the
-    point: a refit moves the digest, the digest is in the generated header, so
-    `--check` fails until the tree is rewritten instead of the artifact shipping
-    under the previous fit's identity.
+    Parsed document, not bytes (two copies differ by a trailing newline, same
+    fit). Every number is in it, including `d`, which the description carries
+    into the dynamics without this export reading it directly: a refit moves
+    the digest, the digest is in the header, so `--check` fails until the tree
+    is rewritten rather than shipping under the previous fit's identity.
     """
     canonical = json.dumps(fit, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
@@ -210,10 +167,9 @@ def check_fit_is_one_artifact(fit: dict) -> None:
     """
     Refuse to generate while any two copies of the fit disagree.
 
-    `fit` is the copy that was actually read; every other copy that exists is
-    compared against it as a parsed document. A standalone checkout has no
-    `wiki/` and a source-only workspace has no install copy -- a missing
-    candidate is skipped, because it is not a drift.
+    `fit` is the copy actually read; every other existing copy is compared
+    against it as a parsed document. A standalone checkout or source-only
+    workspace may lack one candidate -- skipped, not treated as drift.
     """
     for other in (WIKI_FIT, SOURCE_FIT):
         if not other.is_file() or read_fit(other) == fit:
@@ -230,20 +186,17 @@ def check_fit(model: cs.CraneSymbolicModel, fit: dict) -> None:
     """
     Refuse to generate on a fit the solver must not be built from, by axis name.
 
-    Two failures, both per axis and both invisible in every quantity except the
-    machine's response:
+    Two failures, per axis, invisible except in the machine's response:
 
-    * **a non-finite `k`, `tau_v` or `d`.** `load_actuator_fit` refuses a missing
-      axis and a non-positive `k`, but `inf > 0` is true, so an infinity walks
-      through it into the dynamics. `d` has to be checked here or nowhere:
-      nothing upstream reads it, because it reaches the dynamics through the
-      description, and a NaN would defeat the comparison below rather than fail
-      it -- `nan > nan` is False, so the axis would pass;
-    * **a description whose damping is not this fit's `d`.** `d_i` and `k_i` are
-      one identification and only pair with each other, and they arrive by two
-      routes: `k` and `tau_v` out of the fit at full precision, `d` through the
-      description's `<dynamics damping>` at four figures. A refit that moved one
-      and not the other is a damping-ratio error, not a rounding one.
+    * **non-finite `k`, `tau_v` or `d`.** `load_actuator_fit` refuses a missing
+      axis and non-positive `k`, but `inf > 0` is true, so infinity walks into
+      the dynamics. `d` must be checked here: nothing upstream reads it (it
+      reaches the dynamics only through the description), and `nan > nan` is
+      False, so a NaN would pass rather than fail the comparison below;
+    * **description damping not this fit's `d`.** `d_i`/`k_i` are one
+      identification, arriving by two routes -- `k`/`tau_v` from the fit at
+      full precision, `d` through the description at four figures. A refit
+      that moved one and not the other is a damping-ratio error, not rounding.
     """
     actuator = model.actuator
     for axis, key in enumerate(cs.K_AXIS_KEYS):
@@ -289,12 +242,10 @@ def write_header(
     """
     Record what the export chose, beside the solver it chose it for.
 
-    The dimensions are acados' own, in `acados_solver_<name>.h`, and are not
-    repeated here. What is here is the grid, the row offsets this script chose,
-    and the conditioning divisors -- the three things that cannot be read off the
-    generated solver. It was written for `ocp_solver.cpp`, which issue 132
-    deleted; it is kept because it is the part of the artifact a reviewer can
-    actually read.
+    Dimensions are acados' own (`acados_solver_<name>.h`), not repeated here.
+    This carries the grid, row offsets and conditioning divisors -- what can't
+    be read off the generated solver. Written for `ocp_solver.cpp` (issue 132
+    deleted it); kept as the part of the artifact a reviewer can read.
     """
     path = output / GENERATED_HEADER
     guard = "CRANE_MPC_OCP_GENERATED_H_"
@@ -302,7 +253,7 @@ def write_header(
     lines = [
         "// Generated by `scripts/export_ocp.py`. Do not edit; re-run the script.",
         "//",
-        "// The OCP of `wiki/mpc.md` §1 as it was written, in the numbers the",
+        "// The OCP as it was written, in the numbers the",
         "// export chose for it. Dimensions are acados' own,",
         "// in `acados_solver_crane_mpc_<tool>.h`, and are deliberately not repeated.",
         f"#ifndef {guard}",
@@ -348,7 +299,7 @@ def write_header(
         + ", ".join(f"{{{row}, {column}}}" for row, column in cs.INERTIA_ENTRIES)
         + "}",
         "",
-        "// The blocks of `x`. C3 (`wiki/hydraulic_actuator_model.md` §1) adds two",
+        "// The blocks of `x`. C3 adds two",
         "// actuator blocks after the rigid-body state: the PT1 lagged command on",
         "// the axes whose fitted `tau_v` is positive -- the arm's is zero, which is",
         "// a pole at infinity, so it has no lag state and its `u_f` is `u` -- and",
@@ -495,16 +446,16 @@ current.
 machine's, and the PZS100 is the machine that has to run.
 
 `docs/features/cbs-ocp-python/grill.md` D6's second artifact is retired too, and
-the question it existed to settle is settled: dropping `wiki/mpc.md` §3's
+the question it existed to settle is settled: dropping the
 nonlinear cylinder-force and pump-flow rows moves this OCP's solve from 19 QP
 iterations and 7.15 ms to 20 and 7.02 ms. Those rows cost essentially nothing,
 so there is no case for shipping a second artifact without them.
 
 Inside the solver directory, `crane_mpc_pzs100_output.{c,h}` is not acados' --
-it is the output map of `wiki/nomenclature.md` §10 code-generated beside the
+it is the output map code-generated beside the
 solver, all six axes of `tau_a`, `F_cyl`, `v` and `Q`. acados generates only
 what it solves, which is five force rows and one pump row already divided by
-their conditioning constants; `wiki/mpc.md` §5.3 requirement 4 wants the
+their conditioning constants; exposing the residuals wants the
 residuals in physical units, so they are shipped too.
 
 acados' own generated `Makefile`, `main_*.c`, `acados_sim_solver_*` and
@@ -546,21 +497,18 @@ def generate(
 ) -> None:
     """Write the whole tree, from an empty directory."""
     output.mkdir(parents=True, exist_ok=True)
-    # The same file `load_actuator_fit` reads, read once more as a document: the
-    # checks below and the header's provenance are about the fit's *identity*,
-    # which is more than the three numbers the dynamics take out of it.
+    # same file load_actuator_fit reads, as a document: checks below need the fit's
+    # identity, not just the three numbers the dynamics use
     fit = read_fit(Path(cs.default_actuator_path()))
     check_fit_is_one_artifact(fit)
     ocp, scale, model = build_ocp(
         (descriptions / DESCRIPTION).read_text(), parameters, hydraulics
     )
-    # Before the code generation, so a bad fit stops generation rather than
-    # producing a tree and then complaining about it.
+    # before code generation, so a bad fit stops generation rather than complaining after
     check_fit(model, fit)
     tree = ox.generate_solver(ocp, output)
-    # `crane_symbolic`'s `z` over `(x, u, p)`, shipped beside the solver because
-    # acados generates only the rows it solves and `wiki/mpc.md` §5.3
-    # requirement 4 wants the residuals in physical units.
+    # crane_symbolic's z over (x, u, p), shipped beside the solver: acados generates
+    # only the rows it solves, but residuals in physical units are needed too
     ox.write_output_map(model, ocp.model.name, tree)
 
     write_header(

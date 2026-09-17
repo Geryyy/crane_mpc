@@ -1,17 +1,10 @@
 """
-The generated acados solver, opened and driven: `src/ocp_solver.cpp` in Python.
+The generated acados solver, opened and driven: `src/ocp_solver.cpp`'s Python counterpart.
 
-acados' own artifact is unchanged -- the same problem `problem.build_ocp`
-assembles, generated to C and compiled to a shared library, opened through
-`acados_template.AcadosOcpSolver`. What is here is the half the C++ called the
-binding: what is written onto the solver before a solve, what is read back
-after, and the two things that are not the solver -- the dead-time predictor and
-the static hold force.
-
-**The state is the OCP's own 25 rows end to end.** The C++ carried a 16-wide
-`crane_model::State` at this boundary and truncated the command-lag and force
-rows on every crossing, which is what made its dead-time predictor a coast at a
-frozen force (issue 125). There is no fixed-width state here to truncate to.
+The binding around acados' unchanged artifact: what is written before a solve, read
+back after, plus the dead-time predictor and static hold force. State is the OCP's
+own 25 rows end to end, unlike the C++'s 16-wide truncated `crane_model::State`,
+which coasted its dead-time predictor at a frozen force (issue 125).
 """
 
 from __future__ import annotations
@@ -112,7 +105,7 @@ class Solution:
 
 @dataclass
 class CostTerms:
-    """`wiki/mpc.md` §2 term by term, summed over the horizon."""
+    """The NLS cost, term by term, summed over the horizon."""
 
     q_a: float = 0.0
     dq_a: float = 0.0
@@ -130,7 +123,7 @@ class CostTerms:
 
 
 def weight_matrices(parameters: dict) -> tuple[np.ndarray, np.ndarray]:
-    """Stage and terminal nonlinear-least-squares weights, `wiki/mpc.md` §2."""
+    """Stage and terminal nonlinear-least-squares weights."""
     weights = parameters["weights"]
     planned = cs.K_PLANNED_DOF
     passive = cs.K_PASSIVE_DOF
@@ -176,12 +169,7 @@ def constraint_data(
 def position_box(
     parameters: dict, measured: np.ndarray
 ) -> tuple[np.ndarray, np.ndarray]:
-    """
-    Constraint 1's box with `q_a_margin`, never excluding `measured`.
-
-    A margin that excluded the pose the machine is in would make stage 1 chase a
-    position no input reaches in one interval.
-    """
+    """Position box with `q_a_margin`, never excluding `measured` (else stage 1 chases nothing)."""
     limits = parameters["limits"]
     margin = np.asarray(limits["q_a_margin"][: cs.K_PLANNED_DOF], dtype=float)
     lower = np.asarray(limits["q_a_lower"][: cs.K_PLANNED_DOF], dtype=float) + margin
@@ -193,12 +181,9 @@ def state_bounds(
     parameters: dict, equilibrium: np.ndarray, measured: np.ndarray
 ) -> tuple[np.ndarray, np.ndarray]:
     """
-    Build one stage's box over the boxed prefix of `x`.
+    One stage's box: rigid rows, lagged command, progress pair.
 
-    The rigid rows, the lagged command and the progress pair. The force rows
-    carry no box -- constraint 6 holds them, because their transmission is not
-    constant. `s`'s ceiling comes out at zero and is the caller's to move: it is
-    the one entry of this box that differs between stages.
+    Force rows are uncapped (constraint 6 holds them); `s`'s ceiling is zero, moved per stage.
     """
     limits = parameters["limits"]
     u_max = np.asarray(limits["u_max"][: cs.K_PLANNED_DOF], dtype=float)
@@ -232,12 +217,9 @@ def stage_reference(
     q_eq: np.ndarray, tau_ref: np.ndarray, terminal: bool
 ) -> np.ndarray:
     """
-    Build an acados stage or terminal residual reference.
+    Build a stage/terminal residual reference; tracking rows are zero (rides in `p`).
 
-    **The tracking rows are zero.** The reference is evaluated at the progress
-    state, so it rides in `p` and the residual carries the error itself.
-    `tau_ref` is `h_eff`: a zero reference there prices the machine holding its
-    own weight and buys droop (issue 117).
+    `tau_ref` is `h_eff`; zeroed, it prices holding own weight and buys droop (issue 117).
     """
     reference = np.zeros(problem.NY_TERMINAL if terminal else problem.NY)
     reference[
@@ -304,17 +286,14 @@ def configure_fixed_data(
     hydraulics: dict,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
-    Write what is runtime-settable and does not move during a run.
+    Write what is runtime-settable and fixed for a run.
 
-    Every weight, every bound of constraints 5, 6 and 7 and every slack price.
-    What moves per cycle -- `yref`, the state box and `p` -- is written in
-    `Ocp.solve`.
+    Every weight, bound of constraints 5/6/7, slack price; `yref`/box/`p` move per cycle.
     """
     intervals = problem.shooting_intervals(parameters)
     weight, terminal_weight = weight_matrices(parameters)
     lower_h, upper_h, extend, retract = constraint_data(model, scale, hydraulics)
-    # The input box is the five joint commands and then the progress
-    # acceleration, which is not an actuated axis and has its own bound.
+    # Input box: five joint commands plus progress acceleration (not an axis, own bound).
     u_max = np.concatenate(
         [
             np.asarray(parameters["limits"]["u_max"][: cs.K_PLANNED_DOF], dtype=float),
@@ -346,12 +325,7 @@ def configure_fixed_data(
 
 
 def _cache_root() -> Path:
-    """
-    Locate where solvers are compiled.
-
-    Outside the source tree, as `crane_planning`'s is: a built tree and a
-    shippable one are not the same tree.
-    """
+    """Where solvers are compiled: outside the source tree, as `crane_planning`'s is."""
     return (
         Path(os.environ.get("CRANE_MPC_OCP_CACHE", tempfile.gettempdir()))
         / "crane_mpc_ocp"
@@ -362,9 +336,7 @@ def solver_signature(parameters: dict, hydraulics: dict, description_xml: str) -
     """
     Hash what materially changes generated code.
 
-    `W`, every bound and every slack price are written through the runtime API,
-    so they are deliberately **not** in here: retuning a weight must reuse the
-    compiled solver, which is the whole tuning loop.
+    `W`/bounds/slack excluded (runtime API): retuning reuses the compiled solver.
     """
     digest = hashlib.sha256()
     generated = {
@@ -386,11 +358,7 @@ def _installed_acados(target) -> None:
     """
     Point acados_template at the installed headers and libraries.
 
-    The devcontainer keeps the acados source under `/opt` and installs under
-    `/usr/local`. Take `/usr/local` only when that install is complete:
-    acados_template needs `lib/link_libs.json` to know what to link against, and
-    the `/usr/local` copy does not always carry it. Without it, fall through to
-    acados_template's own `ACADOS_SOURCE_DIR` default, which does.
+    Use `/usr/local` only if `lib/link_libs.json` is present; else fall to `ACADOS_SOURCE_DIR`.
     """
     prefix = Path("/usr/local")
     if (
@@ -398,8 +366,7 @@ def _installed_acados(target) -> None:
         and (prefix / "lib" / "libacados.so").is_file()
         and (prefix / "lib" / "link_libs.json").is_file()
     ):
-        # acados 0.5.4 moved both onto `code_gen_options` and made the
-        # AcadosSim properties read-only, so the old spelling raises there.
+        # acados 0.5.4 moved both onto `code_gen_options`; AcadosSim properties are read-only.
         options = getattr(target, "code_gen_options", target)
         options.acados_include_path = str(prefix / "include")
         options.acados_lib_path = str(prefix / "lib")
@@ -412,13 +379,7 @@ def solver_cache(parameters: dict, hydraulics: dict, description_xml: str) -> Pa
 
 
 def _compiled(json_path: Path, library: Path, what: str) -> bool:
-    """
-    Is this cache entry a finished build, and say out loud when it is not.
-
-    A miss is minutes of `make`, and the usual cause is a cache exported for
-    another machine rather than a change anybody made. `crane_planning` prints
-    what diverged for that reason (`ocp.py:826-845`); this is no quieter.
-    """
+    """Is this cache entry a finished build; say so when not (a miss is minutes of `make`)."""
     if json_path.is_file() and library.is_file():
         return True
     missing = "no json" if not json_path.is_file() else "no shared library"
@@ -430,10 +391,9 @@ def load_or_build(
     ocp, parameters: dict, hydraulics: dict, description_xml: str, verbose: bool = False
 ) -> tuple[AcadosOcpSolver, dict]:
     """
-    Open the compiled solver for this problem, compiling it once if need be.
+    Open the compiled solver, compiling it once if need be.
 
-    Returns it with the dimensions acados wrote beside it: opened from a json
-    the solver keeps them private, and the startup check needs them.
+    Returned with the dims acados wrote beside it: json keeps them private, startup needs them.
     """
     cache = solver_cache(parameters, hydraulics, description_xml)
     json_path = cache / "ocp.json"
@@ -441,8 +401,7 @@ def load_or_build(
     library = cache / "code" / f"libacados_ocp_solver_{name}.so"
 
     def opened():
-        # acados refuses ocp=None since 0.5; the formulation is read back from the
-        # json the generate step wrote, and nothing is regenerated or rebuilt.
+        # acados refuses ocp=None since 0.5; read back from json, nothing regenerated.
         solver = AcadosOcpSolver(
             AcadosOcp.from_json(str(json_path)),
             json_file=str(json_path),
@@ -461,9 +420,7 @@ def load_or_build(
     ocp.code_export_directory = str(cache / "code")
     _installed_acados(ocp)
     AcadosOcpSolver.generate(ocp, json_file=str(json_path))
-    # acados emits exact nonlinear-cost Hessians even under GAUSS_NEWTON. Nothing
-    # registers them and they are by far the slowest files to compile; the
-    # checked-in tree prunes them for the same reason.
+    # acados emits exact nonlinear-cost Hessians under GAUSS_NEWTON; unused and slowest to compile.
     makefile = cache / "code" / "Makefile"
     makefile.write_text(
         "\n".join(
@@ -492,12 +449,10 @@ class ReplaySegment:
     seconds: float
 
 
-#: Both numbers are read from yaml, so `0.08/0.04` is as entitled to come out
-#: just under 2 as exactly 2, and a remainder of one ulp is not a third command.
+#: yaml floats: `0.08/0.04` can land just under 2; a one-ulp remainder is round-off.
 GRID_TOLERANCE = 1e-9
 
-#: A dead time worth a thousand intervals is a unit slip -- 60 read as seconds
-#: where 0.06 was meant -- and not a command queue.
+#: A delay of a thousand intervals is a unit slip (60 read as seconds for 0.06).
 MAX_REPLAY_INTERVALS = 1024.0
 
 
@@ -505,20 +460,9 @@ def replay_schedule(delay_s: float, step_s: float) -> list[ReplaySegment]:
     """
     Cut the dead time into one segment per command the machine was actually given.
 
-    Commands are issued on the `step_s` grid, so a `delay_s` that is not a whole
-    multiple of it has more than one in flight -- 60 ms on a 40 ms step is 1.5 of
-    them, and holding one input constant across the window describes a machine
-    that was commanded twice with the same number.
-
-    Oldest first, and **the partial interval is the oldest**. With `t = 0` the
-    solve instant, entry 0 covers `[-step_s, 0)` and entry 1 `[-2*step_s,
-    -step_s)`, so the remainder lands at the far end and belongs to the entry
-    `floor(delay_s / step_s)` old. Full steps first and the remainder last is the
-    natural misreading and misattributes it to a newer command.
-
-    Empty when there is nothing to replay: a non-positive or non-finite argument,
-    or a delay so deep it is a unit slip. The largest `age` it asks for is
-    `schedule[0].age`, which is how deep a history has to be kept.
+    Oldest first; the partial interval is oldest, belonging to entry
+    `floor(delay_s / step_s)`, not the newest. Empty for a non-positive, non-finite
+    or unit-slip-deep delay.
     """
     if not (np.isfinite(delay_s) and np.isfinite(step_s)):
         return []
@@ -537,11 +481,8 @@ def predictor_cache(signature: str, seconds: float, sample_time: float) -> Path:
     """
     Where this exact integrator's compiled library lives.
 
-    Keyed by `load_or_build`'s own signature and not a second, weaker one: the
-    predictor integrates the same `ocp.model`, so everything that rebuilds the
-    solver must rebuild this too -- a weaker key is how a stale predictor
-    survives a model change. The interval and the sub-step count are the rest of
-    what its generated code depends on.
+    Keyed by `load_or_build`'s own signature plus interval and sub-step count, so any
+    model rebuild rebuilds this too.
     """
     steps = _sub_steps(seconds, sample_time)
     return _cache_root() / f"predictor_{problem.TOOL}_{signature}_{seconds:g}_{steps}"
@@ -553,9 +494,8 @@ def _build_predictor(
     """
     Open an acados integrator over the same model, compiling it once if need be.
 
-    IRK for the reason the horizon is IRK: C3 is stiff at `T_s` (`|lambda| T_s`
-    is 8.5 against an explicit stability limit near 2.8), and the delay is longer
-    than one interval. Sub-stepped so no step exceeds `T_s`.
+    IRK like the horizon: C3 is stiff at `T_s` (`|lambda| T_s` = 8.5 vs an explicit
+    stability limit near 2.8); sub-stepped so no step exceeds `T_s`.
     """
     sim = AcadosSim()
     sim.model = ocp.model
@@ -571,10 +511,7 @@ def _build_predictor(
     library = tree / "code" / f"libacados_sim_solver_{ocp.model.name}.so"
     fresh = _compiled(json_path, library, f"the {seconds:g} s predictor")
     tree.mkdir(parents=True, exist_ok=True)
-    # acados defaults both of these to True, and its own reuse check is reached
-    # only when `generate is False` -- so the unset defaults ran CasADi codegen
-    # and `make` on every construction, warm tree or not. The tree name is the
-    # key, so acados' re-hash of the formulation is not asked for on top of it.
+    # acados only reuses when `generate is False`; unset, it codegens/makes every time.
     return AcadosSimSolver(
         sim,
         json_file=str(json_path),
@@ -586,7 +523,7 @@ def _build_predictor(
 
 
 class Ocp:
-    """The optimal control problem of `wiki/mpc.md` §1, solved once per cycle."""
+    """The optimal control problem, solved once per cycle."""
 
     def __init__(
         self,
@@ -596,9 +533,7 @@ class Ocp:
         *,
         verbose: bool = False,
     ) -> None:
-        # Before anything is built: generating and compiling a solver for a
-        # configuration that is then refused costs a minute for nothing, and a
-        # configuration that is *not* refused here is one no later stage checks.
+        # Refuse before building: a rejected config still costs a minute to compile.
         config.check_settings(parameters, hydraulics)
         self.parameters = parameters
         self.hydraulics = hydraulics
@@ -615,9 +550,7 @@ class Ocp:
         )
         self._check_dimensions()
 
-        # The residual, evaluated outside the solver for `wiki/mpc.md` §5.3
-        # requirement 4: acados reports one cost and the split is what says
-        # whether the expense is tracking, sway or effort.
+        # Residual outside the solver: acados reports one cost, this splits tracking/sway/effort.
         model = self._ocp.model
         self._residual = ca.Function(
             "y", [model.x, model.u, model.p], [model.cost_y_expr]
@@ -649,10 +582,7 @@ class Ocp:
         self.delay_s = delay
         #: How the delay window splits between the commands in flight (issue 125).
         self.replay = replay_schedule(delay, self.Ts)
-        # One integrator per distinct segment length, built here and not in the
-        # cycle: a miss is CasADi codegen and `make`, which a control callback
-        # cannot afford. The full-`T_s` segments are the stepper the cold start
-        # already uses; only the remainder is a length nothing else integrates.
+        # One integrator per segment, built here not in the cycle (too slow for a callback).
         self._segment_predictor = {
             segment.seconds: (
                 self._stepper
@@ -672,13 +602,7 @@ class Ocp:
     # -- what the problem is, checked against what was compiled -----------------
 
     def _check_dimensions(self) -> None:
-        """
-        Check the eleven dimensions `ocp_solver.cpp:48-71` asserts at compile time.
-
-        The compiled solver and this module derive the same numbers from the same
-        module, but they derive them at different times: a solver compiled before
-        the fit changed the lag-axis count is a solver for another problem.
-        """
+        """Check dims `ocp_solver.cpp:48-71` asserts: a stale solver is one for another problem."""
         expected = {
             "nx": cs.NX,
             "nbx": cs.NBX,
@@ -723,16 +647,13 @@ class Ocp:
         changed = mass_kg != self.payload_mass_kg or not np.array_equal(
             com, self.payload_com_m
         )
-        # Held here rather than trusted to the caller passing `guess=None`
-        # (`ocp_solver.cpp:1396-1400`): `h_eff` moves discontinuously at a
-        # grasp, so a plan that was warm was a plan for another model.
+        # Tracked here, not via caller's `guess=None`: `h_eff` jumps at a grasp.
         self._payload_changed = self._payload_changed or changed
         self.payload_mass_kg = float(mass_kg)
         self.payload_com_m = com
         self._base_parameter[cs.P_PAYLOAD_MASS] = float(mass_kg)
         self._base_parameter[cs.P_PAYLOAD_COM : cs.P_PAYLOAD_COM + 3] = com
-        # `crane_msgs/Payload` carries no inertia: a point mass, as the C++ node
-        # also read it.
+        # `crane_msgs/Payload` carries no inertia: a point mass.
         return changed
 
     def pin_tool(self, position: float) -> None:
@@ -740,12 +661,7 @@ class Ocp:
         self._base_parameter[cs.P_TOOL_POSITION] = float(position)
 
     def _model_parameter(self) -> np.ndarray:
-        """
-        Build the full stage parameter with an empty reference.
-
-        What the integrator needs is the model's own eleven and nothing this
-        problem appended.
-        """
+        """Full stage parameter, empty reference: the model's own eleven, nothing appended."""
         parameter = np.zeros(problem.NP)
         parameter[: cs.NP] = self._base_parameter
         return parameter
@@ -754,8 +670,7 @@ class Ocp:
         """
         `h_eff` at `x`: the force that holds the machine where it is.
 
-        Seeds C3's force state, and is the effort term's own reference -- priced
-        against zero the optimizer buys droop (issue 117).
+        Seeds C3's force state and effort term's reference; zeroed there, buys droop (issue 117).
         """
         value = self._static_force(x, self._base_parameter[: cs.NP])
         return np.asarray(value).reshape(-1)[: cs.K_PLANNED_DOF]
@@ -770,8 +685,7 @@ class Ocp:
                 f"the dead-time predictor answered {status_word(status)}"
             )
         predicted = predictor.get("x")
-        # acados reports a successful step whose state is NaN, and this is the
-        # state `x0` is built from (`ocp_solver.cpp:1156-1162`).
+        # acados can report success with a NaN state (`ocp_solver.cpp:1156-1162`).
         if not np.all(np.isfinite(predicted)):
             raise RuntimeError(
                 "propagating the measured state forward under the applied command "
@@ -783,9 +697,7 @@ class Ocp:
         """
         `x` carried forward through the transport dead time under `u`.
 
-        The whole state, actuator rows included: the plan is computed for the
-        instant it takes effect, and under C3 the input reaches `ddq` only
-        through the command-lag and force rows.
+        Whole state, actuator rows included: under C3, `u` reaches `ddq` only via lag/force rows.
         """
         x, u = _finite(x, u)
         if self._predictor is None:
@@ -794,16 +706,9 @@ class Ocp:
 
     def propagate_applied(self, x: np.ndarray, applied) -> np.ndarray:
         """
-        Carry `x` under the sequence of commands actually applied over the delay.
+        Carry `x` under the commands actually applied over the delay, newest first.
 
-        `applied` is newest first: `applied[0]` is the command in flight now,
-        `applied[1]` the one before it. `self.replay` cuts the delay against this
-        problem's own `T_s` and each segment is integrated under the command that
-        covered it, so this is one hold per command rather than one for all.
-
-        A history shorter than the delay clamps to its oldest entry, which is
-        exactly the single-input behaviour -- the first cycles after a reset have
-        nothing older to replay and do not invent one. An empty one is refused.
+        One hold per command (`self.replay`); a short history clamps oldest, empty is refused.
         """
         if len(applied) == 0:
             raise ValueError(
@@ -813,8 +718,7 @@ class Ocp:
             )
         state, *history = _finite(x, *applied)
         if not self.replay:
-            # Nothing to cut up: a zero delay, or an argument the single-input
-            # path is the one that owns the complaint about.
+            # Nothing to cut up: zero delay, or the single-input path complains.
             return self.propagate(state, history[0])
         for segment in self.replay:
             state = self._integrate(
@@ -843,12 +747,7 @@ class Ocp:
         return Guess(states, inputs)
 
     def shifted(self, solution: Solution) -> Guess:
-        """
-        Shift the accepted horizon one knot left, as the next warm start.
-
-        `s` restarts at zero every cycle while the reference origin the caller
-        tracks advances, so the progress row is re-origined by what was spent.
-        """
+        """Shift the horizon one knot left as the next warm start; progress row re-origined."""
         states = np.vstack([solution.states[1:], solution.states[-1:]])
         inputs = np.vstack([solution.inputs[1:], solution.inputs[-1:]])
         states[:, cs.X_PROGRESS] = np.maximum(
@@ -873,11 +772,7 @@ class Ocp:
                 f"the horizon carries {len(horizon)} knots and the problem is posed "
                 f"on {intervals + 1}"
             )
-        # The curvature is the sharp one of the four: the resample's Hermite
-        # second derivative carries `1/dt^2` in the *incoming* knot spacing,
-        # which nothing bounds from below, and it reaches every stage of the
-        # horizon through `p`, multiplied by `ds^2`, into a Gauss-Newton Hessian
-        # (`ocp_solver.cpp:1250-1266`).
+        # Curvature is the sharp one: Hermite's 2nd derivative carries `1/dt^2` (unbounded below).
         if not all(
             np.all(np.isfinite(block))
             for block in (
@@ -891,20 +786,15 @@ class Ocp:
                 "the reference, its curvature or the sway equilibrium carries a "
                 "value that is not finite"
             )
-        # `s` is virtual time *within one cycle*: it restarts here, and the
-        # caller's own reference origin is what carries between cycles.
+        # `s` is virtual time within one cycle; the caller's reference origin carries.
         x0[cs.X_PROGRESS] = 0.0
 
-        # acados' own reset zeroes the iterate and the QP memory, so nothing of
-        # the last cycle survives except what is written below.
+        # acados' reset zeroes the iterate and QP memory; nothing of last cycle survives.
         self.solver.reset(reset_qp_solver_mem=1)
 
         force_reference = self.static_hold_force(x0)
         measured = x0[cs.X_PLANNED_POSITION : cs.X_PLANNED_POSITION + cs.K_PLANNED_DOF]
-        # Every stage's box is the same box but for one entry: `s`'s ceiling is
-        # what `elapsed` seconds at the fastest rate allowed can have reached.
-        # Built once and that one entry moved, because fifty of these cost more
-        # than the solve can spare.
+        # Same box but for one entry, `s`'s ceiling; built once, moved per stage.
         rate_max = float(self.parameters["limits"]["progress_rate_max"])
         lower, upper = state_bounds(self.parameters, q_eq, measured)
         running = stage_reference(q_eq, force_reference, terminal=False)
@@ -925,8 +815,7 @@ class Ocp:
                 stage, "yref", terminal if stage == intervals else running
             )
             if stage == 0:
-                # Constraint 1's initial condition: every row, actuator states
-                # included, pinned at the state the plan is computed for.
+                # Initial condition: every row, actuator states included, pinned at x0.
                 self.solver.constraints_set(0, "lbx", x0)
                 self.solver.constraints_set(0, "ubx", x0)
                 continue
@@ -1001,10 +890,7 @@ class Ocp:
         """
         Read what the softened constraints spent, off `sl`/`su` per stage.
 
-        Row order is the problem's own: the sway pair and the sway-rate pair
-        first (`idxsbx`), then the five cylinder-force rows and the pump row.
-        Sway is reported as a fraction of its own allowance; the hydraulic rows
-        are already conditioned by `constraint_scale`.
+        Row order (`idxsbx`): sway pair, sway-rate pair, cylinder-force rows, pump row.
         """
         limits = self.parameters["limits"]
         q_u_max = np.asarray(limits["q_u_max"], dtype=float)
@@ -1045,12 +931,7 @@ class Ocp:
         return violation, penalty, used
 
     def cost_terms(self, solution: Solution, horizon, q_eq: np.ndarray) -> CostTerms:
-        """
-        `wiki/mpc.md` §2 term by term: what the plan spent, and on what.
-
-        Re-evaluated from the residual rather than read off the QP -- acados
-        reports one number and requirement 4 asks for the split.
-        """
+        """Cost, term by term: re-evaluated from the residual, since acados reports one number."""
         terms = CostTerms(slack=solution.slack_penalty)
         force_reference = self.static_hold_force(solution.states[0])
         diagonal = np.diag(self._weight)

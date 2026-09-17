@@ -27,16 +27,16 @@ current.
 machine's, and the PZS100 is the machine that has to run.
 
 `docs/features/cbs-ocp-python/grill.md` D6's second artifact is retired too, and
-the question it existed to settle is settled: dropping `wiki/mpc.md` §3's
+the question it existed to settle is settled: dropping the
 nonlinear cylinder-force and pump-flow rows moves this OCP's solve from 19 QP
 iterations and 7.15 ms to 20 and 7.02 ms. Those rows cost essentially nothing,
 so there is no case for shipping a second artifact without them.
 
 Inside the solver directory, `crane_mpc_pzs100_output.{c,h}` is not acados' --
-it is the output map of `wiki/nomenclature.md` §10 code-generated beside the
+it is the output map code-generated beside the
 solver, all six axes of `tau_a`, `F_cyl`, `v` and `Q`. acados generates only
 what it solves, which is five force rows and one pump row already divided by
-their conditioning constants; `wiki/mpc.md` §5.3 requirement 4 wants the
+their conditioning constants; exposing the residuals wants the
 residuals in physical units, so they are shipped too.
 
 acados' own generated `Makefile`, `main_*.c`, `acados_sim_solver_*` and

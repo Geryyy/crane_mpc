@@ -1,9 +1,8 @@
 """
 The settled verdict: two rates and a staleness flag, as one function.
 
-The one thing that must not happen is a degraded estimate reading as settled, so
-every path that is not a measurement is asserted here and not just the two that
-are.
+Must not happen: a degraded estimate reading as settled -- so every
+non-measurement path is asserted here, not just the two that are.
 """
 
 import math
@@ -32,7 +31,6 @@ def verdict(dq_u, age=0.01, max_state_age=MAX_STATE_AGE):
 def test_rates_inside_the_threshold_are_settled():
     settled = verdict([0.01, -0.039])
     assert settled.settled == SwaySettled.SETTLED_YES
-    # The rates the verdict was made from, so a consumer that disagrees sees why.
     assert list(settled.velocity) == [0.01, -0.039]
 
 
@@ -61,7 +59,6 @@ def test_a_changed_verdict_is_exempt_from_the_decimation():
     """What decimation exists not to drop: the cycle the load settles on."""
     unsettled = verdict([0.5, 0.0])
     settled = verdict([0.0, 0.0])
-    # Off cadence at a decimation of two, and it still goes out.
     assert reports.settled_is_due(2, 2, unsettled, settled)
     assert not reports.settled_is_due(2, 2, settled, settled)
 
@@ -100,9 +97,8 @@ def test_a_pose_without_a_rate_is_not_a_load_that_has_stopped_swinging(node):
     """
     `/joint_states` carries no validity flag and its velocity array is optional.
 
-    Taking the *pose's* stamp for the rate's would publish the zeros this node
-    starts with as a measurement of a still machine, on the one stream a grip is
-    meant to be gated on.
+    Taking the pose's stamp for the rate's would publish this node's starting
+    zeros as a measurement of a still machine, on the stream a grip gates on.
     """
     node._joints, node._passive_joints = list(ACTUATED), list(PASSIVE)
     node.on_joint_state(joint_state(node, velocities=False))

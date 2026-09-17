@@ -1,21 +1,16 @@
 """
 What `crane_mpc` refuses to start on.
 
-`src/ocp_solver.cpp`'s `check_settings` (`:479-616`) and `check_payload`
-(`:253-276`) in Python. They are a module of their own for the reason
-`crane_planning` keeps a `config.py`: a bad configuration is a refusal at
-startup, not a solve that answers NaN on the first cycle and a fault that blames
-the solver.
+Python port of `src/ocp_solver.cpp`'s `check_settings` (`:479-616`) and
+`check_payload` (`:253-276`): a bad configuration is a refusal at startup,
+not a NaN blamed on the solver.
 
-**The reasons are the deliverable, not the predicates.** Every message names the
-quantity, the value it carries and why the bound exists. "invalid weight" is
-worth much less than what a negative entry does to the Gauss-Newton Hessian.
+Reasons are the deliverable, not the predicates: every message names the
+quantity, its value, and why the bound exists.
 
-Nothing here reads a file or a parameter server. `parameter_dict` and
-`hydraulics_dict` re-shape the generated `Params` object -- whatever it came off
--- into the plain dicts `problem` and `solver` read, and `check_settings`
-refuses that shape. A yaml on a driver's disk arrives in the same shape without
-passing through them.
+Nothing here reads a file or parameter server: `parameter_dict`/
+`hydraulics_dict` reshape the generated `Params` object into the plain
+dicts `problem`/`solver` read; a yaml on disk arrives in the same shape.
 """
 
 from __future__ import annotations
@@ -27,10 +22,9 @@ from crane_model import symbolic as cs
 
 from .problem import K_PROGRESS_RATE_REFERENCE
 
-#: Vector-valued fields and how wide each must be. In the C++ these were
-#: `std::array` widths the compiler checked; out of a yaml the width is a
-#: runtime question, and a short list is a bound that silently covers fewer axes
-#: than the problem has rows.
+#: Vector-valued fields and how wide each must be: in C++, `std::array`
+#: widths the compiler checked; out of a yaml, a short list silently covers
+#: fewer axes than rows.
 WIDTHS = {
     "weights": {
         "q_a": cs.K_ACTUATED_DOF,
@@ -57,9 +51,8 @@ WIDTHS = {
 }
 
 
-#: The scalar, weight, limit and slack names `problem` and `solver` read, in the
-#: blocks they read them from. One list, so a parameter cannot be declared in
-#: the yaml and then quietly not reach the OCP.
+#: Scalar/weight/limit/slack names `problem`/`solver` read. One list, so a
+#: yaml parameter can't be declared and quietly miss the OCP.
 SCALARS = (
     "Ts",
     "levenberg_marquardt",
@@ -101,9 +94,8 @@ def parameter_dict(values) -> dict:
     """
     Shape the parameters as the problem reads them.
 
-    One shape, whether they came off the parameter server or out of a yaml on a
-    driver's disk. `horizon_length` is the one integer; the rest are floats or
-    sequences the OCP reads as they are.
+    One shape whether from the parameter server or yaml; `horizon_length` is
+    the one integer, the rest floats/sequences read as-is.
     """
     shaped = {name: float(getattr(values, name)) for name in SCALARS}
     shaped["horizon_length"] = int(values.horizon_length)
@@ -130,8 +122,8 @@ def _offender(block: dict, names, ok) -> str:
     """
     `field[row] = value` of the first entry `ok` rejects, or `""` if none is.
 
-    One helper so that a refusal over six weight vectors still names the entry
-    that caused it; the C++ named the group and the group is not the quantity.
+    One helper so a refusal over six weight vectors still names the entry
+    that caused it; the C++ only named the group.
     """
     for name in names:
         values = np.atleast_1d(np.asarray(block[name], dtype=float)).ravel()
@@ -151,9 +143,8 @@ def check_settings(parameters: dict, hydraulics: dict) -> None:
     """
     Refuse a configuration the OCP cannot be posed on.
 
-    `horizon_length >= 2` is **not** here: `problem.shooting_intervals` already
-    refuses it, and on the path `scripts/export_ocp.py` takes, which never
-    reaches this check.
+    `horizon_length >= 2` isn't here: `problem.shooting_intervals` already
+    refuses it on the path `scripts/export_ocp.py` takes.
     """
     for block, widths in WIDTHS.items():
         for name, width in widths.items():
@@ -295,10 +286,10 @@ def check_payload(mass_kg: float, com_m) -> None:
     """
     Refuse a payload the dynamics cannot carry.
 
-    No `valid` flag and no inertia, unlike `check_payload` in the C++:
-    `crane_msgs/Payload` carries neither, so an undeclared payload is refused
-    where it is declared (`reports.payload_from_message`) and the body
-    bound into `p` here is a point mass.
+    No `valid` flag or inertia, unlike the C++: `crane_msgs/Payload` carries
+    neither, so an undeclared payload is refused where it's declared
+    (`reports.payload_from_message`); the body bound into `p` is a point
+    mass.
     """
     mass = float(mass_kg)
     if not _non_negative(mass):

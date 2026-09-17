@@ -1,9 +1,9 @@
 """
 What the launch has to keep true, as files rather than as a running graph.
 
-This is the oracle for the two things a sim run would not notice: a forgotten
-`hydraulic_limits.yaml`, whose generated defaults equal the shipped values, and
-a merge order that decides a value by accident.
+Oracle for what a sim run wouldn't notice: a forgotten `hydraulic_limits.yaml`
+(generated defaults equal shipped values), and a merge order deciding a value
+by accident.
 """
 
 from __future__ import annotations
@@ -17,8 +17,7 @@ PACKAGE = Path(__file__).resolve().parent.parent
 LAUNCH = PACKAGE / "launch" / "crane_mpc.launch.py"
 MPC_CONFIG = PACKAGE / "config" / "crane_mpc.yaml"
 HYDRAULIC_LIMITS = PACKAGE / "config" / "hydraulic_limits.yaml"
-# Package root, not `src/`: the declaration moved there with the ament_python
-# conversion.
+# Package root, not `src/`: declaration moved there with the ament_python conversion.
 DECLARATION = PACKAGE / "crane_mpc_parameters.yaml"
 NODE_NAME = "crane_mpc"
 SHADOW = "shadow"
@@ -73,8 +72,7 @@ def test_the_launch_starts_the_node_with_both_configuration_files():
     call = _node_call()
     assert _strings(_keyword(call, "package")) == [NODE_NAME]
     assert _strings(_keyword(call, "executable")) == ["crane_mpc_node"]
-    # The node name is the key both files are written under, so a rename applies
-    # neither of them.
+    # Node name is the key both files are written under; a rename applies neither.
     assert _strings(_keyword(call, "name")) == [NODE_NAME]
     assert yaml.safe_load(MPC_CONFIG.read_text(encoding="utf-8")).keys() == {NODE_NAME}
     assert yaml.safe_load(HYDRAULIC_LIMITS.read_text(encoding="utf-8")).keys() == {
@@ -105,8 +103,8 @@ def test_neither_configuration_file_can_decide_the_others_values():
     )
     assert not mpc & limits, sorted(mpc & limits)
 
-    # And every declared hydraulic limit is carried by the machine file, so a new
-    # one cannot ship on a generated default that nobody would notice.
+    # Every declared hydraulic limit is carried by the machine file, so a new
+    # one can't ship on a silent generated default.
     declared = yaml.safe_load(DECLARATION.read_text(encoding="utf-8"))[NODE_NAME][
         "hydraulics"
     ]
@@ -116,9 +114,8 @@ def test_neither_configuration_file_can_decide_the_others_values():
 def test_the_launch_leaves_the_node_in_shadow():
     """Turning the shadow off is a separate, deliberate act (issue 146).
 
-    The launch now carries a `mode` argument, so the assertion is on its
-    default rather than on the word's absence: nothing an including profile
-    forgets to pass may leave shadow.
+    Asserts on the `mode` argument's default, not the word's absence: nothing
+    an including profile forgets to pass may leave shadow.
     """
     assert (
         _parameters(yaml.safe_load(MPC_CONFIG.read_text(encoding="utf-8")))["mode"]
@@ -139,9 +136,9 @@ def test_the_launch_leaves_the_node_in_shadow():
 def test_the_follower_stream_is_remappable_and_defaults_to_the_contract_name():
     """Shadow mode is judged on it, and a profile that renames it says nothing.
 
-    Without the argument the node subscribes a name no bringup that reuses the
-    timber spawners publishes, and every comparison reports
-    `follower.velocity_source: none` while the solver looks healthy.
+    Without it the node subscribes a name no bringup reusing the timber
+    spawners publishes; comparison reports `follower.velocity_source: none`
+    while the solver looks healthy.
     """
     source = _source()
     declaration = next(
@@ -162,8 +159,8 @@ def test_the_start_gate_is_declared_and_defaults_to_no_gate():
     """A gate that defaulted on would be a tree that plans and never moves.
 
     The behaviour tree sends no FollowJointTrajectory goal whenever the MPC
-    drives (issue 148), so the only safe default for a gate keyed on that goal
-    is the empty string, and the node reads the empty string as no gate at all.
+    drives (issue 148), so empty string is the only safe default, read as no
+    gate at all.
     """
     source = _source()
     declaration = next(

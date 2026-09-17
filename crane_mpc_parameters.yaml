@@ -2,40 +2,12 @@ crane_mpc:
   mode:
     type: string
     default_value: "shadow"
-    description: "Whether this node's solutions drive the machine or are only
-      judged. the design documentation puts slice 6 at 'shadow -> active' and user story 68 says
-      what shadow is for: the acados MPC runs before it is active so that its
-      solutions are judged *before* they drive the machine.
-      **In shadow nothing at all is published on /crane/mpc/horizon.** The
-      receiver subscribes that topic and  had to establish that a
-      horizon arriving while FOLLOW is chained cannot steal the command -- but
-      that is a property of an activation order, and shadow mode may not rest on
-      one. Everything else runs at rate: the reference is resampled, the OCP is
-      solved, wiki/mpc.md warm start, fallback and escalation all apply, and
-      the message that would have gone out is published on this node's private
-      `~/shadow_horizon` instead. Only the last hop is withheld. `~/shadow_comparison`
-      then carries user story 68's judgement -- the shadow command against the
-      velocity the follower actually produced on /crane/controller_state, per
-      axis, at the same instant, beside the constraint activity and the solve's
-      verdict -- and /crane/mpc/solver_health names the mode, so a shadow node
-      that is deliberately quiet is distinguishable from one that has died
-      (wiki/control_architecture.md separates 'never connected' from 'died';
-      this is the third thing).
-      **Not read_only, and this is the third parameter here that is not**: the
-      transition is not this node's decision. ROS 2 Interfaces 4's 'One command
-      path' ends by saying that which path is live is the supervisor's decision
-      alone and that the two never drive at once, so the supervisor's mode
-      arbitration has to be able to move this at runtime, which is .
-      Today it defaults to shadow and no profile sets it otherwise; crane_bringup's
-      launch contract asserts both. A switch in either direction cold starts the
-      next solve and drops the warm start, the horizon the fallback would shift,
-      6's failure count and the publication cadence -- control_architecture 7.1
-      rule 3, on the one event that is this node's equivalent of a controller
-      reactivation.
-      **Judging the solutions is a human gate** (the design documentation): this node produces the
-      comparison and scores nothing against it. There is no per-axis tracking
-      tolerance to score against yet and the design documentation keeps the weights conservative
-      until the slice 1b campaign delivers numbers."
+    description: "In shadow nothing goes out on /crane/mpc/horizon; everything else runs at rate and the
+      message goes to `~/shadow_horizon`, with `~/shadow_comparison` carrying the judgement (shadow command
+      against the follower's velocity on /crane/controller_state, per axis, same instant). solver_health
+      names the mode, so a quiet node is distinguishable from a dead one. Not read_only: which command path
+      is live is the supervisor's runtime decision. A switch either way cold-starts the next solve, dropping
+      warm start, fallback horizon, failure count and cadence. Judging is a human gate."
     validation:
       one_of<>: [["shadow", "active"]]
 
@@ -43,53 +15,23 @@ crane_mpc:
     type: string
     default_value: ""
     read_only: true
-    description: "The FollowJointTrajectory action whose accepted goal releases
-      this node to drive, or empty for no gate at all. Empty is the default and
-      is the deployed behaviour: /crane/reference arriving *is* the go signal,
-      because the planner publishes it and nothing else does, and the behaviour
-      tree that drives a deployment plans exactly when it wants motion.
-      **This exists for the human-driven bench.** The RViz motion-planning panel
-      splits those two into a 'Calculate' button and a 'Start trajectory' one,
-      and on the cbs_mpc_active profile the split stopped meaning anything: the
-      planner publishes the reference from inside its a2b_movement service, so
-      the machine left on Calculate and the Start button sent a second command
-      to a controller already moving. Named rather than a bool, because the node
-      cannot otherwise know *whose* goal to wait for -- the a2b and the grasping
-      trajectory controllers each have one -- and the name carries which.
-      What is subscribed is that action's own `<name>/_action/status` topic,
-      which is an ordinary latched GoalStatusArray, so nothing here is an action
-      client and no goal is sent, accepted or reported on by this node: it reads
-      whether the controller has one. ACCEPTED or EXECUTING opens the gate, and
-      anything else -- succeeded, aborted, cancelled, never sent -- closes it.
-      The reference is **not** anchored while the gate is closed, deliberately:
-      a plan held for a minute before a human presses the button must still
-      start at its first knot, and `max_reference_age` measures from the end of
-      a plan that has begun being spent.
-      **That protection is scoped to the wait before the first goal, and the
-      asymmetry is the one thing to know here.** A plan whose goal was accepted
-      and then aborted or cancelled part-way *has* been anchored, so it goes on
-      being spent while the gate is shut, and pressing the button again some
-      seconds later gets the `max_reference_age` refusal rather than the rest of
-      the motion. That is the aging contract and not an oversight -- a plan is
-      spent in virtual time whether or not anything is following it, and
-      restarting a half-executed one at its first knot would command the machine
-      back to where it set off -- but it does mean the recovery from an abort is
-      to plan again, not to press start again.
-      read_only because the subscription is made once, at configuration, and a
-      name that moved afterwards would leave this node watching a controller
-      nobody commands -- which reads exactly like a button that does nothing."
+    description: "FollowJointTrajectory action whose accepted goal releases this node to drive; empty (the
+      deployed default) means /crane/reference arriving *is* the go signal. For the RViz bench, where
+      Calculate already publishes the reference and Start then sent a second command to a moving controller.
+      Named, not a bool: a2b and grasping each have an action. Reads that action's `<name>/_action/status`
+      GoalStatusArray -- no action client; ACCEPTED/EXECUTING opens, anything else closes. read_only: the
+      subscription is made once at configuration.
+      **Footgun, deliberate**: the reference is not anchored while the gate is shut *before the first goal*,
+      so a held plan still starts at knot 0 -- but a goal accepted then aborted has anchored it, so pressing
+      start again seconds later gets the `max_reference_age` refusal. Recover by planning again."
 
   Ts:
     type: double
     default_value: 0.04
     read_only: true
-    description: "T_s, s. The control cycle of wiki/mpc.md and the spacing of
-      the horizon's knots, and -- because 4 has f_s = 1/T_s, one publication per
-      cycle -- the period this node publishes on. ROS 2 Interfaces 4 fixes the
-      rate of /crane/mpc/horizon at 25 Hz, which is this value and nothing else;
-      a deployment that changes it is changing the interface, so the node warns
-      at startup when 1/Ts is not 25 Hz rather than quietly running at another
-      rate."
+    description: "T_s, s -- control cycle, horizon knot spacing and publication period. The interface fixes
+      /crane/mpc/horizon at 25 Hz, so the node warns at startup when 1/Ts is not 25 Hz rather than quietly
+      running at another rate."
     validation:
       gt<>: [0.0]
 
@@ -97,36 +39,17 @@ crane_mpc:
     type: double
     default_value: 0.06
     read_only: true
-    description: "The transport delay the measured state is carried forward by
-      before the OCP is solved from it, s. wiki/mpc.md and wiki/system.md
-      'Computation delay': the plan is computed for the instant it will actually
-      take effect, so x_0 is the measured state propagated forward under the
-      command already applied and the horizon *starts* where the executing spline
-      will be. wiki/implementation/parameters.md [!important] is explicit that
-      this must be the **measured delay and not one step**: the deployed path is
-      25 ms sensor-to-controller plus 25 ms controller-to-valve, so the round trip
-      is about 50 ms against a 40 ms step, and substituting T_s here would leave a
-      quarter of a cycle of pure phase uncorrected. That 50 ms is where this
-      default comes from and it is a deployed figure rather than a guess.
-      **Two things it does not cover.** The IMU adds a further 10 ms on the sway
-      state specifically (6 again) and this is one delay for the whole state, so
-      the passive rows are propagated 10 ms short; and the solve's own duration is
-      not added, because it is not known until the solve has happened. Zero is a
-      legal value and means no delay has been measured on this deployment: nothing
-      is propagated, which is honest, and it is a different answer from one step.
-      **This is C3 block 1** (wiki/hydraulic_actuator_model.md:48), the transport
-      dead time, and it is modelled here in the predictor and nowhere else. The
-      plant model in crane_model/crane_model/symbolic.py carries blocks 2, 3 and 5
-      and deliberately carries no delay: a second one inside the horizon would
-      double-count this one. C3 pins the dead time at 60 ms common to all six
-      axes, which is where this default now comes from -- it replaces the 50 ms
-      deployed round trip, and the 10 ms difference is inside the uncertainty of
-      both numbers. docs/features/mpc-full-authority/brief.md 2.2 is the decision.
-      The propagation replays the commands actually in flight rather than
-      holding one constant across the delay (issue 125): 60 ms over a 40 ms step
-      is 1.5 intervals, so the older of the two owns the 20 ms at the far end of
-      the window. Each segment is integrated under the command that covered it;
-      nothing is interpolated between them."
+    description: "Transport delay x_0 is carried forward by before solving, s, so the horizon starts where
+      the executing spline will be. Must be measured, not one step: the deployed path is 25 ms
+      sensor-to-controller plus 25 ms controller-to-valve, so T_s would leave a quarter cycle of phase
+      uncorrected. 60 ms is C3 block 1, common to all six axes; it supersedes the 50 ms round trip, the
+      difference being inside the uncertainty of both. Modelled here only -- crane_model's symbolic.py
+      carries C3 blocks 2, 3, 5 and no delay, since a second would double-count.
+      Not covered: the IMU's further 10 ms on the sway state (one delay for the whole state, so the passive
+      rows propagate 10 ms short) and the solve's own duration. Zero is legal and means no delay measured on
+      this deployment -- different from one step. Propagation replays the commands actually in flight (issue
+      125): 60 ms over a 40 ms step is 1.5 intervals, the older command owning the far 20 ms; each segment
+      integrated under its own command, nothing interpolated."
     validation:
       gt_eq<>: [0.0]
 
@@ -134,27 +57,14 @@ crane_mpc:
     type: bool_array
     default_value: [true, true, true, true, true, true]
     read_only: true
-    description: "Per actuated axis, where x_0's **velocity** comes from: true is
-      the measurement on /joint_states, false is the model's own propagation of
-      the previous cycle. Positions are always measured and so are both passive
-      rows; this touches the planned velocity rows and nothing else.
-      Marc's node has the same switch as an opt-in list
-      (timber_crane_ilqr_model `velocity_feedback_joints`) and deploys it with
-      the slewing axis alone on measurement, so boom, arm, telescope and rotator
-      run **open-loop** in velocity. That is deliberate: hydraulic velocity
-      signals are noisy, and each axis now carries a PT1 command-lag state and a
-      force state that integrate that noise.
-      All-true is the default and is bit-identical to the node before this row
-      existed -- the carry is only ever written on an axis whose entry is false.
-      **read_only**, unlike `mode`, `solve_budget` and
-      `solver_health_decimation`: flipping an axis mid-move steps that row of
-      x_0 by whatever the two sources currently disagree on, and that step
-      propagates into the force and lag states, the warm start and the command.
-      This is a commissioning choice per deployment, not a knob to turn under a
-      moving machine.
-      The tool row is inert: the tool is pinned and has no velocity row in the
-      OCP's state at all. It is kept six wide for symmetry with every other
-      per-axis row here."
+    description: "Per actuated axis: true takes x_0's velocity row from /joint_states, false from the model's
+      own propagation. Positions and both passive rows are always measured. Marc's node
+      (timber_crane_ilqr_model `velocity_feedback_joints`) deploys slewing alone on measurement and runs the
+      rest open-loop, deliberately: hydraulic velocity is noisy and each axis now carries PT1 lag and force
+      states that integrate that noise. All-true is bit-identical to the node before this row existed.
+      read_only: flipping mid-move steps that row of x_0 by whatever the two sources disagree on, and the
+      step propagates into the force and lag states, the warm start and the command. The tool row is inert
+      (tool pinned, no velocity row in the OCP state), kept six wide for symmetry."
     validation:
       fixed_size<>: [6]
 
@@ -162,19 +72,10 @@ crane_mpc:
     type: double_array
     default_value: [0.19, 0.06, 0.08, 0.10, 0.53, 0.13]
     read_only: true
-    description: "How far a model-carried velocity may sit from the measured one
-      before it is reported, per axis, rad/s (m/s on the telescope). An
-      open-loop state that has quietly walked away from the machine is the
-      failure mode `dq_a_feedback` buys, so the difference is computed on every
-      carried axis, warned about when it crosses this, and published per axis on
-      ~/shadow_comparison. Nothing is corrected: the carry is the configured
-      behaviour and substituting the measurement on a threshold would be a
-      second, unconfigured controller.
-      A quarter of `limits.dq_a_max`, which is a **judgement and not a
-      measurement** -- no open-loop drift has been recorded on this stack. The
-      units differ per row for the same reason dq_a_max's do, which is why this
-      is an array and not a scalar. Axes on measurement never reach it, since
-      their difference is identically zero."
+    description: "Model-carried vs measured velocity gap that gets reported, per axis, rad/s (m/s telescope);
+      warned and published on ~/shadow_comparison. **Nothing is corrected** -- substituting the measurement
+      on a threshold would be a second, unconfigured controller. A quarter of `limits.dq_a_max`, a judgement
+      and not a measurement: no open-loop drift has been recorded on this stack."
     validation:
       fixed_size<>: [6]
       lower_element_bounds<>: [0.0]
@@ -182,50 +83,23 @@ crane_mpc:
   solve_budget:
     type: double
     default_value: 0.03
-    description: "wiki/mpc.md solve budget, s. **Not read_only**, and one of
-      only three parameters here that are not: it decides what is done with an
-      answer rather than which problem is built, it touches nothing in the acados
-      problem, and 4 states it as a design value while the design documentation leaves the
-      measurement that would confirm it human-run -- so a commissioning engineer
-      has to be able to move it against a measured solve time without restarting
-      the horizon producer. Under 30 ms leaves margin
-      inside the 40 ms cycle. The solve itself is **not interrupted** at it:
-      acados' own `timeout_max_time` exists on its SQP solver and not on the RTI
-      one, an unknown option field makes acados exit rather than refuse, and a
-      half-finished RTI step is not a plan anyway. What this number decides is
-      whether the finished step is **applied**, which is wiki/mpc.md
-      requirement 3 -- 'bound the solve time below the cycle time, with margin,
-      and define what is applied when the budget is exceeded'. A solve past it
-      comes back as SOLVE_BUDGET_EXCEEDED, is not published as a horizon, and 6's
-      previous solution shifted by one step goes out in its place; the overrun is
-      reported on /crane/mpc/solver_health."
+    description: "Solve budget, s; 30 ms leaves margin inside the 40 ms cycle. Not read_only -- it decides
+      what is done with an answer, not which problem is built, so it can be moved against a measured solve
+      time without restarting the producer. The solve is **not interrupted** at it: acados' `timeout_max_time`
+      is SQP-only, an unknown option field makes acados exit, and a half-finished RTI step is not a plan.
+      Over budget comes back as SOLVE_BUDGET_EXCEEDED, is not published, and the previous solution shifted by
+      one step goes out instead."
     validation:
       gt<>: [0.0]
 
   solver_health_decimation:
     type: int
     default_value: 2
-    description: "How many solves this node publishes one
-      /crane/mpc/solver_health report per. wiki/implementation/ros_interfaces.md
-      4 records the reason one rate up, for the inner loop's own health stream:
-      the loop does not spend the real-time boundary on four messages in five
-      nobody reads (the design documentation). The same arithmetic applies here one rate down. The
-      cycle is 25 Hz and the consumer of this stream is the 20 Hz supervisor, so
-      every solve would be one message in two that nothing reads -- and the one
-      that *is* read costs an evaluation of the stage residual at every shooting
-      node, because the per-term cost of 2 is what requirement 4 asks be exposed.
-      Two is therefore the default and it puts the stream at 12.5 Hz, the largest
-      integer decimation of the cycle that does not run ahead of its consumer.
-      **A change of verdict is exempt from it, and a standing verdict is not**: a
-      fault goes out on the cycle it first happens and so does its clearing,
-      because decimation exists to drop messages nobody reads and neither of those
-      is one of them, but a fault that persists then falls back to this cadence --
-      the twenty-fifth identical FAULT_SOLVER in a second tells a 20 Hz consumer
-      nothing the first did, and exempting it would put the stream at the full
-      cycle rate and add a residual evaluation per shooting node on top of every
-      over-budget cycle, which is requirement 3's own budget spent on repeating a
-      report in the one regime with none to spare. One publishes every solve, which
-      is what a bring-up or a recording wants and is not the deployed value."
+    description: "Solves per /crane/mpc/solver_health report. Cycle 25 Hz, consumer 20 Hz, and each report
+      costs a stage-residual evaluation at every shooting node, so 2 (12.5 Hz) is the largest decimation not
+      running ahead of its consumer. A change of verdict is exempt, a standing one is not: the twenty-fifth
+      identical FAULT_SOLVER in a second tells a 20 Hz consumer nothing, and exempting it would spend the
+      solve budget in the one regime with none to spare. 1 is a bring-up value, not the deployed one."
     validation:
       gt_eq<>: [1]
 
@@ -233,35 +107,12 @@ crane_mpc:
     type: int
     default_value: 5
     read_only: true
-    description: "How many consecutive solves may fail to converge before
-      wiki/mpc.md escalation stops the publisher, cycles. 6's fourth rule is
-      'on repeated failure, stop and hand control back to the supervisor, which
-      re-plans from the measured state', and this is the number that decides what
-      repeated means.
-      **The reason it cannot be large is arithmetic and not taste.** The fallback
-      of 6's third rule is the previous horizon shifted up one knot with the last
-      stage duplicated, so after k consecutive fallbacks the last k knots of what
-      goes out are all copies of one knot the optimizer computed k cycles ago --
-      a held pose carrying a velocity from somewhere else, which is not
-      self-consistent and is not a plan. At k = horizon_length - 1 the *whole*
-      horizon is that one knot, so a value that large is one where the escalation
-      cannot fire before the fallback has degenerated; the node says so at
-      startup rather than refusing, because it is a deployment's consequence to
-      know and not a contract violation.
-      Past a handful of cycles, stopping is also strictly better than continuing.
-      A receiver whose producer stopped keeps executing its own last good spline
-      -- a real plan, for the whole of control_architecture 3.3's
-      fault-tolerance budget -- whereas one being fed shifted horizons is being
-      re-fitted every cycle to a plan whose tail is a duplicated knot.
-      Five is 200 ms at 25 Hz: a tenth of the horizon's own 1.96 s and a tenth of
-      a sway period of order 2 s, so a couple of missed deadlines do not hand back
-      a path that is working, while the tail of anything published is still
-      overwhelmingly the optimizer's own. It is a **design value**, like N and the
-      solve budget beside it: what would set it is a measurement of how often the
-      deployed RT-IPC misses, and the design documentation leaves that human-run.
-      read_only because the startup check above is against horizon_length, which
-      is itself read_only: a value judged once against a number that cannot move
-      must not be movable either, or the judgement quietly stops applying."
+    description: "Consecutive non-converged solves before escalation stops the publisher and hands back to
+      the supervisor. It cannot be large: the fallback shifts the previous horizon up one knot and duplicates
+      the last stage, so after k fallbacks the last k knots are copies of one knot computed k cycles ago. At
+      k = horizon_length-1 the whole horizon is that knot; the node warns at startup rather than refusing.
+      5 = 200 ms at 25 Hz, a tenth of the horizon's 1.96 s and of a sway period of order 2 s. A design value.
+      read_only because the startup check is against horizon_length, itself read_only."
     validation:
       gt_eq<>: [1]
 
@@ -269,20 +120,11 @@ crane_mpc:
     type: double
     default_value: 0.2
     read_only: true
-    description: "How old the measured state may be and still be solved from, s.
-      Both halves of the state arrive on /joint_states at 100 Hz, so anything past
-      a handful of cycles means the producer has stopped rather than that a
-      message was late. A stale measurement propagated forward by the transport
-      delay is a plan for where the machine was, and the receiver's expiry ramp is
-      a better answer than that.
-      **It bounds /crane/controller_state as well**, which is shadow mode's other
-      input: the comparison of user story 68 claims to be the shadow command
-      against what drove *at the same instant*, and a follower command from half a
-      second ago read against this cycle's solve produces a number that looks
-      exactly like a divergence and is a staleness. One deadline rather than two
-      because the two streams are joined at that instant -- a comparison held to a
-      looser bound than the state it was solved from would be judging across a gap
-      the solve was not allowed."
+    description: "Oldest measured state still solved from, s. /joint_states runs at 100 Hz, so past a handful
+      of cycles the producer has stopped rather than a message being late. Also bounds
+      /crane/controller_state: shadow mode compares against what drove at the *same instant*, and a command
+      half a second old reads exactly like a divergence. One deadline, not two, because the streams are
+      joined at that instant."
     validation:
       gt<>: [0.0]
 
@@ -290,12 +132,9 @@ crane_mpc:
     type: double
     default_value: 1.0e-6
     read_only: true
-    description: "Regularisation added to the Gauss-Newton Hessian. Small and
-      non-zero: the Hessian is positive semi-definite by construction but need not
-      be definite, and this is the standard cheap insurance against a rank
-      deficient QP. It is **not** a trust region and it does not latch -- acados
-      adds it identically on every cycle, which is what wiki/mpc.md
-      requirement 2 asks for."
+    description: "Regularisation on the Gauss-Newton Hessian -- cheap insurance against a rank-deficient QP,
+      since the Hessian is PSD by construction but need not be definite. Not a trust region and it does not
+      latch; acados adds it identically every cycle."
     validation:
       gt_eq<>: [0.0]
 
@@ -304,28 +143,15 @@ crane_mpc:
       type: double_array
       default_value: [0.04, 0.04]
       read_only: true
-      description: "The sway rate below which this node calls the load settled,
-        per passive row [tip, tilt], rad/s. wiki/nomenclature.md 9 registers the
-        symbol and this value; the producer moved here from the archived
-        supervisor because this node already reads the passive pair every cycle
-        and already has max_state_age to decide whether the reading is usable.
-        |dq_u| <= this on **both** rows is SETTLED_YES on /crane/sway_settled,
-        over it is SETTLED_NO, and an absent, stale or non-finite reading is
-        SETTLED_UNKNOWN. The rate and not the angle: the published angle carries
-        an uncalibrated constant offset and the rate does not.
-        Measured against the four control_recordings bags, on the /joint_states
-        velocity of theta6_tip_joint and theta7_tilt_joint over the 406 s in
-        which every actuated joint read under 0.01 rad/s for at least 3 s: the
-        pair sits at 0.0046 rad/s RMS with p99 = 0.012 and a maximum of 0.039,
-        so a quiescent machine never crosses this and the verdict does not
-        flicker. The retired producer's 0.02 was an RMS over a 0.75 s window and
-        crossing it instantaneously happens 28 times in those 406 s -- this
-        verdict has no dwell and no hysteresis to absorb that, and adding either
-        is a mechanism the issue that shipped this one does not carry.
-        **It is a threshold on the rate alone, so a swinging load reads
-        SETTLED_YES at its turning points.** A consumer gating a grip on it owes
-        itself the dwell (nomenclature 9's settle_dwell); this stream reports and
-        refuses nothing."
+      description: "Sway rate below which the load is called settled, per passive row [tip, tilt], rad/s.
+        Both rows under it is SETTLED_YES on /crane/sway_settled, over is SETTLED_NO, absent/stale/non-finite
+        is SETTLED_UNKNOWN. Rate not angle: the published angle carries an uncalibrated constant offset.
+        Measured on the four control_recordings bags, /joint_states velocity of theta6_tip_joint and
+        theta7_tilt_joint over the 406 s in which every actuated joint read under 0.01 rad/s for >=3 s:
+        0.0046 rad/s RMS, p99 0.012, max 0.039 -- a quiescent machine never crosses this. The retired
+        producer's 0.02 was an RMS over 0.75 s and is crossed instantaneously 28 times in those 406 s; this
+        verdict has no dwell or hysteresis to absorb that, so **a swinging load reads SETTLED_YES at its
+        turning points**. A consumer gating a grip owes itself the dwell."
       validation:
         fixed_size<>: [2]
         lower_element_bounds<>: [0.0]
@@ -335,11 +161,9 @@ crane_mpc:
       type: double_array
       default_value: [4.0, 4.0, 4.0, 4.0, 1.0, 1.0]
       read_only: true
-      description: "Q of wiki/mpc.md -- actuated position tracking, per actuated
-        row, as the diagonal of a weighted norm. **Not tuned against the machine.**
-        the design documentation keeps every weight in this block conservative until the slice 1b
-        identification campaign delivers bandwidth, lag and delay; the numbers do
-        not exist yet and are not invented here."
+      description: "Q -- actuated position tracking, diagonal of a weighted norm. **Not tuned against the
+        machine**; every weight in this block stays conservative until the slice 1b identification campaign
+        delivers bandwidth, lag and delay."
       validation:
         fixed_size<>: [6]
         lower_element_bounds<>: [0.0]
@@ -347,7 +171,7 @@ crane_mpc:
       type: double_array
       default_value: [0.4, 0.4, 0.4, 0.4, 0.1, 0.1]
       read_only: true
-      description: "Q_dot_a of 2 -- actuated velocity tracking. Not tuned."
+      description: "Q_dot_a -- actuated velocity tracking. Not tuned."
       validation:
         fixed_size<>: [6]
         lower_element_bounds<>: [0.0]
@@ -355,34 +179,18 @@ crane_mpc:
       type: double_array
       default_value: [0.0, 0.0]
       read_only: true
-      description: "Q_u of 2 -- the sway offset, per passive row. **Zero: the
-        offset row is in the residual and unpriced, and dq_u below is the whole
-        of the sway damping.** 2's `penalising the rate alone admits a large
-        steady offset` is the general argument and it is sound; what makes it not
-        apply here is **which q_eq this residual is centred on**. cycle.py pins
-        q_eq at the measured passive position and holds it across the horizon, so
-        the residual is zero at the first knot by construction and what it
-        charges over the rest is the *change* in the passive rows. That is not
-        sway: the hanging pose moves 1:1 with -(q_boom + q_arm) and with nothing
-        else (crane_planning's closed form; d q_eq / d q_a = [0, -1, -1, 0, 0]),
-        so a tool that hangs perfectly through a lift still produces the boom and
-        arm travel as a residual. **A weight here prices luffing, not swinging.**
-        Zero is the value consistent with that centre -- and the two do justify
-        each other in a circle, which is exactly why this is not a number to
-        retune until 049 settles the centre. Measured, on the A2B move
-        scripts/mpc_a2b.py runs by default, with its per-stage equilibrium
-        replaced by the node's frozen one so that the driver solves the cost the
-        node actually has: 0.0 finishes 0.4036 from the goal at 0.4894 rad of
-        peak sway against the true equilibrium, 20.0 finishes 0.4159 at 0.5182 --
-        the weight is marginally **worse** on both. Under the driver's own
-        per-stage equilibrium the ordering reverses (0.4462 / 0.1566 rad against
-        0.3178 / 0.1159), which is worth reading twice: what that pair measures is
-        the **centre** and not this weight, and it says the centre is worth three
-        to four times the peak sway that the weight is worth nothing. That is
-        issue 049's to spend, not this parameter's. Not tuned against the
-        machine. Anyone re-opening it must edit this number --
-        scripts/mpc_a2b.py's --sway-scale is a **multiplier**, so at zero no
-        value of that flag prices the offset."
+      description: "Q_u -- sway offset, per passive row. **Zero; dq_u below is the whole of the sway
+        damping.** cycle.py pins q_eq at the measured passive position and holds it across the horizon, so
+        the residual is zero at knot 0 by construction and what it charges is the *change* in the passive
+        rows. That is not sway: the hanging pose moves 1:1 with -(q_boom + q_arm) (d q_eq / d q_a =
+        [0, -1, -1, 0, 0]), so a perfectly hanging tool still produces boom and arm travel as residual. **A
+        weight here prices luffing, not swinging.** Zero and that centre justify each other circularly, hence
+        no retuning until issue 049 settles the centre.
+        Measured on mpc_a2b.py's default move with the node's frozen equilibrium substituted: 0.0 finishes
+        0.4036 from goal at 0.4894 rad peak sway, 20.0 finishes 0.4159 at 0.5182 -- marginally worse on both.
+        Under the driver's per-stage equilibrium the ordering reverses (0.4462/0.1566 against 0.3178/0.1159),
+        which measures the **centre**, not this weight. Re-opening it means editing this number --
+        mpc_a2b.py's --sway-scale is a multiplier, useless at zero."
       validation:
         fixed_size<>: [2]
         lower_element_bounds<>: [0.0]
@@ -390,10 +198,8 @@ crane_mpc:
       type: double_array
       default_value: [4.0, 4.0]
       read_only: true
-      description: "Q_dot_u of 2 -- the sway rate, and **the only sway term
-        priced in what ships** (q_u above is zero; issue 137). It is the half
-        that survives the frozen q_eq q_u could not: a rate residual needs no
-        centre. Not tuned."
+      description: "Q_dot_u -- sway rate, and the only sway term priced in what ships (issue 137). A rate
+        residual needs no centre, so it survives the frozen q_eq that q_u could not. Not tuned."
       validation:
         fixed_size<>: [2]
         lower_element_bounds<>: [0.0]
@@ -401,26 +207,16 @@ crane_mpc:
       type: double_array
       default_value: [1.0e-8, 1.0e-8, 1.0e-8, 1.0e-8, 1.0e-8, 1.0e-8]
       read_only: true
-      description: "R_tau of 2 -- the effort term, which prices **tau_a and never
-        u**. That is what makes the price of an acceleration depend on the
-        effective inertia, so the optimizer is automatically gentler with the arm
-        extended or loaded, and it is the whole reason inverse dynamics is in the
-        loop; a plain input penalty cannot express it and `u` below is not a
-        substitute. Small in absolute terms only because tau_a is in newton metres
-        and newtons and runs to 1e4-1e5 on the boom while the tracking residuals
-        are radians -- the weight is what puts the two on one scale. Not tuned.
-        **The reference is h_eff and not zero** (issue 117). tau_a is a state
-        under C3 and tau_a = M_eff ddq_a + h_eff, so against a zero reference this
-        term prices the machine holding its own weight and the optimizer buys
-        droop to avoid paying: the offline A2B finished 0.53 rad from the goal,
-        boom -0.30 and telescope -0.42, with the sway box saturating at its 0.2
-        bound as a consequence of that position error. Against h_eff the residual
-        is M_eff ddq_a, which is the quantity this paragraph says is priced, and
-        the same move finishes at 0.14 rad. A zero weight was the other candidate:
-        it is worse (0.18 rad) and it discards the effective-inertia property
-        outright. ocp_solver.cpp evaluates h_eff once per cycle at x_0 and holds
-        it across the horizon, the trade mpc_node.cpp already makes for q_eq;
-        per-stage exactness was measured at 0.15 rad and buys nothing."
+      description: "R_tau -- effort, pricing **tau_a and never u**, so the price of an acceleration depends
+        on the effective inertia and the optimizer is automatically gentler with the arm extended or loaded.
+        That is the whole reason inverse dynamics is in the loop. Small only because tau_a runs to 1e4-1e5
+        N m on the boom while the tracking residuals are radians. Not tuned.
+        **Reference is h_eff, not zero** (issue 117). tau_a = M_eff ddq_a + h_eff, so a zero reference prices
+        the machine holding its own weight and the optimizer buys droop: the offline A2B finished 0.53 rad
+        from goal (boom -0.30, telescope -0.42) with the sway box saturating at its 0.2 bound. Against h_eff
+        the residual is M_eff ddq_a and the same move finishes at 0.14 rad; a zero weight is worse (0.18) and
+        discards the effective-inertia property. h_eff is evaluated once per cycle at x_0 and held, the same
+        trade already made for q_eq -- per-stage exactness measured 0.15 rad."
       validation:
         fixed_size<>: [6]
         lower_element_bounds<>: [0.0]
@@ -428,17 +224,10 @@ crane_mpc:
       type: double_array
       default_value: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
       read_only: true
-      description: "R of 2 -- smoothness, on the input itself. **1.0, not the
-        0.01 this declared until issue 137**, which is the other half of the
-        divergence q_u above records: the same commit raised the config by a
-        factor of 100 and left this behind. Here the shipped value won, and for
-        the opposite reason. The run does not discriminate -- the A2B move
-        finishes at 0.3178 against 0.3224, which is nothing -- but
-        weights.progress_rate's 160.0 is *derived* against `u` pricing a
-        **velocity** at 1.0 where Marc's weight_qADDot prices an acceleration at
-        0.25-0.5, so dropping this by two decades would invalidate a recorded
-        measurement rather than just soften the input. Not tuned against the
-        machine."
+      description: "R -- smoothness on the input. **1.0, not the 0.01 this declared until issue 137.** The
+        A2B run does not discriminate (0.3178 vs 0.3224), but progress_rate's 160.0 is derived against `u`
+        pricing a **velocity** at 1.0 where Marc's weight_qADDot prices an acceleration at 0.25-0.5, so
+        dropping two decades would invalidate a recorded measurement. Not tuned."
       validation:
         fixed_size<>: [6]
         lower_element_bounds<>: [0.0]
@@ -446,78 +235,49 @@ crane_mpc:
       type: double
       default_value: 40.0
       read_only: true
-      description: "w_lag -- the lag term, the tracking error projected on the
-        reference's own direction of travel. **On the slewing joint only**, which
-        is Marc's `weights.weight_lag` reproduced rather than generalised
-        (timber_crane_cost_js_pfc_pt2.cpp:62-74). The reason is that the five
-        planned coordinates carry four radians and one metre, so the unit tangent
-        a single scalar projection over all of them needs is a norm over mixed
-        units and nothing states how many radians of slew a metre of telescope is
-        worth; and the per-axis form is not the generalisation either, because
-        e_i * q_ref,i'(s) is the tracking error times the local reference speed,
-        i.e. a speed-dependent reweighting of a term that already exists per axis.
-        Slewing is the axis the progress variable is there to buy time for. The
-        residual is the **unnormalised** projection, as the original's is, so this
-        weight absorbs the reference speed's scale. Marc runs 10.0 against a
-        weight_qA of 1.0; this is that ratio against q_a's 4.0. Not tuned."
+      description: "w_lag -- tracking error projected on the reference's direction of travel, **slewing joint
+        only**. Marc's `weights.weight_lag` (timber_crane_cost_js_pfc_pt2.cpp:62-74) reproduced, not
+        generalised: the five planned coordinates carry four radians and one metre, so one scalar projection
+        needs a norm over mixed units that nothing defines, and the per-axis form e_i * q_ref,i'(s) is only a
+        speed-dependent reweighting of a term that already exists. **Unnormalised** projection, as the
+        original's is, so this weight absorbs the reference speed's scale. Marc runs 10.0 against weight_qA
+        1.0; this is that ratio against q_a's 4.0. Not tuned."
       validation:
         gt_eq<>: [0.0]
     progress_rate:
       type: double
       default_value: 160.0
       read_only: true
-      description: "w_sDot -- the quadratic regulator on the progress rate toward
-        **one** second of plan per second of wall clock. This is the price of
-        spending time, and it is the whole mechanism: at nominal rate the problem
-        is exactly time-indexed tracking, and the optimizer buys a slower plan
-        only where tracking, limits or flow make paying this cheaper. It is a
-        **regulator and not a linear progress reward** -- the reward form belongs
-        to the spatial-corridor design of docs/features/corridor-mpc/brief.md 5.1,
-        which drops the tracking term altogether and is not this. Must be
-        positive: at zero the plan stops for free wherever tracking is hard, which
-        is a controller that never arrives.
-        **This is the one weight here that is measured rather than carried
-        across, and Marc's ratio is what it is measured against.** 0.2 against his
-        weight_qA of 1.0 would be 0.8 against this q_a of 4.0, and at 0.8 the
-        shipped A2B move -- which every axis can follow, the tightest at 43 % of
-        dq_a_max -- settles at a progress rate of 0.34 and spends 3.7 s of a 4 s
-        plan in 7 s of wall clock. The ratio does not transfer because the rest of
-        the cost is not Marc's: q_a is 4x his, `u` prices a velocity here at 1.0
-        where his weight_qADDot prices an acceleration at 0.25-0.5, and
-        terminal_scale has no counterpart there at all -- so moving is far more
-        expensive relative to tracking here than it is there, and a time price
-        calibrated to his cost buys dawdling. The requirement this number is set
-        by instead is the design property: **a reference the machine can follow
-        must run at rate one.** Measured on that move at 0.8 / 8 / 40 / 160, the
-        minimum rate is 0.32 / 0.66 / 0.87 / 0.95 and the final error is 0.170 /
-        0.134 / 0.137 / 0.137; at 160 the run reproduces issue 117's time-indexed
-        result (0.1375 against 0.1379) and the progress state costs nothing on a
-        followable plan. `scripts/cannot_follow.py` is the other half: on a
-        reference the machine cannot follow it still falls well below one."
+      description: "w_sDot -- quadratic regulator on the progress rate toward one second of plan per second
+        of wall clock. At nominal rate the problem is exactly time-indexed tracking; the optimizer buys a
+        slower plan only where tracking, limits or flow make paying this cheaper. A regulator, not a linear
+        progress reward. Must be positive: at zero the plan stops for free wherever tracking is hard.
+        **The one measured weight here.** Marc's 0.2 against weight_qA 1.0 would be 0.8 against this q_a of
+        4.0, and at 0.8 the shipped A2B move -- followable, tightest axis at 43 % of dq_a_max -- settles at
+        rate 0.34 and spends 3.7 s of a 4 s plan in 7 s. The ratio does not transfer: q_a is 4x his, `u`
+        prices a velocity at 1.0 where weight_qADDot prices an acceleration at 0.25-0.5, and terminal_scale
+        has no counterpart, so a time price calibrated to his cost buys dawdling. The requirement instead is
+        that a followable reference must run at rate one. Measured on that move at 0.8/8/40/160: minimum rate
+        0.32/0.66/0.87/0.95, final error 0.170/0.134/0.137/0.137. At 160 the run reproduces issue 117's
+        time-indexed result (0.1375 vs 0.1379). scripts/cannot_follow.py is the other half: on an
+        unfollowable reference the rate still falls well below one."
       validation:
         gt<>: [0.0]
     progress_accel:
       type: double
       default_value: 0.01
       read_only: true
-      description: "Smoothness on the sixth input, the progress acceleration.
-        There is no counterpart in the original: Marc's s_dot **is** an input, so
-        weight_sDot prices it there, whereas here the rate is a state and its
-        acceleration is what the optimizer picks. A regulariser on that input, not
-        a tuning surface. Not tuned."
+      description: "Smoothness on the sixth input, progress acceleration. No counterpart in the original --
+        Marc's s_dot *is* an input, here the rate is a state. A regulariser, not a tuning surface."
       validation:
         gt_eq<>: [0.0]
     terminal_scale:
       type: double
       default_value: 10.0
       read_only: true
-      description: "How much the terminal weights are raised over the stage ones.
-        wiki/mpc.md terminal cost is the stage cost **without the
-        input-dependent terms**, at raised weights -- and it is a cost and never a
-        terminal *set*, because a hard terminal set is a dependable source of
-        infeasibility under a single-iteration scheme and an infeasible solve is
-        worse than a slightly unsettled tool. Raising the weights buys the same
-        settling without that failure mode. Not tuned."
+      description: "Factor the terminal weights are raised over the stage ones. The terminal cost is the
+        stage cost without the input-dependent terms, and it is a cost and never a terminal *set*: a hard
+        terminal set is a dependable source of infeasibility under a single-iteration scheme. Not tuned."
       validation:
         gt_eq<>: [0.0]
 
@@ -526,89 +286,53 @@ crane_mpc:
       type: double_array
       default_value: [-3.71, 0.0, -0.91, 0.0, -12.566370614359172, 0.2]
       read_only: true
-      description: "Constraint 1 of wiki/mpc.md, lower end, per actuated row.
-        These are the **control-safe** limits of
-        wiki/implementation/parameters.md and explicitly not the URDF's, which
-        is why they are written down here rather than read off the description --
-        see crane_model/config/control_safe_limits.yaml for where each number comes from and
-        which of them is weak.
-        **The boom's 0.0 is the row that is narrower than the description**
-        (issue 128). -1.2 was the URDF's, and the boom's four-bar stops closing
-        at q2 = -1.1841609: below that the discriminant of wiki/hydraulics.md
-        §2.2 is negative, the pose does not exist and the transmission ratio is
-        not finite. The ratio is also negative on (-1.18416, -1.15096) and
-        reaches -6.1 there, where constraint 6 under-reports cylinder force by
-        more than a decade. The stroke limit s2 >= 1.253 m (§5.3) already
-        excludes all of it at q2 >= -1.054, so the defect was the box and not the
-        row. The number is Marc's, as the arm's upper is:
-        timber_crane_model_cpp/include/timber_crane_model_cpp/joint_limits.hpp:14-30,
-        which his MPC's joint-limit constraint reads, and the deployed
-        epsilon_crane_bringup_mp/config/motion_planning/mp_parameter_pzs100.yaml:135-224
-        (qMinCtrl) agree to the digit. It sits 1.18 rad clear of the closure
-        failure, and on [0.0, 1.563] the boom ratio is 0.2806..0.4530 -- positive,
-        finite and bounded away from zero.
-        **A narrowed lower is not a refusal.** `position_box` never excludes the
-        measured pose, so engaging with the boom folded below 0.0 relaxes this
-        bound to wherever the boom is rather than declining to run. That is
-        survivable and not accidental -- the machine cannot be below -1.184, so
-        the relaxed bound stays on the finite branch, where the ratio bottoms out
-        at 0.1245 instead of 0.2806 and constraint 6 stays well formed. What it
-        means is that the folded pose is out of the *configured* box and not out
-        of the *effective* one; refusing to engage there would be a supervisor
-        decision and nothing here makes it."
+      description: "Constraint 1, lower end. **Control-safe limits, not the URDF's** -- see
+        crane_model/config/control_safe_limits.yaml for provenance per number and which are weak.
+        **The boom's 0.0 is narrower than the description** (issue 128; -1.2 was the URDF's). The boom
+        four-bar stops closing at q2 = -1.1841609: below that the transmission discriminant is negative, the
+        pose does not exist and the ratio is not finite. The ratio is also negative on
+        (-1.18416, -1.15096), reaching -6.1, where constraint 6 under-reports cylinder force by over a
+        decade. The stroke limit s2 >= 1.253 m already excludes all of it at q2 >= -1.054, so the defect was
+        the box, not the row. The number is Marc's (timber_crane_model_cpp/.../joint_limits.hpp:14-30) and
+        the deployed mp_parameter_pzs100.yaml:135-224 qMinCtrl agrees to the digit; on [0.0, 1.563] the boom
+        ratio is 0.2806..0.4530, positive and bounded away from zero.
+        **A narrowed lower is not a refusal**: `position_box` never excludes the measured pose, so engaging
+        with the boom folded below 0.0 relaxes the bound to wherever the boom is. Intended -- the machine
+        cannot be below -1.184, so the relaxed bound stays on the finite branch, ratio bottoming at 0.1245,
+        and constraint 6 stays well formed. Refusing there would be a supervisor decision."
       validation:
         fixed_size<>: [6]
     q_a_upper:
       type: double_array
       default_value: [3.71, 1.563, 1.324864, 2.236, 12.566370614359172, 0.7]
       read_only: true
-      description: "Constraint 1 of 3, upper end. See q_a_lower.
-        **The arm's 1.324864 is the one entry here that is narrower than the
-        description, and it is what makes constraint 6 well formed** (issue 126).
-        That row divides the joint torque by the arm's transmission ratio, which
-        crosses zero at q3 = 1.8466647 -- a real dead point, pivot and both
-        cylinder attachments collinear -- and is *negative* above it, where the
-        asymmetric extend and retract bounds of wiki/mpc.md §3 would then be
-        assigned the wrong way round. 4.6 was the URDF's and admitted all of it.
-        The number is Marc's, not a derivation:
-        timber_crane_model_cpp/include/timber_crane_model_cpp/joint_limits.hpp:14-30,
-        which his MPC's joint-limit constraint reads, and the deployed
-        epsilon_crane_bringup_mp/config/motion_planning/mp_parameter_pzs100.yaml:146
-        (qMaxCtrl) agree to the digit. It is field-tested and sits 0.52 rad clear
-        of the dead point. Force authority corroborates rather than sets it: the
-        static hold at q3 = 1.6 already needs 2.76x the force limit (wiki/mpc.md
-        §3, issue 043), so the usable branch ends below 1.6 and 1.324864 is on
-        the right side of that. The MPC drives the working configuration only;
-        the folded transport pose is out of the box by construction."
+      description: "Constraint 1, upper end; see q_a_lower. **The arm's 1.324864 is the one entry narrower
+        than the description, and it is what makes constraint 6 well formed** (issue 126). That row divides
+        joint torque by the arm's transmission ratio, which crosses zero at q3 = 1.8466647 -- a real dead
+        point, pivot and both cylinder attachments collinear -- and is negative above it, where the
+        asymmetric extend/retract bounds would be assigned the wrong way round. 4.6 was the URDF's and
+        admitted all of it. The number is Marc's (joint_limits.hpp:14-30), matched to the digit by deployed
+        mp_parameter_pzs100.yaml:146 qMaxCtrl, field-tested and 0.52 rad clear of the dead point. Force
+        authority corroborates: the static hold at q3 = 1.6 already needs 2.76x the force limit (issue 043)."
       validation:
         fixed_size<>: [6]
     q_a_margin:
       type: double_array
       default_value: [0.048, 0.020, 0.021, 0.038, 0.127, 0.030]
       read_only: true
-      description: "Constraint 1's safety margin per axis, rad (m on the
-        telescope): the box carries q_a_lower + margin and q_a_upper - margin.
-        This is Marc's `constraints.joint_limit.safety_thresh` (0.05 rad on every
-        axis), and it is the knob of his that changes meaning on the way across --
-        there it set where a quadratic penalty started biting, here the bound is
-        kept exactly, so the margin buys distance rather than gradient. His number
-        is **not** copied. This is dq_a_max times the 60 ms transport dead time of
-        C3 block 1: the travel an axis can put in before the loop can react to
-        anything, which is the smallest margin that means something on a bound the
-        optimizer already never crosses. Zero is legal and reproduces the
-        untightened bound exactly. It is the **pre-128** dq_a_max times that dead
-        time, and recomputing it after that narrowing would widen the effective
-        position box -- the wrong direction for a row whose purpose is to tighten
-        one. So on the four axes 128 narrowed, the margin now exceeds the product
-        it was derived from; the rotator's and the tool's are unchanged and are
-        their own rounding of it (2.121947 x 0.06 = 0.12732 written as 0.127).
-        A margin **never excludes the pose the machine is in** (`position_box` in
-        crane_mpc/solver.py). One that did would make the problem infeasible for
-        states the machine is legitimately parked in -- a fully retracted telescope sits
-        exactly on q_a_lower[3] = 0 -- and the fallback would then fire on every
-        cycle forever. Softening the row instead is not available: constraint 1 is
-        hard on purpose and crane_msgs/SolverHealth has no violation slot for it,
-        so Marc's `joint_limit.weight` has no home here at all."
+      description: "Constraint 1's margin per axis, rad (m telescope): the box carries q_a_lower + margin and
+        q_a_upper - margin. Marc's `joint_limit.safety_thresh` (0.05 everywhere) is **not** copied -- there
+        it set where a quadratic penalty started biting, here the bound is kept exactly, so the margin buys
+        distance rather than gradient. This is dq_a_max times the 60 ms transport dead time: the travel an
+        axis puts in before the loop can react. Zero is legal.
+        **It is the pre-128 dq_a_max times that dead time, deliberately** -- recomputing after that narrowing
+        would widen the effective position box, the wrong direction. So on the four axes 128 narrowed, the
+        margin now exceeds the product it came from; rotator and tool are unchanged (2.121947 x 0.06 =
+        0.12732, written 0.127).
+        A margin **never excludes the pose the machine is in** (`position_box` in crane_mpc/solver.py): a
+        fully retracted telescope sits exactly on q_a_lower[3] = 0, and one that did would fire the fallback
+        every cycle forever. Softening instead is unavailable -- constraint 1 is hard on purpose and
+        crane_msgs/SolverHealth has no violation slot, so Marc's `joint_limit.weight` has no home here."
       validation:
         fixed_size<>: [6]
         lower_element_bounds<>: [0.0]
@@ -616,19 +340,12 @@ crane_mpc:
       type: double_array
       default_value: [0.764, 0.239067, 0.325733, 0.400000, 2.121947, 0.5]
       read_only: true
-      description: "Constraint 2 of 3, |dq_a| <= dq_a^+. Every crane row is the
-        deployed control config's qDotMinCtrl/qDotMaxCtrl
-        (mp_parameter_pzs100.yaml:135-224); the tool row has no counterpart there
-        and is hand-set. See crane_model/config/control_safe_limits.yaml.
-        **His box is asymmetric and this one cannot be**, since the row is a
-        single magnitude per axis, so each entry is the *smaller* of his two
-        (issue 128). It used to be the larger, which let the boom extend 36 % and
-        the telescope 58 % faster than the machine is driven: -0.325963/+0.239067
-        and -0.630189/+0.400000 read as 0.326 and 0.630. The claim this
-        description carried -- that no control-config number exists in this
-        workspace for the other four rows -- was false; qDotMaxCtrl[3] = 0.400000
-        is deployed. What retraction loses is real and is the price of one bound
-        per axis; a second bound is a change to the constraint row."
+      description: "Constraint 2, |dq_a| <= dq_a^+. Every crane row is the deployed
+        qDotMinCtrl/qDotMaxCtrl (mp_parameter_pzs100.yaml:135-224); the tool row is hand-set. See
+        crane_model/config/control_safe_limits.yaml. **His box is asymmetric and this one cannot be** (single
+        magnitude per axis), so each entry is the *smaller* of his two (issue 128). It used to be the larger,
+        letting the boom extend 36 % and the telescope 58 % faster than the machine is driven
+        (-0.325963/+0.239067 and -0.630189/+0.400000). What retraction loses is the price of one bound."
       validation:
         fixed_size<>: [6]
         lower_element_bounds<>: [0.0]
@@ -636,13 +353,10 @@ crane_mpc:
       type: double_array
       default_value: [0.2, 0.2]
       read_only: true
-      description: "Constraint 3 of 3, |q_u - q_eq| <= q_u^+ -- the tool swing
-        clearance, per passive row. Drawn around the **equilibrium** and never
-        around zero: the hanging pose moves with the arm, and a box drawn once
-        around one equilibrium excludes the machine's own resting configuration
-        over most of a motion. The same number wiki/trajectory_planning.md
-        clears the path for, so any sway this permits is sway the path was
-        cleared for."
+      description: "Constraint 3, |q_u - q_eq| <= q_u^+ -- tool swing clearance. Drawn around the
+        **equilibrium**, never around zero: the hanging pose moves with the arm, so a box fixed around one
+        equilibrium excludes the machine's own resting configuration over most of a motion. Same number the
+        planner clears the path for, so any sway this permits was cleared for."
       validation:
         fixed_size<>: [2]
         lower_element_bounds<>: [0.0]
@@ -650,11 +364,8 @@ crane_mpc:
       type: double_array
       default_value: [1.0, 0.5]
       read_only: true
-      description: "Constraint 4 of 3, |dq_u| <= dq_u^+. parameters.md 3 is
-        explicit that these are **hand-set controller bounds and not physical
-        limits** -- the joints are unactuated, and the numbers express how much
-        sway is tolerated, which belongs with the MPC weights rather than with the
-        machine."
+      description: "Constraint 4, |dq_u| <= dq_u^+. **Hand-set controller bounds, not physical limits** --
+        the joints are unactuated and these express how much sway is tolerated."
       validation:
         fixed_size<>: [2]
         lower_element_bounds<>: [0.0]
@@ -662,67 +373,44 @@ crane_mpc:
       type: double
       default_value: 1.5
       read_only: true
-      description: "The ceiling of the progress rate, in seconds of plan per
-        second of wall clock. The **floor is zero and is not a parameter**: the
-        machine does not run the plan backwards, and a negative rate would walk
-        the reference back down a spline that was planned forwards. The ceiling is
-        catch-up headroom after a slowdown and nothing more -- the plan was issued
-        feasible at rate one against these same limits
-        (wiki/trajectory_planning.md 5.3), so a horizon spending it much faster is
-        asking for something the planner already declared out of reach, and the
-        velocity, force and flow rows would refuse it anyway. Not tuned.
-        **'These same limits' is no longer true and is a known gap**, not a
-        licence to widen this box: crane_planning reads its own box off the
-        description (crane_planning/config.py:108-110, the URDF's
-        lower/upperPositionLimit and velocityLimit), so since issues 126 and 128
-        it certifies boom and arm poses that constraint 1 hard-refuses. A
-        reference outside the box is absorbed by the progress rate on the
-        velocity rows and is **not** absorbed on the position rows -- the axis
-        parks on the bound and the rate collapses, with no fault, because
-        constraint 1 has no slack row and crane_msgs/SolverHealth no slot for it.
-        Reconciling the two boxes is crane_planning's and needs its own issue."
+      description: "Ceiling of the progress rate, s of plan per s of wall clock. The **floor is zero and is
+        not a parameter** -- the machine does not run the plan backwards. The ceiling is catch-up headroom
+        only: the plan was issued feasible at rate one against these same limits. Not tuned.
+        **'These same limits' is no longer true and is a known gap.** crane_planning reads its box off the
+        description (crane_planning/config.py:108-110), so since issues 126 and 128 it certifies boom and arm
+        poses constraint 1 hard-refuses. A reference outside the box is absorbed by the progress rate on the
+        velocity rows and **not** on the position rows: the axis parks on the bound and the rate collapses
+        with no fault, since constraint 1 has no slack row and SolverHealth no slot. Reconciling the boxes is
+        crane_planning's and needs its own issue."
       validation:
         gt_eq<>: [1.0]
     progress_accel_max:
       type: double
       default_value: 2.0
       read_only: true
-      description: "|a_s| <= this, in 1/s: how fast the progress rate itself may
-        move. At 2.0 the plan's speed can go from stopped to nominal in half a
-        second, which is inside the horizon and well outside a control cycle. At
-        zero the rate would be frozen at whatever it was carried in with and the
-        progress state would be decoration. Not tuned."
+      description: "|a_s| <= this, 1/s. At 2.0 the plan's speed goes stopped to nominal in half a second --
+        inside the horizon, well outside a cycle. At zero the rate would be frozen and the progress state
+        decoration. Not tuned."
       validation:
         gt<>: [0.0]
     u_max:
       type: double_array
       default_value: [0.764, 0.239067, 0.305, 0.400000, 2.121947, 0.5]
       read_only: true
-      description: "Constraint 5 of 3, |u| <= u^+. **u is a joint velocity in
-        rad/s (m/s on the telescope) at Psi's input**, not an acceleration: C3
-        made it one and issue 116 changed the state layout to match, so the
-        acceleration limit of parameters.md 3 that used to be here bounds nothing
-        this problem has. Two things bound a velocity command, and this default is
-        the smaller of them per axis (issue 117).
-        **Psi's identified domain.** The deployed inner loop already saturates its
-        total command to the fit's own domain [X_i^min, X_i^max] scaled by
-        command_authority (control_architecture.md 2.1, compensator_map.md 3),
-        because commanding outside it extrapolates a spline past its data. The
-        domain is asymmetric per direction; the symmetric magnitude
-        min(|X^min|, X^max) is sw 0.9357, ha 0.2880 (the 2-D surface's first
-        axis; its 1-D fallback is 0.2977), ka 0.3059, sa 0.5551, ro 2.3969, and
-        the gripper's Psi is the identity with a 0.5 rad/s limit.
-        **dq_a_max.** The C3 chain has unit DC gain from u to dq_a, so a u above
-        the control-safe velocity asks in steady state for a velocity constraint
-        2 forbids -- an input box wider than the state box it drives is an
-        infeasibility waiting for a step reference.
-        The element-wise minimum, rounded inward, is this default. Issue 128's
-        narrowing of dq_a_max moved the boom and the telescope across, so Psi's
-        domain now binds on the arm alone and dq_a_max on the other four.
-        Marc's `acceleration.limit_scale` has no separate home -- there it scaled
-        limits that came from the model, here both arrays it would scale are
-        themselves deployment parameters, so a global multiplier would be a
-        second way to write the same number."
+      description: "Constraint 5, |u| <= u^+. **u is a joint velocity in rad/s (m/s telescope) at Psi's
+        input**, not an acceleration (C3; issue 116 changed the state layout to match). Two things bound it
+        and this is the smaller per axis (issue 117).
+        Psi's identified domain: the deployed inner loop saturates its total command to the fit's own
+        [X^min, X^max] scaled by command_authority, because outside it the spline is extrapolated past its
+        data. Asymmetric per direction; symmetric magnitude min(|X^min|, X^max) is sw 0.9357, ha 0.2880 (2-D
+        surface's first axis; 1-D fallback 0.2977), ka 0.3059, sa 0.5551, ro 2.3969, gripper identity with a
+        0.5 rad/s limit.
+        dq_a_max: the C3 chain has unit DC gain u to dq_a, so a larger u asks in steady state for a velocity
+        constraint 2 forbids -- an input box wider than the state box it drives is an infeasibility waiting
+        for a step reference.
+        Element-wise minimum, rounded inward. Issue 128's narrowing moved boom and telescope across, so Psi's
+        domain now binds on the arm alone. Marc's `acceleration.limit_scale` has no home: both arrays it
+        would scale are themselves deployment parameters."
       validation:
         fixed_size<>: [6]
         lower_element_bounds<>: [0.0]
@@ -732,50 +420,36 @@ crane_mpc:
       type: double
       default_value: 1.4e-3
       read_only: true
-      description: "Q_P^max of wiki/mpc.md, m^3/s, before the
-        planning factor below. The number is crane_model/config/hydraulics.yaml's
-        `pump.flow_max`, which is also what crane_planning reads and which carries
-        the provenance; test_parameters_are_declared pins this default and
-        config/hydraulic_limits.yaml to it. Measured 2023, **pre-retrofit and not
-        re-verified**. parameters.md 4 also records that post-retrofit flow limits
-        exist for the **boom and the telescope only**, the other four axes
-        carrying datasheet values, so this constraint is a sum of six terms of
-        which two rest on a measurement of this machine. The recordings under
-        control_recordings/ cannot close it: /cranedata carries hydraulic
-        pressures and encoder angles, not pump displacement."
+      description: "Q_P^max, m^3/s, before the planning factor below. From
+        crane_model/config/hydraulics.yaml `pump.flow_max`, which crane_planning also reads and which carries
+        the provenance; test_parameters_are_declared pins this and config/hydraulic_limits.yaml to it.
+        Measured 2023, **pre-retrofit and not re-verified**; post-retrofit flow limits exist for the boom and
+        telescope only, the other four carrying datasheet values, so this constraint sums six terms of which
+        two rest on a measurement of this machine. The control_recordings bags cannot close it -- /cranedata
+        carries pressures and encoder angles, not pump displacement."
       validation:
         gt<>: [0.0]
     pump_flow_planning_factor:
       type: double
       default_value: 0.95
       read_only: true
-      description: "parameters.md 4's 0.95x discount on the line above -- the
-        margin that number's weak evidence has always carried, applied to
-        Q_P^max alone. Same source and same pin as the line above.
-        **Not a second kappa**: kappa is
-        wiki/trajectory_planning.md reservation on every physical limit, it
-        exists so the MPC has authority left to correct with, and this node is
-        that consumer -- scaling by it here would hand the reservation back.
-        crane_planning applies exactly this factor to exactly this number, which
-        is what 5.3's 'a reference the MPC would reject is a planner bug' needs."
+      description: "0.95x discount on the line above -- the margin that number's weak evidence has always
+        carried. **Not a second kappa**: kappa is the planner's reservation on every physical limit so the
+        MPC has authority left to correct with, and this node is that consumer, so scaling by it here would
+        hand the reservation back. crane_planning applies exactly this factor to exactly this number, which
+        is what keeps a reference the MPC would reject a planner bug."
       validation:
         bounds<>: [0.0, 1.0]
     system_pressure_pa:
       type: double
       default_value: 2.5e+7
       read_only: true
-      description: "The relief setting F_i^max is derived from, Pa.
-        wiki/robot_model.md: a joint torque limit is not a machine property --
-        the physical limit is the cylinder force, set by the effective piston area
-        and the axis relief pressure, and the usable joint torque follows through
-        the transmission. parameters.md carries the chamber areas and **no relief
-        setting at all**; its 7 lists the pressure constants among its gaps. So
-        this is the one number constraint 6 cannot derive, and 2.5e7 (250 bar) is
-        a **plausible setting for a crane of this class, not a reading off this
-        one**. The areas are not repeated anywhere: they are asked of crane_model,
-        so they cannot drift from the description. See
-        config/hydraulic_limits.yaml, which also records why this node keeps the
-        two chamber forces apart where crane_planning takes the smaller."
+      description: "Relief setting F_i^max is derived from, Pa: cylinder force is effective piston area
+        times axis relief pressure, joint torque follows through the transmission. Chamber areas are recorded
+        but no relief setting is, so this is the one number constraint 6 cannot derive, and 2.5e7 (250 bar)
+        is a **plausible setting for a crane of this class, not a reading off this one**. Areas are asked of
+        crane_model, never repeated here, so they cannot drift. config/hydraulic_limits.yaml records why this
+        node keeps the two chamber forces apart where crane_planning takes the smaller."
       validation:
         gt<>: [0.0]
 
@@ -784,18 +458,11 @@ crane_mpc:
       type: double_array
       default_value: [1.0e+3, 1.0e+3]
       read_only: true
-      description: "The L1 slack price of wiki/mpc.md on constraint 3, per
-        passive row. 3.2 softens constraints 3, 4, 6 and 7 because a measurement
-        transient can otherwise render the problem infeasible for a state the
-        machine is already in -- a tool swinging past the clearance bound is a
-        state, not a request. Every soft row is written as a **fraction of its own
-        allowance**, so 1.0 of slack is one whole allowance past the limit and
-        these four prices are directly comparable with each other and with 2's
-        costs; the stage cost at the shipped weights runs to order 1e2, so 1e3 is
-        the decade above it that makes the penalty *exact* -- slack is never
-        cheaper than meeting the constraint -- while staying finite, which is what
-        keeps the infeasible state solvable. Zero is refused: a soft constraint
-        with no price is an absent one."
+      description: "L1 slack price on constraint 3. Constraints 3, 4, 6 and 7 are soft because a measurement
+        transient can otherwise make the problem infeasible for a state the machine is already in. Every soft
+        row is a **fraction of its own allowance**, so the four prices compare directly. The stage cost runs
+        to order 1e2 at the shipped weights, so 1e3 is the decade above that makes the penalty exact (slack
+        never cheaper than meeting the constraint) while staying finite. Zero is refused."
       validation:
         fixed_size<>: [2]
         lower_element_bounds<>: [0.0]
@@ -803,8 +470,7 @@ crane_mpc:
       type: double_array
       default_value: [1.0e+3, 1.0e+3]
       read_only: true
-      description: "The L1 slack price of 3.2 on constraint 4, the sway rate. Same
-        scale and same reason as q_u above."
+      description: "L1 slack price on constraint 4, sway rate. Same scale and reason as q_u above."
       validation:
         fixed_size<>: [2]
         lower_element_bounds<>: [0.0]
@@ -812,14 +478,11 @@ crane_mpc:
       type: double_array
       default_value: [1.0e+4, 1.0e+4, 1.0e+4, 1.0e+4, 1.0e+4, 1.0e+4]
       read_only: true
-      description: "The L1 slack price of 3.2 on constraint 6, per actuated row.
-        **The dearest of the four and deliberately so.** 3's [!important] is that
-        constraint 6 is what keeps the model honest: the prediction assumes the
-        inner loop tracks its velocity command with a first-order lag, and that
-        holds only while the loop has force authority. A plan that spends force
-        slack is therefore not slightly worse than one that does not -- it is a
-        plan about a machine that does not exist, and the tracking error that
-        follows is a modelling violation rather than a tuning problem."
+      description: "L1 slack price on constraint 6, per actuated row. **Dearest of the four, deliberately.**
+        Constraint 6 keeps the model honest: the prediction assumes the inner loop tracks its velocity
+        command with a first-order lag, and that holds only while the loop has force authority. A plan
+        spending force slack is a plan about a machine that does not exist -- a modelling violation, not a
+        tuning problem."
       validation:
         fixed_size<>: [6]
         lower_element_bounds<>: [0.0]
@@ -827,13 +490,9 @@ crane_mpc:
       type: double
       default_value: 1.0e+4
       read_only: true
-      description: "The L1 slack price of 3.2 on constraint 7. Priced with
-        constraint 6 and for the neighbouring reason: the the design documentation's risk table
-        delegates behaviour *at* the pump limit to the load-sensing hardware,
-        which is a statement about what the machine does and not about what a plan
-        may ask for. This constraint is what keeps the plan away from that region,
-        and it is soft only because the draw at stage 0 is fixed by the measured
-        dq_a and no input can relieve it."
+      description: "L1 slack price on constraint 7, priced with constraint 6: behaviour *at* the pump limit
+        is delegated to the load-sensing hardware, which says what the machine does, not what a plan may ask
+        for. Soft only because the draw at stage 0 is fixed by the measured dq_a and no input can relieve it."
       validation:
         gt<>: [0.0]
 
@@ -841,25 +500,14 @@ crane_mpc:
     type: int
     default_value: 50
     read_only: true
-    description: "N, knots. wiki/mpc.md leaves N **open** and sizes it by the
-      sway period: a horizon shorter than one period leaves the sway terms nearly
-      free to violate, and the optimizer will excite an oscillation that only
-      develops after the horizon ends -- which looks like good tracking and a
-      swinging tool. 4 puts the period *of order* 2 s, so one period at
-      T_s = 40 ms costs N = 50, and that is where this default comes from.
-      **The period has never been computed.** wiki/mpc.md carries a standing
-      todo to evaluate the eigenvalues of M_uu^-1 dh_u/dq_u over the working range
-      and at both payload extremes, because the period varies with configuration
-      and payload and N must cover the slowest case;  four sway numbers
-      still want a free-swing recording at two or three telescope extensions. So
-      50 is a design value with its reason written down, not a measurement, and it
-      is recorded that way rather than presented as one.
-      At 40 ms it is also 2 s of plan, which is control_architecture 3.3's
-      fault-tolerance budget: some fifty consecutive missed solves before the
-      receiver's buffer runs dry. The ceiling is the receiver's own knot capacity
-      (crane_control's kHorizonKnotCapacity, 64) -- a longer horizon is refused
-      there with a reason rather than truncated, so this node refuses it here
-      instead of publishing what cannot be read."
+    description: "N, knots, sized by the sway period: a shorter horizon leaves the sway terms nearly free to
+      violate and the optimizer excites an oscillation that develops only after the horizon ends -- good
+      tracking and a swinging tool. The period is *of order* 2 s, so one period at T_s = 40 ms costs 50.
+      **The period has never been computed**; it wants the eigenvalues of M_uu^-1 dh_u/dq_u over the working
+      range at both payload extremes (N must cover the slowest case) plus a free-swing recording at two or
+      three telescope extensions. So 50 is a design value, not a measurement. 2 s of plan is also the
+      fault-tolerance budget: some fifty consecutive missed solves before the receiver's buffer runs dry. The
+      ceiling 64 is the receiver's knot capacity (crane_control's kHorizonKnotCapacity)."
     validation:
       bounds<>: [2, 64]
 
@@ -867,17 +515,12 @@ crane_mpc:
     type: double
     default_value: 0.5
     read_only: true
-    description: "How long after a plan has **ended** this node keeps publishing,
-      s. Measured from the end of the reference and not from its stamp, which is
-      the absolute time its *first* point is valid for (ROS 2 Interfaces 1): a
-      twenty-second motion has a twenty-second-old stamp on its last second and is
-      perfectly live, so an age taken from the stamp would kill every long motion.
-      Past the end of the plan the horizon holds the goal position at zero
-      velocity, which is a real instruction and gives the receiver this long to
-      settle on it; after that the node **publishes nothing**. That silence is
-      deliberate. The receiver then runs the expiry ramp of control_architecture
-      3.3, which is the defined behaviour for a producer that has stopped, and a
-      publisher that keeps emitting a dead plan defeats it (the design documentation)."
+    description: "How long after a plan has **ended** this node keeps publishing, s. Measured from the end of
+      the reference, not its stamp -- the stamp is when the *first* point is valid, so a twenty-second motion
+      carries a twenty-second-old stamp on its last second and an age taken from it would kill every long
+      motion. Past the end the horizon holds the goal at zero velocity; after that the node **publishes
+      nothing**, deliberately, so the receiver runs its expiry ramp -- which a publisher still emitting a
+      dead plan would defeat."
     validation:
       gt<>: [0.0]
 
@@ -885,32 +528,17 @@ crane_mpc:
     type: double
     default_value: 0.1
     read_only: true
-    description: "The realized progress rate below which a cycle counts as **not
-      progressing**, as a fraction of nominal -- so it is the progress rate
-      itself, dimensionless and 1.0 when the plan runs at the speed it was
-      planned at. It answers a different question from max_reference_age and on a
-      different clock: that one asks whether the plan is *finished*, properly in
-      plan time, this one asks whether it is *progressing*, which is only
-      meaningful against the wall clock. Since the MPC gained the progress state
-      the quantity max_reference_age measures is one the optimizer controls, and
-      a rate of zero is inside the feasible set, so a machine stalled mid-plan
-      slows that guard's own clock with it and never ages out.
-      The rate is per cycle, so it is what the optimizer chose and nothing else:
-      a node whose own loop runs slower than Ts also spends plan slower than real
-      time, and that is a timing fault with solve_budget for an oracle rather
-      than a stalled plan.
-      **Where 0.1 comes from.** Slowing down is the feature, so the threshold has
-      to sit below every legitimate slowdown that has been measured. Issue 119's
-      acceptance run is the calibration: a reference asking more of the slewing
-      axis than its control-safe limit allows, for six seconds -- a genuine
-      over-ask, not a stall -- holds the rate at 0.760 minimum re-measured. The
-      minimum is the number that matters, because one cycle at or above the
-      threshold clears the count. The same issue's weight sweep gives the other
-      end: at a time price 200x too low the controller dawdles at 0.319 minimum
-      on a move it can follow, which is a tuning defect this must not report as a
-      stall either. 0.1 is a third of that and a seventh of the acceptance run's
-      floor, and a plan that keeps running at 0.1 still finishes -- ten times
-      late. What it excludes is the machine that has stopped."
+    description: "Realized progress rate below which a cycle counts as not progressing, as a fraction of
+      nominal (1.0 at the planned speed). Distinct from max_reference_age and on a different clock: that asks
+      whether the plan is *finished*, in plan time; this whether it is *progressing*, against the wall clock.
+      A rate of zero is inside the feasible set, so a stalled machine slows max_reference_age's own clock
+      with it and never ages out. Per cycle, so it is what the optimizer chose: a node whose loop runs slower
+      than Ts is a timing fault with solve_budget for an oracle.
+      0.1 sits below every legitimate slowdown measured. Issue 119's acceptance run -- a genuine six-second
+      over-ask of the slewing axis -- holds a minimum of 0.760, and the minimum is what matters since one
+      cycle at or above the threshold clears the count; its weight sweep gives the other end, a 200x-too-low
+      time price dawdling at 0.319 minimum on a followable move. 0.1 is a third of that. A plan at 0.1 still
+      finishes, ten times late; what this excludes is the machine that has stopped."
     validation:
       gt<>: [0.0]
       lt<>: [1.0]
@@ -919,31 +547,15 @@ crane_mpc:
     type: double
     default_value: 2.0
     read_only: true
-    description: "How long the progress rate may stay under min_progress_rate
-      before it is reported, **s of wall clock**. The bound is on *sustained*
-      near-zero progress: a cycle at or above the rate clears the count outright,
-      so a slowdown, however deep, costs nothing and only a machine that stays
-      stopped reports.
-      **Where 2.0 comes from.** It is one horizon at the shipped grid, N Ts =
-      50 x 40 ms, and that is the argument: a horizon is everything the optimizer
-      can see, so a full one spent without moving through the plan is not a
-      transient at the bottom of a slowdown -- it is the optimizer having looked
-      at all the plan it has and decided against all of it.
-      **Detection time.** Counted from the last cycle that progressed, it is this
-      bound exactly -- 2.00 s, the 50th held cycle on the shipped grid. The
-      issue's 'plus one cycle' is the cold-start case: the first cycle after a
-      new reference, a mode change or a silence has no wall-clock mark yet and so
-      charges no time, which puts that one at 2.04 s. Add at most one health
-      cadence on top: a stall on a solve that converged is a change of verdict
-      and exempt from solver_health_decimation, but where FAULT_SOLVER already
-      stands nothing in the numbering changes and the stall is carried in
-      `message` alone. SolverHealth has no code of its own for it; giving it one
-      is a crane_msgs field add.
-      **This is a report and not a recovery.** The horizon keeps going out -- the
-      machine is where the plan says it is, it is merely not moving through it --
-      and what changes is `fault` on /crane/mpc/solver_health. Nothing here
-      unsticks the machine, and no node in this stack acts on the fault yet, so
-      today a reported stall ends when a person ends it."
+    description: "How long the rate may stay under min_progress_rate before it is reported, **s of wall
+      clock**. Bound is on *sustained* near-zero progress: one cycle at or above the rate clears the count,
+      so a slowdown however deep costs nothing. 2.0 is one horizon, N Ts = 50 x 40 ms -- a full horizon spent
+      without moving through the plan is the optimizer having seen all the plan it has and decided against
+      all of it. Detection is this bound exactly, 2.00 s; cold start (a new reference, mode change or
+      silence, with no wall-clock mark yet) is 2.04 s, plus at most one health cadence. SolverHealth has no
+      code for a stall -- where FAULT_SOLVER already stands it is carried in `message` alone.
+      **A report, not a recovery.** The horizon keeps going out; only `fault` changes, and no node acts on it
+      yet, so today a reported stall ends when a person ends it."
     validation:
       gt<>: [0.0]
 
@@ -951,25 +563,14 @@ crane_mpc:
     type: double
     default_value: 0.04
     read_only: true
-    description: "How far ahead of this node's own clock a reference's stamp may
-      be and still be used, s. Clock synchronisation between the workstation and
-      the RT-IPC is a **functional requirement** (the design documentation, control_architecture
-      3.3's last paragraph) and this parameter is where that requirement is
-      answered rather than assumed. A lead inside this bound is treated as zero --
-      the plan starts now -- because one cycle of disagreement between two
-      machines is not a plan for later. A larger lead stops the publisher and is
-      reported: nothing in the message distinguishes a plan stamped for the future
-      from two clocks that disagree, and a horizon placed in the wrong second is
-      worse than no horizon at all, because the receiver's expiry ramp is a
-      defined behaviour and a misplaced plan is not. One T_s is the default for
-      the same reason: it is the resolution the whole path is quantised at.
-      **It bounds /crane/controller_state's stamp the same way**, and there it
-      matters twice: shadow mode's judgement claims to compare against what drove
-      at the same instant, and that same stream is where x_0's propagation input
-      comes from while the follower is driving. A command stamped in this node's
-      future is one the machine has not taken yet, so comparing across it would
-      judge the shadow solve against a command that never executed *from* a state
-      the machine was never in -- two wrong halves that read as an ordinary
-      divergence. Refused and named on the comparison instead."
+    description: "How far ahead of this node's clock a reference's stamp may be and still be used, s. A lead
+      inside this bound is treated as zero -- one cycle of disagreement between two machines is not a plan
+      for later. A larger lead stops the publisher and is reported: a horizon placed in the wrong second is
+      worse than none, since the receiver's expiry ramp is defined behaviour and a misplaced plan is not.
+      One T_s, the resolution the whole path is quantised at.
+      **Also bounds /crane/controller_state's stamp**, which is both shadow mode's comparison instant and
+      x_0's propagation input while the follower drives. A command stamped in this node's future has not been
+      taken yet, so comparing across it judges the shadow solve against a command that never executed *from*
+      a state the machine was never in."
     validation:
       gt<>: [0.0]

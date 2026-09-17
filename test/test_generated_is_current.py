@@ -11,16 +11,12 @@ def test_the_checked_in_solver_is_current():
     """
     The staleness gate, re-homed.
 
-    It was a CMake `ALL` target until issue 133 and could not survive the
-    `ament_python` conversion as one. Losing it was the alternative: the same
-    check is documented as "what CI runs" in `crane_planning`, and nothing runs
-    it there. `generated/` is compiled by nobody -- the node builds its own
-    solver at startup -- so this test is the whole reason a diff of that tree is
-    worth reviewing.
+    Was a CMake `ALL` target until issue 133; `generated/` is compiled by
+    nobody (the node builds its own solver at startup), so this test is the
+    only reason a diff of that tree gets reviewed.
 
-    A subprocess rather than an import: the exporter is a script, it puts
-    `crane_ocp/scripts` on `sys.path` and it regenerates a solver, none of which
-    belongs in the test process.
+    Subprocess, not import: the exporter puts `crane_ocp/scripts` on
+    `sys.path` and regenerates a solver, none of which belongs in-process.
     """
     check = subprocess.run(
         [sys.executable, str(PACKAGE / "scripts" / "export_ocp.py"), "--check"],

@@ -1,49 +1,33 @@
-# Default MPC configuration. See wiki/ for system-level design.
+# Default MPC configuration.
 crane_mpc:
   ros__parameters:
     mode: shadow
 
-    # Coarser than the 0.04/50 this used to ship, and for cost, not taste. At
-    # 0.04/50 the solve measures 17 ms median / 29.8 ms max on an idle box
-    # against a 30 ms budget -- no margin at all -- so under the sim's own load
-    # (gazebo server + gui + rviz, load 20+ on 8 cores) every solve runs over
-    # and mpc §6's escalation fires on cycle 5 and then every cycle after.
-    # 0.06/40 measures 12.8 ms median / 25.0 ms max on the same box and the same
-    # A2B move (scripts/mpc_a2b.py, 2026-09-16), and tracks *better* than the
-    # grid it replaces: final error norm 0.358 against 0.420, peak sway 0.157
-    # against 0.161 rad. 0.10/25 is cheaper still (7.3 ms median) and was
-    # measured and rejected: 21% more final error, 17% more sway, and the QP
-    # hits its iteration cap on a cold solve.
-    # The grid may be coarse because nothing downstream samples it: the horizon
-    # goes to the JTC as a JointTrajectory with per-point time_from_start and
-    # the PID plugin interpolates between knots.
-    # Two numbers this may not cross. 40 x 0.06 = 2.34 s still covers the
-    # order-2 s sway period wiki/mpc.md sizes N by, and control_architecture
-    # 3.3's 2 s fault-tolerance budget -- both of which the old 1.96 s only just
-    # missed. And Ts may not exceed `sensor_to_valve_delay` below: past 0.06 a
-    # single command is in flight for the whole delay window, `replay_schedule`
-    # collapses to one segment and the two-command prediction stops being a
-    # thing the predictor can express.
-    # ros2_interfaces 4 pins /crane/mpc/horizon at 25 Hz and this publishes at
-    # 16.7 Hz; the node says so at startup. That row wants reconciling with the
-    # measured cost, in its own issue -- 25 Hz was never achieved here.
+    # Coarser than the former 0.04/50, for cost: 17 ms median/29.8 ms max vs a
+    # 30 ms budget -- no margin, overruns under sim load. 0.06/40 (measured,
+    # scripts/mpc_a2b.py): 12.8/25.0 ms, tracks better (error 0.358 vs 0.420,
+    # sway 0.157 vs 0.161). 0.10/25 rejected: cheaper (7.3 ms) but 21% more
+    # error, 17% more sway, QP iteration cap cold.
+    # Nothing downstream samples the grid (JTC interpolates via PID). But
+    # 40*0.06=2.34s must cover the ~2s sway period and 2s fault-tolerance
+    # budget (old 1.96s missed both), and Ts must not exceed
+    # sensor_to_valve_delay below or replay_schedule breaks two-command
+    # prediction.
+    # Publishes at 16.7 Hz vs a 25 Hz target; unresolved, own issue.
     Ts: 0.06
     horizon_length: 40
 
-    # C3 block 1, the transport dead time, pinned common to all six axes
-    # (wiki/hydraulic_actuator_model.md:48). It is modelled **here**, in the
-    # predictor, and not inside the plant: symbolic.py carries blocks 2, 3
-    # and 5 and no delay, so a second one here would double-count it.
+    # Transport dead time, common to all six axes. Modelled here in the
+    # predictor, not in the plant: symbolic.py carries the other blocks with
+    # no delay, so a second one there would double-count it.
     sensor_to_valve_delay: 0.06
     max_state_age: 0.2
     levenberg_marquardt: 1.0e-6
 
-    # A health threshold, not a period: above Ts on purpose. Idle, 0.06/40 costs
-    # 12.8 ms median / 25.0 ms max, but the same solve measured 2-4x that under
-    # the sim's own load, and a budget sized for an idle box is what made §6
-    # escalate on a box that was merely busy. Overrunning Ts costs cadence and
-    # not correctness -- the first knot is re-anchored at now + delay every
-    # cycle, and 2.34 s of horizon outlives a late one.
+    # Health threshold, not a period: above Ts on purpose. Idle, 0.06/40:
+    # 12.8/25 ms, but 2-4x that under sim load -- an idle-sized budget made
+    # escalation fire on a merely busy box. Overrun costs cadence not
+    # correctness: knots re-anchor each cycle and 2.34s of horizon outlives one.
     solve_budget: 0.08
 
     solver_health_decimation: 2
@@ -51,84 +35,63 @@ crane_mpc:
     max_consecutive_failures: 5
 
     sway:
-      # rad/s per passive row. nomenclature 9's registered value, and what the
-      # four control_recordings bags say a still machine reads: 0.0046 rad/s RMS
-      # on theta6_tip_joint/theta7_tilt_joint over 406 s of quiescence, maximum
-      # 0.039. See the parameter description -- this verdict is instantaneous.
+      # rad/s per passive row. Four control_recordings bags: still machine
+      # reads 0.0046 rad/s RMS on theta6_tip_joint/theta7_tilt_joint over
+      # 406 s quiescence, max 0.039. Instantaneous verdict.
       dq_u_settled: [0.04, 0.04]
 
     weights:
       q_a: [4.0, 4.0, 4.0, 4.0, 1.0, 1.0]
       dq_a: [0.4, 0.4, 0.4, 0.4, 0.1, 0.1]
-      # Sway is damped by rate alone. Not an oversight and not a retune: q_eq is
-      # frozen at the measurement, so a weight here prices boom+arm travel rather
-      # than swing, and measured under the node's own centre 20.0 is worse than
-      # 0.0 on both tracking and sway. Issue 137 settled that and moved the
-      # declared default onto it; the derivation is in the parameter description
-      # and the centre is issue 049's.
+      # Sway damped by rate alone, deliberately: q_eq frozen at measurement,
+      # so this prices boom+arm travel, not swing. Node's own centre 20.0 is
+      # worse than 0.0 on tracking and sway (issue 137); centre is issue 049's.
       q_u: [0.0, 0.0]
       dq_u: [4.0, 4.0]
-      # Priced against h_eff and not against zero -- see the parameter
-      # description; a zero reference prices holding the machine's own weight.
+      # Priced against h_eff, not zero -- a zero reference prices holding the
+      # machine's own weight.
       tau_a: [1.0e-8, 1.0e-8, 1.0e-8, 1.0e-8, 1.0e-8, 1.0e-8]
-      # `u` is a velocity here, and progress_rate below is derived against this
+      # `u` is a velocity here; progress_rate below is derived against this
       # 1.0 -- the two move together or not at all (issue 137).
       u: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
-      # The progress rows. `lag` is the tracking error projected on the
-      # reference's direction of travel, on the slewing axis alone as in the
-      # original, at Marc's ratio against his weight_qA carried onto q_a's 4.0.
-      # `progress_rate` is the quadratic regulator toward one second of plan per
-      # second of wall clock -- what the MPC pays to spend time -- and it is
-      # **measured, not carried across**: at Marc's ratio (0.8) a move every axis
-      # can follow settles at a rate of 0.34, because the rest of this cost is
-      # not his. See the parameter description for the measurement.
+      # `lag`: tracking error on the reference's direction of travel, slewing
+      # axis only, at Marc's ratio against q_a's 4.0. `progress_rate`:
+      # regulator toward 1s plan/1s wall clock, measured -- Marc's ratio (0.8)
+      # settles at 0.34 here.
       lag: 40.0
       progress_rate: 160.0
       progress_accel: 0.01
       terminal_scale: 10.0
 
     limits:
-      # The boom's lower is Marc's 0.0, not the description's -1.2 (issue 128).
-      # The four-bar stops closing at q2 = -1.1841609 -- below it the
-      # discriminant of wiki/hydraulics.md §2.2 is negative and the pose does not
-      # exist -- and the ratio is negative on (-1.18416, -1.15096), so -1.2
-      # admitted 0.0158 rad of nonexistent poses and a decade of under-reported
-      # cylinder force above them. Provenance in crane_model/config/control_safe_limits.yaml.
+      # Boom lower is Marc's 0.0, not -1.2 (issue 128): below q2=-1.1841609
+      # the four-bar pose doesn't exist, and the ratio is negative on
+      # (-1.18416,-1.15096), so -1.2 admitted 0.0158 rad of nonexistent poses.
+      # Provenance: crane_model/config/control_safe_limits.yaml.
       q_a_lower: [-3.71, 0.0, -0.91, 0.0, -12.566370614359172, 0.2]
-      # The arm's upper is the **working branch**, not the description's 4.6:
-      # constraint 6 divides by the arm's transmission ratio and that ratio
-      # crosses zero at q3 = 1.8466647 (issue 126). Marc's 1.324864 sits 0.52 rad
-      # below it -- see the parameter description for the two sources.
+      # Arm upper is the working branch, not 4.6: transmission ratio crosses
+      # zero at q3=1.8466647 (issue 126); Marc's 1.324864 sits 0.52 rad below it.
       q_a_upper: [3.71, 1.563, 1.324864, 2.236, 12.566370614359172, 0.7]
-      # Constraint 2 is one-sided, |dq_a| <= dq_a^+, so a symmetric box is all it
-      # can carry. Marc's is **asymmetric** and the rows here used to take his
-      # looser side: the boom allowed 36 % and the telescope 58 % more extension
-      # than he does. Each row is now the smaller of his two magnitudes, which is
-      # inward on both sides (issue 128). Retraction pays for it -- boom 0.326 ->
-      # 0.239, telescope 0.630 -> 0.400 -- and that is the price of one number
-      # per axis; a second bound is a constraint-row change and not this issue's.
-      # The velocity rows have no `position_box`, so inside that band the machine
-      # may legally be moving faster than this bound and engaging there asks the
-      # first interval to brake. See crane_model/config/control_safe_limits.yaml.
+      # Constraint 2 is one-sided (|dq_a|<=dq_a^+), so only a symmetric box
+      # fits. Marc's asymmetric rows used to take his looser side (boom +36%,
+      # telescope +58%); now each is the smaller magnitude (issue 128): boom
+      # 0.326->0.239, telescope 0.630->0.400. Velocity rows have no
+      # `position_box`, so engaging inside this band forces braking.
       dq_a_max: [0.764, 0.239067, 0.325733, 0.400000, 2.121947, 0.5]
-      # Marc's `joint_limit.safety_thresh`, as a tightening of constraint 1's
-      # bound rather than the point a penalty starts biting. dq_a_max times the
-      # 60 ms transport dead time: the travel the axis cannot react within. Kept
-      # at the pre-128 dq_a_max, so on the four axes 128 narrowed it now exceeds
-      # that product -- recomputing would *widen* the effective box, which issue
-      # 128 forbids. The rotator's 0.127 is unchanged and is a rounding of it.
+      # Marc's `joint_limit.safety_thresh`: tightens constraint 1's bound.
+      # dq_a_max * 60 ms transport delay = travel the axis can't react
+      # within. Kept at pre-128 dq_a_max on purpose (recomputing would widen
+      # the box, issue 128 forbids); rotator's 0.127 is a rounding of it.
       q_a_margin: [0.048, 0.020, 0.021, 0.038, 0.127, 0.030]
       q_u_max: [0.2, 0.2]
       dq_u_max: [1.0, 0.5]
-      # `u` is a **joint velocity** at Psi's input under C3, not an acceleration.
-      # Per axis the smaller of Psi's own identified domain (compensator_map 3;
-      # sw 0.9357, ha 0.2880, ka 0.3059, sa 0.5551, ro 2.3969) and dq_a_max. The
-      # narrowed dq_a_max moves the boom and the telescope over: only the arm is
-      # still bounded by the fit's domain, the other four by the velocity box.
+      # `u` is a joint velocity at Psi's input, not acceleration: per axis,
+      # the smaller of Psi's identified domain (sw 0.9357, ha 0.2880, ka
+      # 0.3059, sa 0.5551, ro 2.3969) and dq_a_max. Narrowed dq_a_max moves
+      # boom/telescope over; only the arm is still bounded by the fit.
       u_max: [0.764, 0.239067, 0.305, 0.400000, 2.121947, 0.5]
-      # `0 <= v_s <= progress_rate_max`. The floor is zero and structural: the
-      # machine does not run the plan backwards. The ceiling is catch-up
-      # headroom after a slowdown.
+      # `0 <= v_s <= progress_rate_max`. Floor is structural zero -- plan
+      # never runs backwards. Ceiling is catch-up headroom after a slowdown.
       progress_rate_max: 1.5
       progress_accel_max: 2.0
 
@@ -140,11 +103,9 @@ crane_mpc:
 
     max_reference_age: 0.5
 
-    # The liveness pair, on wall clock. max_reference_age above asks whether the
-    # plan is finished and asks it in plan time, which the optimizer controls;
-    # these ask whether it is progressing at all. 0.1 is a seventh of the lowest
-    # rate any legitimate over-ask has been measured at (issue 119's acceptance
-    # run, 0.760 re-measured), and 2.0 s is one horizon.
+    # Liveness pair, wall clock (max_reference_age above is plan-time,
+    # optimizer-controlled). 0.1 is a seventh of the lowest legitimate
+    # over-ask measured (issue 119, 0.760 re-measured); 2.0s is one horizon.
     min_progress_rate: 0.1
     max_stall_time: 2.0
 

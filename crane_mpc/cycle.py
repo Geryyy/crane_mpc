@@ -1,19 +1,10 @@
 """
 One MPC cycle, without ROS.
 
-What `node.update()` does between reading the graph and writing to it: the
-silence gates, the cadence anchor, the state one solve carries to the next and
-`mpc` §6's fallback ladder. `node.py` reads the graph, hands the numbers in and
-publishes what comes back.
-
-Times are integer nanoseconds rather than `rclpy.time.Time`. The conversion is
-exact both ways and it was the only thing rclpy carried into the cycle, so the
-ladder, the anchor and the shift are constructible and tested without a node --
-which is the whole reason this module exists.
-
-The wire names live here rather than in `node.py` because the refusals quote
-them: a gate that says "nothing is published on /crane/mpc/horizon" needs the
-name, and `reports.py` needs the same strings.
+`node.update()` calls into this: silence gates, cadence anchor, state carried
+solve to solve, the repeated-failure ladder. Nanosecond ints, not
+`rclpy.time.Time`, keep it testable without a node. Wire names live here, not
+in `node.py`, because refusals quote them and `reports.py` reuses them.
 """
 
 from __future__ import annotations
@@ -100,15 +91,10 @@ def carry_actuated_velocity(
     x: np.ndarray, carried, from_measurement, divergence_max
 ) -> VelocityCarry:
     """
-    Put the model's own velocity into `x` on the axes that opt out of feedback.
+    Put the model's own velocity into `x` on axes that opt out of feedback.
 
-    `from_measurement[axis]` false overwrites that planned velocity row with
-    `carried[axis]`, the previous cycle's propagated value, instead of the
-    measurement. Positions and both passive rows are never touched, and a carry
-    that is not finite falls back to the measurement rather than poisoning `x`.
-
-    All-true is the shipped default and then this writes nothing at all, which
-    is what makes the feature bit-identical until it is configured.
+    `from_measurement[axis]` false uses `carried[axis]` instead; non-finite
+    falls back to measurement. All-true (default) makes this a no-op.
     """
     report = VelocityCarry()
     for axis in range(PLANNED_DOF):
@@ -126,12 +112,7 @@ def carry_actuated_velocity(
 
 @dataclass
 class Measurement:
-    """
-    What `/joint_states` last carried, with the age of each group of rows.
-
-    An age of `None` is "nothing has arrived", which is a different refusal from
-    "what arrived is stale".
-    """
+    """What `/joint_states` last carried; `None` age means nothing arrived, not stale."""
 
     q_a: np.ndarray
     dq_a: np.ndarray
@@ -151,12 +132,7 @@ class Measurement:
 
 
 def follower_input(follower: FollowerCommand, u_max) -> np.ndarray:
-    """
-    Take the follower's command as `u`.
-
-    Under C3 `u` **is** a joint velocity, so it is clipped and never
-    differenced into an acceleration.
-    """
+    """`u` is the follower's command: a clipped joint velocity (C3), never differenced."""
     command = np.zeros(cs.NU_PROGRESS)
     if not follower.complete:
         return command
@@ -169,28 +145,10 @@ def watch_progress(held, advance, nominal, wall_dt, min_rate, max_stall_time):
     """
     Fold one published cycle into the wall-clock stall watch. `(held, stalled)`.
 
-    `advance` is the virtual time this cycle spent, `nominal` what it would have
-    spent at `v_s = 1`, so their ratio is the realized progress rate. The gate in
-    `gates` asks whether the plan is **finished** and asks it in plan time, which
-    is the right clock for that question. This asks whether it is
-    **progressing**, and that one is only meaningful against the wall clock: the
-    progress rate is a decision variable with zero inside its feasible set, so an
-    optimizer that stops spending the plan also stops ageing it and the
-    max_reference_age gate slows down with the machine and never fires.
-
-    A cycle under `min_rate` adds its own wall-clock duration, capped at the
-    timeout so a long stall cannot run the count away; any other cycle clears it
-    outright. The verdict is therefore on *sustained* near-zero progress and not
-    on a slowdown -- slowing down is the feature working.
-
-    `nominal` is one grid step, so the rate is per cycle: it is the progress rate
-    the optimizer chose and nothing else. A node whose own loop runs slower than
-    `Ts` also spends plan slower than real time, and that is a timing fault with
-    `solve_budget` for an oracle.
-
-    Every comparison reads a NaN as *not progressing* and as *no wall time*.
-    Neither is reachable from `advance`, which sanitises both, but a guard that
-    reads a corrupt number as a healthy cycle is the one that costs something.
+    Checked against the wall clock, not plan time: the optimizer can choose
+    zero progress and never trip max_reference_age otherwise. A cycle under
+    `min_rate` adds wall-clock duration, capped at the timeout; any other
+    cycle clears it -- flags sustained near-zero progress, not a slowdown.
     """
     step = wall_dt if wall_dt > 0.0 else 0.0
     progressing = nominal > 0.0 and advance >= min_rate * nominal
@@ -200,12 +158,7 @@ def watch_progress(held, advance, nominal, wall_dt, min_rate, max_stall_time):
 
 
 class Cycle:
-    """
-    The MPC's own state between two solves, and the decisions it makes on it.
-
-    Everything the node published last cycle is reachable from here; nothing
-    here reaches back into the node.
-    """
+    """The MPC's own state between two solves; nothing here reaches back into the node."""
 
     def __init__(
         self,
@@ -236,8 +189,7 @@ class Cycle:
         self.reference_stamp_ns = 0
         self.reference_progress = 0.0
         self.reference_anchored = False
-        # `watch_progress`'s state. Only cycles that published feed it, because
-        # only those spent a decision of this node's.
+        # `watch_progress` state; only published cycles feed it.
         self.progress_held = 0.0
         self.progress_stalled = False
         self.progress_mark_ns = 0
@@ -250,23 +202,18 @@ class Cycle:
         self.tcp_states: np.ndarray | None = None
         self.last_tcp_states: np.ndarray | None = None
 
-        # The OCP's own rows that no sensor carries: C3's lagged command, its
-        # force state and the progress pair. Seeded at the first solve.
+        # OCP rows no sensor carries: lagged command, force state, progress pair.
         self.carried = np.zeros(cs.NX)
         self.carried[cs.X_PROGRESS_RATE] = problem.K_PROGRESS_RATE_REFERENCE
         self.seed_force = True
-        # The previous cycle's propagated planned velocity, read back as the
-        # carry. **Not a second integrator**: a read of `Ocp.propagate`'s own
-        # output, the same one x_0 is built from. `None` until one has been
-        # propagated, and the first cycle then takes the measurement.
+        # Previous cycle's propagated velocity, read back as the carry -- not a
+        # second integrator. `None` until propagated once.
         self.dq_a_carried: np.ndarray | None = None
         self.velocity_carry = VelocityCarry()
         self.last_input = np.zeros(cs.NU_PROGRESS)
-        # What this node put in flight, newest first. `last_input` is one command
-        # and the dead time is 1.5 intervals on the shipped 40 ms / 60 ms, so the
-        # machine really did execute two different numbers over the window the
-        # propagation carries `x_0` across. One entry per cycle, kept only as deep
-        # as `Ocp.replay` can ask for.
+        # What this node put in flight, newest first. Dead time is 1.5 intervals
+        # on the shipped 40 ms / 60 ms, so two commands span the propagation
+        # window. Kept as deep as `Ocp.replay` needs.
         self.applied_inputs: list = []
         self.guess = None
         self.last_solution = None
@@ -276,9 +223,8 @@ class Cycle:
         self.tool_position = 0.0
 
         self.solves = 0
-        # Every cycle, silent ones included. `solves` is the wrong clock for a
-        # stream that reports the machine rather than the solve: it stops
-        # advancing on a silent cycle and would freeze that stream's cadence.
+        # Every cycle, silent ones included -- `solves` freezes on a silent
+        # cycle, wrong clock for a stream reporting the machine, not the solve.
         self.cycles = 0
         self.consecutive_failures = 0
         self.escalated = False
@@ -301,27 +247,21 @@ class Cycle:
         self.reference = reference
         self.reference_stamp_ns = stamp_ns
         self.reference_anchored = False
-        # The stall watch is per plan: a new reference is the re-plan a stall
-        # asks for, and counting the old plan's stall against it reports the
-        # answer.
+        # Stall watch is per plan: a new reference is the re-plan a stall asks for.
         self.forget_stall()
 
     def adopt_mode(self, requested: str) -> str:
         """Move to `requested` and cold start. Returns the mode left behind."""
         previous, self.mode = self.mode, requested
         self.forget_plan()
-        # In shadow this node's plan drives nothing, so its own progress may sit
-        # near zero for as long as the follower is doing something else. Carried
-        # into active that reports a stall on the first cycle that takes the
-        # machine, on evidence gathered while it did not.
+        # In shadow this node's plan drives nothing, so progress may sit near
+        # zero; carried to active that would falsely report a stall.
         self.forget_stall()
         self.consecutive_failures = 0
         self.escalated = False
         self.cadence_anchored = False
         self.last_input = np.zeros(cs.NU_PROGRESS)
-        # And the rest of what was in flight: every entry older than this instant
-        # was issued by whatever was driving before, and replaying those would
-        # carry `x_0` forward under another commander's plan.
+        # Rest of what was in flight: replaying it would carry `x_0` under another commander's plan.
         self.applied_inputs.clear()
         return previous
 
@@ -332,12 +272,7 @@ class Cycle:
             self.last_input = follower_input(follower, u_max)
 
     def payload_changed(self) -> None:
-        """
-        Drop what a payload step made stale.
-
-        A payload step is a model change: the plan that was warm was a plan for
-        the old payload, and the force state was seeded against its weight.
-        """
+        """Drop what a payload step made stale: the warm plan, the force state seeded for it."""
         self.forget_plan()
         self.seed_force = True
 
@@ -347,8 +282,7 @@ class Cycle:
         """
         Run the reference's three refusals, then the anchor and the resample.
 
-        Returns the `Silence` that stops this cycle, or `None` and a horizon on
-        `self.horizon`.
+        Returns the `Silence` that stops this cycle, or `None` with `self.horizon` set.
         """
         if self.reference is None or len(self.reference) == 0:
             return Silence(
@@ -400,12 +334,7 @@ class Cycle:
         return None
 
     def anchor_cadence(self, now_ns: int) -> None:
-        """
-        Decide when the first knot takes effect.
-
-        `now` plus the transport delay, re-anchored whenever the cadence has
-        drifted off the horizon.
-        """
+        """Decide when the first knot takes effect: `now` plus transport delay."""
         anchor = now_ns + int(self.delay * NANOSECONDS)
         ceiling = now_ns + int((self.delay + self.grid.duration()) * NANOSECONDS)
         if (
@@ -420,8 +349,7 @@ class Cycle:
         """
         `x` from `/joint_states` alone, or the `Silence` that stops the cycle.
 
-        The actuator rows are the ones carried from the last accepted solve:
-        nothing measures the command in flight or the force the cylinders are at.
+        Actuator force/command rows come from the last accepted solve -- unmeasured.
         """
         why = measurement.refusal(max_state_age)
         if why:
@@ -431,9 +359,8 @@ class Cycle:
                 f"to solve from: {why}.",
             )
 
-        # One snapshot of the tool row for the whole cycle. The node read
-        # `self._q_a` live at four points; under the single-threaded executor no
-        # callback can land between them, so this is the same number.
+        # One snapshot of the tool row: single-threaded executor, no callback
+        # lands between reads.
         self.tool_position = float(measurement.q_a[TOOL_AXIS])
         x = self.carried.copy()
         x[cs.X_PLANNED_POSITION : cs.X_PLANNED_POSITION + PLANNED_DOF] = (
@@ -442,9 +369,8 @@ class Cycle:
         x[cs.X_PLANNED_VELOCITY : cs.X_PLANNED_VELOCITY + PLANNED_DOF] = (
             measurement.dq_a[:PLANNED_DOF]
         )
-        # On an axis whose `dq_a_feedback` entry is false the velocity is the
-        # model's own from the previous cycle rather than the measurement just
-        # written. All-true ships, so this writes nothing until it is configured.
+        # `dq_a_feedback[axis]` false: velocity is the model's, not the
+        # measurement just written. All-true ships, so this is inert by default.
         self.velocity_carry = (
             VelocityCarry()
             if self.dq_a_carried is None
@@ -458,8 +384,8 @@ class Cycle:
         )
         x[cs.X_PROGRESS] = 0.0
         if self.seed_force:
-            # C3 block 3 starts holding the machine's own weight: zero would be
-            # the hydraulics switched off, and there is no force measurement.
+            # C3 seeds holding the machine's weight, not zero (hydraulics off) --
+            # no force is measured.
             self.ocp.pin_tool(self.tool_position)
             x[cs.X_ACTUATED_FORCE : cs.X_ACTUATED_FORCE + PLANNED_DOF] = (
                 self.ocp.static_hold_force(x)
@@ -472,9 +398,8 @@ class Cycle:
     def propagate(self):
         """Carry the measurement over the dead time, or refuse the cycle."""
         self.ocp.pin_tool(self.tool_position)
-        # One entry per cycle, recorded here rather than beside each `last_input`
-        # write: in shadow mode there are two of those per cycle and still only
-        # one command, and by this line `last_input` is whichever of them applies.
+        # Recorded here, not beside `last_input` writes: shadow mode writes it
+        # twice per cycle but only one command applies here.
         self.applied_inputs.insert(0, self.last_input.copy())
         depth = self.ocp.replay[0].age + 1 if self.ocp.replay else 1
         del self.applied_inputs[depth:]
@@ -487,18 +412,14 @@ class Cycle:
                 f"The measured state could not be carried {self.delay} s forward, so "
                 f"nothing is published on {HORIZON_TOPIC}: {error}.",
             )
-        # The sway box, and §2's offset residual with it, are centred on where the
-        # tool is actually swinging and not on the hanging pose. `weights.q_u`
-        # being zero and this centre still justify each other in a circle, but the
-        # circle is no longer only recorded: issue 137 measured it, and the centre
-        # is worth 3-4x the peak sway the weight is worth nothing. Issue 049's.
+        # Sway box and offset residual centred on where the tool actually
+        # swings, not the hanging pose -- issue 137 measured centre worth 3-4x
+        # peak sway, weight worth nothing (issue 049).
         self.q_eq = x0[
             cs.X_PASSIVE_POSITION : cs.X_PASSIVE_POSITION + PASSIVE_DOF
         ].copy()
-        # What the next cycle carries on an axis that opted out of feedback: what
-        # this propagation says the velocity is when the plan takes effect. One
-        # cycle old and half a delay ahead of the measurement instant, which is
-        # inside what dq_a_divergence_max watches.
+        # Next cycle's carry on an opted-out axis: this propagation's velocity,
+        # one cycle old -- inside what dq_a_divergence_max watches.
         self.dq_a_carried = x0[
             cs.X_PLANNED_VELOCITY : cs.X_PLANNED_VELOCITY + PLANNED_DOF
         ].copy()
@@ -509,10 +430,9 @@ class Cycle:
 
     def solve(self):
         """
-        Solve. Returns `(solution, refusal)`; exactly one of the two is falsy.
+        Solve. Returns `(solution, refusal)`; exactly one is falsy.
 
-        A refusal has already stopped the publisher, so the caller only reports
-        it.
+        A refusal has already stopped the publisher; the caller only reports it.
         """
         try:
             solution = self.ocp.solve(self.x0, self.horizon, self.q_eq, self.guess)
@@ -538,7 +458,7 @@ class Cycle:
         return solution, ""
 
     def ladder(self, solution, max_consecutive_failures: int, solve_budget_s: float):
-        """`mpc` §6: publish this solve, shift the last one, or hand control back."""
+        """Publish this solve, shift the last one, or hand control back."""
         destination = HORIZON_TOPIC if self.mode == "active" else SHADOW_HORIZON_TOPIC
 
         if solution.outcome is Outcome.CONVERGED:
@@ -551,12 +471,9 @@ class Cycle:
             )
 
         if self.consecutive_failures >= max_consecutive_failures:
-            # Handing control back happens once; the cycles after it are this
-            # node waiting for a solve it can believe, and they are not further
-            # hand-backs. The count keeps rising and `SolverHealth` keeps
-            # carrying `FAULT_SOLVER` either way -- only how loudly this is said
-            # changes, because an error per cycle for as long as the condition
-            # holds buries the cycle that explains it.
+            # Handing back happens once; later cycles just wait for a believable
+            # solve. SolverHealth keeps FAULT_SOLVER either way -- only log
+            # severity changes, so it doesn't bury the explaining cycle.
             handing_back = not self.escalated
             self.escalated = True
             self.applied_previous = False
@@ -623,8 +540,7 @@ class Cycle:
         # The tool is pinned, not planned: it holds where it was measured.
         self.horizon.q_a_ref[:, TOOL_AXIS] = self.tool_position
         self.horizon.dq_a_ref[:, TOOL_AXIS] = 0.0
-        # The sway the JTC tracks but does not command. Nothing is planned for
-        # it -- this is the OCP's own prediction of where the tool will be.
+        # Sway that JTC tracks but doesn't command -- OCP's own prediction.
         self.horizon.q_u_ref[:] = states[
             :, cs.X_PASSIVE_POSITION : cs.X_PASSIVE_POSITION + PASSIVE_DOF
         ]
@@ -634,7 +550,7 @@ class Cycle:
         self.tcp_states = states.copy()
 
     def shift_previous_horizon(self) -> bool:
-        """Shift the last horizon one knot on, duplicating its last: mpc §6."""
+        """Shift the last horizon one knot on, duplicating its last knot."""
         if (
             self.last_horizon is None
             or self.last_tcp_states is None
@@ -677,8 +593,7 @@ class Cycle:
             self.last_input = np.zeros(cs.NU_PROGRESS)
             self.last_input[:PLANNED_DOF] = self.horizon.dq_a_ref[1, :PLANNED_DOF]
         if solution.outcome is not Outcome.FAILED:
-            # C3's own rows, carried: the command in flight and the force the
-            # actuators are at. No sensor reports either.
+            # C3's own rows carried: command in flight, actuator force -- unmeasured.
             self.carried = solution.states[1].copy()
 
         self.next_first_knot_ns += int(self.Ts * NANOSECONDS)
@@ -686,14 +601,10 @@ class Cycle:
         spent = advance if np.isfinite(advance) and advance >= 0.0 else self.Ts
         self.reference_progress += spent
 
-        # The liveness check, on the wall clock on purpose: what the plan cost in
-        # wall-clock seconds is the one quantity the optimizer does not choose,
-        # and how much plan that bought is exactly what it does. Reported and not
-        # recovered from -- the horizon keeps going out, the machine is where the
-        # plan says it is, it is merely not moving through it. A `Failed` cycle
-        # spends a nominal interval above and so clears the count, deliberately:
-        # "the optimizer did not answer" is `max_consecutive_failures`, and this
-        # one is about the answer "wait".
+        # Liveness runs on the wall clock deliberately -- the one quantity the
+        # optimizer doesn't choose. Reported, not recovered from: horizon keeps
+        # going out, machine just isn't moving through the plan. `Failed`
+        # clears the count on purpose -- that's `max_consecutive_failures`'s job.
         wall_dt = (
             (now_ns - self.progress_mark_ns) / 1e9 if self.progress_marked else 0.0
         )
@@ -722,13 +633,9 @@ class Cycle:
         if self.reference_anchored:
             # One nominal interval spent while nobody was driving.
             self.reference_progress += self.Ts
-        # **The stall count survives a silence; only the wall-clock mark does
-        # not.** A silent cycle is not evidence either way -- this node is not
-        # controlling, so no plan is being spent -- and charging its wall time to
-        # the stall would report a producer that died as a machine that stopped.
-        # But clearing the count would mean a stalled machine that drops one
-        # `/joint_states` sample a second never reports at all, which is this
-        # hole one level up.
+        # Stall count survives a silence; only the wall-clock mark doesn't.
+        # Charging wall time here would call a dead producer a stopped machine;
+        # clearing the count would hide a dropped `/joint_states` sample.
         self.progress_marked = False
 
     def forget_stall(self) -> None:
@@ -739,11 +646,9 @@ class Cycle:
 
     def forget_plan(self) -> None:
         """Drop the warm start and the horizon a shift would be taken from."""
-        # The carry goes with them. It was propagated under whatever drove
-        # before, and a break in this node's own output stream -- a gate, the
-        # escalation, a payload step, a mode change -- is this node's
-        # reactivation, so the next cycle re-seeds the row from the measurement
-        # rather than from a state that kept integrating while nobody drove.
+        # Carry goes with them: a break in output (gate, escalation, payload
+        # step, mode change) is reactivation, so next cycle re-seeds from the
+        # measurement, not a state that kept integrating unmanned.
         self.dq_a_carried = None
         self.velocity_carry = VelocityCarry()
         self.last_horizon = None

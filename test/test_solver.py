@@ -45,10 +45,8 @@ def ocp(parameters):
 @pytest.fixture(scope="module")
 def split_delay_ocp(parameters):
     """
-    An OCP whose step is *below* `sensor_to_valve_delay`, which the shipped one
-    no longer is: at `Ts = 0.06 = delay` one command covers the whole window and
-    `replay_schedule` returns a single segment, so the shipped grid cannot
-    exercise a replay of two. Four knots, because nothing here solves.
+    OCP with a step below `sensor_to_valve_delay` (shipped Ts=0.06=delay
+    yields one replay segment). Four knots; nothing here solves.
     """
     values = dict(parameters)
     values["Ts"] = 0.04
@@ -85,9 +83,8 @@ def horizon_holding(ocp, position):
 
 def test_the_predictor_carries_the_command_that_is_in_flight(ocp, state):
     """
-    Issue 125. Under C3 the input reaches `ddq` only through the command-lag and
-    force rows, so a predictor that drops them returns the same state for every
-    command and the delay compensation is a coast at a frozen force.
+    Issue 125: input reaches `ddq` only via the command-lag/force rows; a
+    predictor dropping them returns the same state for every command.
     """
     still = ocp.propagate(state, np.zeros(cs.NU_PROGRESS))
     command = np.zeros(cs.NU_PROGRESS)
@@ -97,7 +94,7 @@ def test_the_predictor_carries_the_command_that_is_in_flight(ocp, state):
     force = slice(cs.X_ACTUATED_FORCE, cs.X_ACTUATED_FORCE + PLANNED)
     assert not np.allclose(driven[force], still[force])
     assert not np.allclose(driven[cs.X_PLANNED_VELOCITY], still[cs.X_PLANNED_VELOCITY])
-    # And it is a prediction, not a reset: the pose barely moves in 60 ms.
+    # A prediction, not a reset: pose barely moves in 60 ms.
     assert np.allclose(
         driven[cs.X_PLANNED_POSITION : cs.X_PLANNED_POSITION + PLANNED],
         state[cs.X_PLANNED_POSITION : cs.X_PLANNED_POSITION + PLANNED],
@@ -107,25 +104,21 @@ def test_the_predictor_carries_the_command_that_is_in_flight(ocp, state):
 
 def test_the_schedule_cuts_the_delay_between_the_commands_in_flight():
     """
-    Issue 125, and no solver needed for it. 60 ms over a 40 ms step is 1.5
-    intervals: the window `[-60, 0)` ms is 20 ms under the command issued at
-    -80 ms and 40 ms under the one issued at -40 ms, so **the remainder belongs
-    to the older entry** -- the half of this worth a test.
+    Issue 125, no solver needed. 60 ms over a 40 ms step is 1.5 intervals: the
+    remainder (20 ms) belongs to the older command -- the part worth testing.
     """
     schedule = replay_schedule(0.06, 0.04)
     assert [segment.age for segment in schedule] == [1, 0]
     assert schedule[0].seconds == pytest.approx(0.02)
     assert schedule[1].seconds == pytest.approx(0.04)
 
-    # An exact multiple is whole steps and nothing else: the grid tolerance is
-    # what keeps a one-ulp remainder from being a third command in flight.
+    # Exact multiple is whole steps only: grid tolerance keeps a one-ulp
+    # remainder from becoming a third command in flight.
     for delay in (0.08, 0.04 + 0.04):
         assert [segment.age for segment in replay_schedule(delay, 0.04)] == [1, 0]
 
-    # The shipped grid: `Ts` equals the delay, so the command in flight covers
-    # the whole window on its own and no older one is replayed. Asserted rather
-    # than left implicit -- it is what a step at or above the delay means, and
-    # `config/crane_mpc.yaml` may not raise `Ts` past it without meeting this.
+    # Shipped grid: Ts equals the delay, so one command covers the window and
+    # nothing older replays. `config/crane_mpc.yaml` may not raise Ts past this.
     assert [segment.age for segment in replay_schedule(0.06, 0.06)] == [0]
     assert [segment.age for segment in replay_schedule(0.06, 0.10)] == [0]
 
@@ -146,18 +139,15 @@ def test_the_prediction_replays_each_command_over_its_own_segment(split_delay_oc
     held = ocp.propagate(state, command)
     repeated = ocp.propagate_applied(state, [command, command])
     clamped = ocp.propagate_applied(state, [command])
-    # What replaying a genuinely different older command over the oldest 20 ms is
-    # worth. The scale everything below is measured against, so it is checked
-    # rather than assumed.
+    # Scale everything below is measured against; checked, not assumed.
     moved = np.max(np.abs(ocp.propagate_applied(state, [command, older]) - held))
     assert moved > 1.0
-    # The same command in every slot is the constant hold back -- but not to the
-    # bit: 20 + 40 ms is not the truncation one 60 ms integration takes, and
-    # acados warm-starts the IRK's Newton from whatever it solved last. Both
-    # residues are orders below what the older command is worth.
+    # Same command in every slot ~= constant hold, but not to the bit: 20+40ms
+    # split differs from one 60ms step, and acados warm-starts IRK Newton from
+    # the last solve. Residues are orders below the older command's worth.
     assert np.max(np.abs(repeated - held)) < 1e-3 * moved
-    # A history shorter than the delay clamps to its oldest entry rather than
-    # inventing an older command: the first cycles after a reset still predict.
+    # History shorter than the delay clamps to its oldest entry rather than
+    # inventing one: cycles right after a reset still predict.
     assert np.max(np.abs(clamped - repeated)) < 1e-3 * moved
     with pytest.raises(ValueError, match="empty history"):
         ocp.propagate_applied(state, [])
@@ -173,8 +163,7 @@ def test_a_solve_keeps_its_plan_inside_the_boxes_it_was_given(ocp, state):
     assert solution.status == 0
     u_max = np.asarray(ocp.parameters["limits"]["u_max"][:PLANNED])
     assert np.all(np.abs(solution.inputs[:, :PLANNED]) <= u_max + 1e-9)
-    # Constraint 1's initial condition: stage zero is the state it was given,
-    # every row of it -- the actuator states are pinned there too.
+    # Constraint 1: stage zero is the given state, every row incl. actuator states.
     assert np.allclose(solution.states[0], state, atol=1e-6)
     # Constraint 2, on every stage rather than only the first.
     dq_max = np.asarray(ocp.parameters["limits"]["dq_a_max"][:PLANNED])
@@ -207,17 +196,16 @@ def test_the_warm_start_is_the_last_horizon_shifted(ocp, state):
     assert guess.warm(ocp.intervals)
     rows = [row for row in range(cs.NX) if row != cs.X_PROGRESS]
     assert np.allclose(guess.states[0][rows], solution.states[1][rows])
-    # `s` restarts every cycle, so the shifted plan is re-origined by what was
-    # spent rather than carried forward with the old origin.
+    # `s` restarts every cycle: shifted plan re-origins by spend, not the old origin.
     assert guess.states[0, cs.X_PROGRESS] <= solution.states[1, cs.X_PROGRESS] + 1e-12
     assert ocp.solve(solution.states[1], horizon, q_eq, guess).warm_started
 
 
 def test_a_payload_step_drops_the_warm_start_whatever_the_caller_passes(ocp, state):
     """
-    `h_eff` moves discontinuously at a grasp, so the plan that was warm was a
-    plan for another model. Held in the solver rather than trusted to the caller
-    passing `guess=None` (`ocp_solver.cpp:1396-1400`).
+    `h_eff` jumps discontinuously at a grasp; a warm plan is then for another
+    model. Held in the solver, not left to caller's `guess=None`
+    (`ocp_solver.cpp:1396-1400`).
     """
     position = state[cs.X_PLANNED_POSITION : cs.X_PLANNED_POSITION + PLANNED]
     horizon = horizon_holding(ocp, position)
@@ -237,9 +225,9 @@ def test_a_second_construction_over_a_warm_cache_compiles_nothing(
     ocp, parameters, monkeypatch
 ):
     """
-    Issue 134. The two integrators beside the solver passed neither `generate`
-    nor `build`, and acados defaults both to True, so every startup ran CasADi
-    code generation and `make` over a cache that was already warm.
+    Issue 134: integrators beside the solver passed neither `generate` nor
+    `build`; acados defaults both True, so every startup regenerated and
+    rebuilt an already-warm cache.
     """
 
     def refuse(*arguments, **keywords):
@@ -258,7 +246,7 @@ def test_a_second_construction_over_a_warm_cache_compiles_nothing(
 
 def test_the_predictor_is_rebuilt_for_the_model_changes_the_solver_is(parameters):
     """
-    The predictor integrates the same model, so a second and weaker key is how a
+    Predictor integrates the same model; a second, weaker cache key is how a
     stale one survives a model change the solver correctly rebuilds for.
     """
     hydraulics = parameters["hydraulics"]
@@ -273,17 +261,15 @@ def test_the_predictor_is_rebuilt_for_the_model_changes_the_solver_is(parameters
     assert warm != predictor_cache(
         solver_signature(parameters, hydraulics, changed), 0.06, 0.04
     )
-    # The sub-step count is generated code too, and the interval alone fixes it
-    # only while `T_s` is held.
+    # Sub-step count is generated code too; the interval alone fixes it only while `T_s` is held.
     assert warm != predictor_cache(signature, 0.06, 0.02)
 
 
 def test_a_non_finite_input_never_reaches_a_solve(ocp, state):
     """
-    Both are the same defect: acados answers a NaN state with status 0, so what
-    comes back is a `FAULT_SOLVER` for a measurement or a reference nobody
-    checked. `ddq_a_ref` is the sharp one -- the resample's second derivative
-    carries `1/dt^2` in the incoming knot spacing, which nothing bounds below.
+    Both are the same defect: acados returns a NaN state with status 0, so
+    `FAULT_SOLVER` means an unchecked reference. `ddq_a_ref` is the sharp one:
+    resample's second derivative carries unbounded `1/dt^2` of knot spacing.
     """
     broken = state.copy()
     broken[cs.X_PLANNED_VELOCITY] = np.nan

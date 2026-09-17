@@ -1,11 +1,9 @@
 """
 A shipped key nobody declared is dropped in silence.
 
-`generate_parameter_library` reads the declaration and `rclpy` discards what does
-not match it -- no warning, no log, and the default runs. Issue 137's divergence
-is not that (a declared key with two values, which is sometimes correct and is
-therefore not under test here); this is the cheaper half of the same gap, and it
-is the one a typo produces.
+`generate_parameter_library` reads the declaration; `rclpy` discards anything
+that doesn't match it -- no warning, default runs. Issue 137's divergence
+(a declared key with two values) is separate; this is the typo half.
 """
 
 from pathlib import Path
@@ -47,11 +45,9 @@ def test_every_shipped_key_is_a_declared_parameter():
 
 
 # --- the pump is one number ---------------------------------------------------
-#
-# `pump_flow_max` and `pump_flow_planning_factor` are also `crane_planning`'s,
-# and both packages turn them into an actuator limit. They had been typed into
-# each separately -- 1.4e-3 here, 0.0014 there -- with nothing comparing them.
-# `crane_model/config/hydraulics.yaml` is the source; this pins both copies.
+# Typed in separately before (1.4e-3 here, 0.0014 there, uncompared) though
+# also `crane_planning`'s. `crane_model/config/hydraulics.yaml` is the
+# source; this pins both copies.
 def test_the_pump_is_the_one_in_crane_model():
     from crane_model.conventions import default_hydraulics_path
 
@@ -72,11 +68,10 @@ def test_the_pump_is_the_one_in_crane_model():
 
 
 # --- the control-safe box is one box ------------------------------------------
-#
-# The same rows bound `crane_planning`, which used to read its box off the
-# description and so certified poses and speeds constraint 1 refuses. The box
-# lives in crane_model now; this pins the declaration and the deployed config to
-# it, in the actuated order of wiki/nomenclature.md 4.
+# Same rows bound `crane_planning`, which used to read its box off the
+# description and certified poses/speeds constraint 1 refuses. Box lives in
+# crane_model now; this pins declaration and deployed config to it, in
+# ACTUATED order below.
 ACTUATED = ("slewing", "boom", "arm", "telescope", "rotator", "tool")
 BOX_ROWS = ("q_a_lower", "q_a_upper", "dq_a_max", "q_a_margin")
 
