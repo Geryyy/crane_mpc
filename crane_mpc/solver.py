@@ -621,6 +621,8 @@ class Ocp:
         self.payload_mass_kg = 0.0
         self.payload_com_m = np.zeros(3)
         self._payload_changed = False
+        #: The parameter vector the last written problem carried, path included.
+        self._last_parameter: np.ndarray | None = None
 
         #: Whether the preparation/feedback split is reachable at all. acados
         #: refuses `rti_phase` outside `SQP_RTI`, so a swept `nlp_solver_type`
@@ -893,8 +895,12 @@ class Ocp:
         # Same box but for one entry, `s`'s ceiling; built once, moved per stage.
         lower, upper = state_bounds(self.parameters, q_eq, measured)
         # The path is the whole horizon's, so one fit per cycle -- `s` carries
-        # which stage a stage is.
+        # which stage a stage is. Kept, because it is what `cost_terms` has to
+        # score against: by the time the node reports, `Cycle.adopt_solution`
+        # has overwritten `horizon.q_a_ref` in place with the solved states, so
+        # refitting from the horizon there scores the solution against itself.
         parameter = self._path_parameters(horizon)
+        self._last_parameter = parameter
         for stage in range(intervals + 1):
             self.solver.set(stage, "p", parameter)
             self.solver.cost_set(
@@ -1116,15 +1122,19 @@ class Ocp:
                 used = True
         return violation, penalty, used
 
-    def cost_terms(self, solution: Solution, horizon, q_eq: np.ndarray) -> CostTerms:
+    def cost_terms(self, solution: Solution, q_eq: np.ndarray) -> CostTerms:
         """Cost, term by term: re-evaluated from the residual, since acados reports one number."""
+        if self._last_parameter is None:
+            raise RuntimeError(
+                "no problem has been written, so there is no cost to split"
+            )
         terms = CostTerms(slack=solution.slack_penalty)
         force_reference = self.static_hold_force(solution.states[0])
         diagonal = np.diag(self._weight)
         terminal_diagonal = np.diag(self._terminal_weight)
         planned = cs.K_PLANNED_DOF
         passive = cs.K_PASSIVE_DOF
-        parameter = self._path_parameters(horizon)
+        parameter = self._last_parameter
         for stage in range(self.intervals + 1):
             terminal = stage == self.intervals
             reference = stage_reference(

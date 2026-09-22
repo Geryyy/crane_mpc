@@ -102,8 +102,18 @@ def test_a_bound_that_is_not_a_bound_is_refused(shipped):
 
 
 def test_a_progress_ceiling_below_the_nominal_rate_is_refused(shipped):
-    shipped["limits"]["progress_rate_max"] = 0.9
+    """
+    Nominal is `1 / ((horizon_length - 1) * Ts)` -- a rate, not `theta`'s end.
+
+    0.3 is under the shipped grid's 0.427/s; 0.64 is a 1.5x catch-up ceiling,
+    which the old check refused because it compared the rate against
+    `K_PROGRESS_RATE_REFERENCE = 1.0`, a path coordinate.
+    """
+    shipped["limits"]["progress_rate_max"] = 0.3
     assert "nominal rate" in refusal(shipped)
+
+    shipped["limits"]["progress_rate_max"] = 0.64
+    check_settings(shipped, shipped["hydraulics"])
 
 
 def test_a_vector_the_problem_is_not_posed_on_is_refused(shipped):

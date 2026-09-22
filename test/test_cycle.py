@@ -503,3 +503,23 @@ def test_the_progress_the_solver_bought_is_read_as_a_path_parameter():
         solution(Outcome.CONVERGED, Ts / window), NOMINAL_NS, MIN_RATE, MAX_STALL
     )
     assert two.reference_progress == pytest.approx(Ts)
+
+
+def test_a_refused_solve_spends_one_interval_and_not_what_its_iterate_claims():
+    """
+    The fallback rung publishes the previous horizon shifted one knot, so what
+    the machine consumes is one interval of *that* plan -- not whatever `s` a
+    solver that did not converge happens to hold.
+
+    Reading the iterate let the window run `progress_rate_max * duration()`
+    ahead per cycle, five cycles deep before the publisher stops, and the next
+    converged cycle then refits the path to a window the machine is not in.
+    """
+    window = hz.Grid(Ts, KNOTS).duration()
+    for outcome in (Outcome.FAILED, Outcome.BUDGET_EXCEEDED):
+        one = cycle()
+        one.reference_anchored = True
+        # An iterate claiming the whole path: believed, it would spend `window`.
+        one.advance(solution(outcome, 1.0), NOMINAL_NS, MIN_RATE, MAX_STALL)
+        assert one.reference_progress == pytest.approx(Ts)
+        assert one.reference_progress < window

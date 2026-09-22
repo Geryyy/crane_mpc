@@ -696,9 +696,7 @@ class MpcNode(Node):
             return
         if solution is not None and self._ocp is not None:
             try:
-                cycle.cost_terms = self._ocp.cost_terms(
-                    solution, cycle.horizon, cycle.q_eq
-                )
+                cycle.cost_terms = self._ocp.cost_terms(solution, cycle.q_eq)
                 reports.fill_cost_terms(health, cycle.cost_terms)
             except Exception as error:
                 self.warn(f"The cost could not be split by term: {error}.")

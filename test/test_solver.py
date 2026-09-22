@@ -55,6 +55,10 @@ def split_delay_ocp(parameters):
     values = dict(parameters)
     values["Ts"] = 0.04
     values["horizon_length"] = 4
+    # `s` spans the window, so a 0.12 s one runs at 8.33/s nominal. Keeping the
+    # shipped 1.5 here would be a grid that cannot spend its own plan, which
+    # `config.check_settings` now refuses. Same 1.5x headroom, this grid's rate.
+    values["limits"] = dict(values["limits"], progress_rate_max=12.5)
     return Ocp(
         problem.default_description().read_text(),
         values,
@@ -185,7 +189,7 @@ def test_the_cost_split_names_where_the_plan_spent(ocp, state):
     q_eq = state[cs.X_PASSIVE_POSITION : cs.X_PASSIVE_POSITION + cs.K_PASSIVE_DOF]
 
     solution = ocp.solve(state, horizon, q_eq)
-    terms = ocp.cost_terms(solution, horizon, q_eq)
+    terms = ocp.cost_terms(solution, q_eq)
     assert terms.q_a > 0.0
     assert all(np.isfinite(value) and value >= 0.0 for value in terms.__dict__.values())
 

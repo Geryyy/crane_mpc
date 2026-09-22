@@ -682,8 +682,19 @@ class Cycle:
         # (86ec918) and this consumer was not moved with it -- the plan then
         # advanced at `s` per cycle, a factor `duration()` short, and only ran
         # at all because the old cost pinned `s` to its ceiling every cycle.
-        advance = solution.progress_advance * self.grid.duration()
-        spent = advance if np.isfinite(advance) and advance >= 0.0 else self.Ts
+        #
+        # Only a converged solve gets to say how much plan it bought. On the
+        # other rungs `ladder` published the previous horizon shifted by one
+        # knot, so what the machine consumes is one interval of *that* plan --
+        # the same nominal interval `stay_silent_after_failure` charges. Reading
+        # `s` off a refused iterate instead let the window run up to 0.21 s of
+        # plan per cycle ahead of the machine, and `max_consecutive_failures`
+        # allows five in a row before the publisher stops.
+        if solution.outcome is Outcome.CONVERGED:
+            advance = solution.progress_advance * self.grid.duration()
+            spent = advance if np.isfinite(advance) and advance >= 0.0 else self.Ts
+        else:
+            spent = self.Ts
         self.reference_progress += spent
 
         # Liveness runs on the wall clock deliberately -- the one quantity the
