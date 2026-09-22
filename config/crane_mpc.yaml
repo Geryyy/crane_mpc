@@ -74,10 +74,27 @@ crane_mpc:
       # the path parameter now, so the cost says *end up at the end of the path*
       # and prices the rate toward rest, instead of saying be here at this time.
       # Regulating the pace is what pushed the horizon off the path, worst at
-      # its tail (400 mm against 230 mm at stage 0, measured). Ratio is
-      # robocrane's, whose pull is a hundredth of its tracking weight.
+      # its tail (400 mm against 230 mm at stage 0, measured).
+      #
+      # Ratio is robocrane's: `weight_theta` equals `weight_pos` there, 10
+      # against 10, not the hundredth an earlier note here claimed. Swept
+      # against `sim_chain --random 5 --seed 1`, which is the only way to see
+      # it -- the trade is arrival against path error, and one move shows
+      # neither:
+      #
+      #   progress   path worst / med rms   goal worst / median   min fraction
+      #          8      514 /  65 mm          5054 / 2589 mm          0.290
+      #         24      666 /  98 mm          5075 /  293 mm          0.619
+      #         40      423 / 105 mm          2231 /  205 mm          0.853
+      #         80      839 / 118 mm           973 /  206 mm          0.965
+      #        240      961 / 123 mm           908 /  207 mm          0.993
+      #
+      # 40 tracks the path better and leaves the hardest move 2.2 m short; the
+      # progress state exists so the machine finishes, so 80 -- every move
+      # reaches 0.965 of its path and the gain saturates above it. Seeds 2 and
+      # 3 agree (goal median 107 and 161 mm, no refused cycle).
       lag: 40.0
-      progress: 8.0
+      progress: 80.0
       progress_rate: 0.1
       progress_accel: 0.01
       terminal_scale: 10.0
