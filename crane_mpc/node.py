@@ -478,6 +478,10 @@ class MpcNode(Node):
             float(self._values.min_progress_rate),
             float(self._values.max_stall_time),
         )
+        # After `advance`, which moves the progress and the cadence anchor the
+        # next cycle resamples on; and after the horizon went out, so the
+        # linearisation runs in the part of the cycle nobody is waiting on.
+        cycle.prepare_next(solution)
         self.report(solution, self.say_stalled(verdict.text, was_stalled))
 
     def say_stalled(self, text: str, was_stalled: bool) -> str:

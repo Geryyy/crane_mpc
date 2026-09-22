@@ -97,6 +97,11 @@ class Solution:
     violation: Violation
     progress_advance: float
     warm_started: bool
+    #: Seconds the preparation phase cost, or zero when the cycle was solved
+    #: whole. Not counted in `solve_time_s`, which is what the budget is about:
+    #: under the split only the feedback phase sits between the measurement and
+    #: the command, and the preparation ran before the measurement existed.
+    preparation_time_s: float = 0.0
 
     @property
     def u0(self) -> np.ndarray:
@@ -603,6 +608,15 @@ class Ocp:
         self.payload_com_m = np.zeros(3)
         self._payload_changed = False
 
+        #: Whether the preparation/feedback split is reachable at all. acados
+        #: refuses `rti_phase` outside `SQP_RTI`, so a swept `nlp_solver_type`
+        #: leaves every cycle on the combined `solve`.
+        self.split_rti = problem.solver_tuning()["nlp_solver_type"] == "SQP_RTI"
+        #: Whether a `prepare` is standing that `feedback` may consume.
+        self._prepared = False
+        self._prepared_warm = False
+        self._preparation_time = 0.0
+
     # -- what the problem is, checked against what was compiled -----------------
 
     def _check_dimensions(self) -> None:
@@ -759,14 +773,8 @@ class Ocp:
         )
         return Guess(states, inputs)
 
-    def solve(
-        self,
-        x0: np.ndarray,
-        horizon,
-        q_eq: np.ndarray,
-        guess: Guess | None = None,
-    ) -> Solution:
-        """One RTI step. `horizon` is the resampled reference, `q_eq` the sway centre."""
+    def _checked_x0(self, x0: np.ndarray, horizon, q_eq: np.ndarray) -> np.ndarray:
+        """Validate the cycle's arguments and return `x0` with `s` re-origined."""
         intervals = self.intervals
         x0 = np.asarray(x0, dtype=float).copy()
         if x0.shape != (cs.NX,) or not np.all(np.isfinite(x0)):
@@ -792,6 +800,18 @@ class Ocp:
             )
         # `s` is virtual time within one cycle; the caller's reference origin carries.
         x0[cs.X_PROGRESS] = 0.0
+        return x0
+
+    def _write_problem(
+        self, x0: np.ndarray, horizon, q_eq: np.ndarray, guess: Guess | None
+    ) -> bool:
+        """
+        Write everything the solve reads except the initial-state bound's own value.
+
+        Returns whether the cycle is warm. Split out of `solve` so `prepare` can
+        run it against a predicted state one cycle early.
+        """
+        intervals = self.intervals
 
         # A payload step forces the cold start, whatever the caller passed.
         # Decided here rather than below because the reset reads it.
@@ -856,9 +876,14 @@ class Ocp:
                     "u",
                     np.clip(seed.inputs[stage], -self._u_max, self._u_max),
                 )
+        return warm
 
-        status = int(self.solver.solve())
-        solve_time = float(self.solver.get_stats("time_tot"))
+    def _read_solution(
+        self, status: int, solve_time: float, warm: bool, preparation_time: float
+    ) -> Solution:
+        """Read back what the solver answered, whichever phases produced it."""
+        intervals = self.intervals
+        rate_max = float(self.parameters["limits"]["progress_rate_max"])
         qp_status = _last(self.solver.get_stats("qp_stat"))
         qp_iterations = _last(self.solver.get_stats("qp_iter"))
         iterations = int(self.solver.get_stats("sqp_iter"))
@@ -899,6 +924,97 @@ class Ocp:
             violation=violation,
             progress_advance=advance,
             warm_started=warm,
+            preparation_time_s=preparation_time,
+        )
+
+    # -- the three ways to spend a cycle -----------------------------------------
+
+    def _set_phase(self, phase: int) -> None:
+        """
+        Select PREPARATION_AND_FEEDBACK (0), PREPARATION (1) or FEEDBACK (2).
+
+        acados refuses the option outside `SQP_RTI`, so a swept `nlp_solver_type`
+        keeps the combined path and never reaches here with a split phase.
+        """
+        self.solver.options_set("rti_phase", int(phase))
+
+    def solve(
+        self,
+        x0: np.ndarray,
+        horizon,
+        q_eq: np.ndarray,
+        guess: Guess | None = None,
+    ) -> Solution:
+        """
+        One whole RTI step, linearisation and QP together.
+
+        The path taken when nothing was prepared for this cycle: the first one,
+        one after a failure, or one whose problem moved under the preparation.
+        """
+        x0 = self._checked_x0(x0, horizon, q_eq)
+        # A preparation this call overwrites is gone, and must not be consumable
+        # by a later `feedback`.
+        self._prepared = False
+        warm = self._write_problem(x0, horizon, q_eq, guess)
+        if self.split_rti:
+            self._set_phase(0)
+        status = int(self.solver.solve())
+        return self._read_solution(
+            status, float(self.solver.get_stats("time_tot")), warm, 0.0
+        )
+
+    def prepare(
+        self,
+        x0: np.ndarray,
+        horizon,
+        q_eq: np.ndarray,
+        guess: Guess | None = None,
+    ) -> float:
+        """
+        Everything but the QP, against a **predicted** state, one cycle early.
+
+        `x0` is where the machine is expected to be when the next cycle's plan
+        takes effect, not where it is now: the whole point is that this runs
+        before that cycle's measurement exists. Returns the seconds it cost,
+        which are not on the measurement-to-command path.
+        """
+        x0 = self._checked_x0(x0, horizon, q_eq)
+        self._prepared_warm = self._write_problem(x0, horizon, q_eq, guess)
+        self._set_phase(1)
+        self.solver.solve()
+        self._prepared = True
+        self._preparation_time = float(self.solver.get_stats("time_tot"))
+        return self._preparation_time
+
+    def feedback(self, x0: np.ndarray) -> Solution:
+        """
+        Solve the QP alone, against the measured state, on the last `prepare`.
+
+        Only the initial-state bound moves between the two phases -- that is the
+        initial value embedding, and it is the whole of what the measurement is
+        allowed to change once the linearisation is standing.
+        """
+        if not self._prepared:
+            raise RuntimeError(
+                "the feedback phase was asked for without a preparation to stand "
+                "on; a cycle whose preparation was invalidated takes `solve`"
+            )
+        self._prepared = False
+        x0 = np.asarray(x0, dtype=float).copy()
+        if x0.shape != (cs.NX,) or not np.all(np.isfinite(x0)):
+            raise ValueError("x0 is not a finite state of this problem")
+        x0[cs.X_PROGRESS] = 0.0
+        # The bound only. Writing `x` here as well would move the point the
+        # preparation linearised about, and the QP step -- already computed to
+        # travel from that point to this bound -- would land on top of it: a
+        # measurement 0.05 off the prediction came back as 0.1.
+        self.solver.constraints_set(0, "lbx", x0)
+        self.solver.constraints_set(0, "ubx", x0)
+        self._set_phase(2)
+        status = int(self.solver.solve())
+        feedback_time = float(self.solver.get_stats("time_tot"))
+        return self._read_solution(
+            status, feedback_time, self._prepared_warm, self._preparation_time
         )
 
     def _slack_taken(self) -> tuple[Violation, float, bool]:

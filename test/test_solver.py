@@ -339,3 +339,65 @@ def test_hpipms_memory_survives_a_warm_cycle_and_not_a_cold_one(ocp, state):
     finally:
         ocp.solver.reset = original
     assert dropped == [1, 0, 1]
+
+
+def test_the_split_is_the_same_computation_as_the_whole_solve(ocp, state):
+    """
+    Preparation plus feedback is one RTI step cut in two, not a second method.
+
+    The tolerance is measured here rather than picked: `reset` does not restore
+    a deterministic interior point, so two "cold" combined solves land a QP
+    iteration apart and disagree by ~2e-2 on the inputs depending on what the
+    solver did before them. The split has to sit no further from a combined
+    solve than two combined solves sit from each other -- measured, it is about
+    three orders closer.
+    """
+    position = state[cs.X_PLANNED_POSITION : cs.X_PLANNED_POSITION + PLANNED]
+    horizon = horizon_holding(ocp, position)
+    q_eq = state[cs.X_PASSIVE_POSITION : cs.X_PASSIVE_POSITION + cs.K_PASSIVE_DOF]
+
+    first = ocp.solve(state, horizon, q_eq)
+    reference = ocp.solve(state, horizon, q_eq)
+    spread = np.max(np.abs(first.inputs - reference.inputs))
+
+    ocp.prepare(state, horizon, q_eq)
+    split = ocp.feedback(state)
+
+    assert split.status == reference.status
+    assert np.max(np.abs(split.inputs - reference.inputs)) <= max(spread, 1e-3)
+    # The budget is about latency, so the preparation is reported beside the
+    # solve time and never inside it.
+    assert split.preparation_time_s > 0.0
+    assert reference.preparation_time_s == 0.0
+
+
+def test_the_feedback_phase_reads_the_state_it_is_given(ocp, state):
+    """
+    The measurement still reaches the QP after the linearisation is standing.
+
+    This is the initial value embedding, and it is the one thing the split must
+    not lose: if the feedback phase answered on the state the preparation
+    assumed, the controller would be open loop for a cycle and nothing else in
+    this package would notice.
+    """
+    position = state[cs.X_PLANNED_POSITION : cs.X_PLANNED_POSITION + PLANNED]
+    horizon = horizon_holding(ocp, position)
+    q_eq = state[cs.X_PASSIVE_POSITION : cs.X_PASSIVE_POSITION + cs.K_PASSIVE_DOF]
+
+    moved = state.copy()
+    moved[cs.X_PLANNED_VELOCITY] += 0.05
+
+    ocp.prepare(state, horizon, q_eq)
+    on_predicted = ocp.feedback(state)
+    ocp.prepare(state, horizon, q_eq)
+    on_measured = ocp.feedback(moved)
+
+    # Same preparation both times, so any difference is the measurement's.
+    assert np.allclose(on_measured.states[0], moved, atol=1e-6)
+    assert not np.allclose(on_measured.inputs, on_predicted.inputs, atol=1e-6)
+
+
+def test_the_feedback_phase_refuses_to_run_on_nothing(ocp, state):
+    """A cycle whose preparation was invalidated has to take `solve`, not guess."""
+    with pytest.raises(RuntimeError, match="without a preparation"):
+        ocp.feedback(state)

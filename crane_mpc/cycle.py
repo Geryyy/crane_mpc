@@ -216,6 +216,12 @@ class Cycle:
         # window. Kept as deep as `Ocp.replay` needs.
         self.applied_inputs: list = []
         self.guess = None
+        #: A preparation standing for this cycle, and the resampled reference it
+        #: was linearised about. The horizon is what gets re-checked: it is the
+        #: only thing the preparation bakes that a new plan, a re-anchored
+        #: cadence or a slipped clock can move underneath it.
+        self.prepared = False
+        self.prepared_horizon: hz.Knots | None = None
         self.last_solution = None
         self.measured: np.ndarray | None = None
         self.x0: np.ndarray | None = None
@@ -249,6 +255,10 @@ class Cycle:
         self.reference_anchored = False
         # Stall watch is per plan: a new reference is the re-plan a stall asks for.
         self.forget_stall()
+        # A preparation is a linearisation of the plan that was; this is another
+        # plan. `forget_plan` is not called here -- the warm start survives a
+        # re-plan -- so the preparation has to be dropped on its own.
+        self.forget_preparation()
 
     def adopt_mode(self, requested: str) -> str:
         """Move to `requested` and cold start. Returns the mode left behind."""
@@ -433,9 +443,18 @@ class Cycle:
         Solve. Returns `(solution, refusal)`; exactly one is falsy.
 
         A refusal has already stopped the publisher; the caller only reports it.
+
+        Takes the feedback phase alone when last cycle prepared this one on the
+        same plan; otherwise the whole solve, which is what every cycle did
+        before the split existed.
         """
+        on_preparation = self.prepared and self.preparation_still_applies()
+        self.forget_preparation()
         try:
-            solution = self.ocp.solve(self.x0, self.horizon, self.q_eq, self.guess)
+            if on_preparation:
+                solution = self.ocp.feedback(self.x0)
+            else:
+                solution = self.ocp.solve(self.x0, self.horizon, self.q_eq, self.guess)
         except Exception as error:
             self.applied_previous = False
             self.consecutive_failures += 1
@@ -456,6 +475,59 @@ class Cycle:
         else:
             self.consecutive_failures += 1
         return solution, ""
+
+    def preparation_still_applies(self) -> bool:
+        """
+        Whether the plan the preparation linearised is the plan this cycle has.
+
+        The reference is compared, not the state: the preparation is *meant* to
+        stand on a predicted state, and the feedback phase carries the measured
+        one in through the initial-state bound. What it may not do is answer on
+        another plan -- a re-plan, a re-anchored cadence or a slipped clock all
+        move the resampled knots, and any of them makes the linearisation wrong
+        rather than merely stale.
+        """
+        if self.prepared_horizon is None or self.horizon is None:
+            return False
+        return all(
+            np.array_equal(
+                getattr(self.prepared_horizon, block), getattr(self.horizon, block)
+            )
+            for block in ("t", "q_a_ref", "dq_a_ref", "ddq_a_ref")
+        )
+
+    def prepare_next(self, solution) -> None:
+        """
+        Linearise the next cycle now, about the state this one predicts for it.
+
+        `states[1]` is that prediction already: the optimizer's own one step
+        ahead, on the plan that is about to go out, so no second integration is
+        needed. Runs after `advance`, which is what moves `reference_progress`
+        and the cadence anchor to where the next cycle will resample them.
+
+        Best effort throughout -- anything unexpected leaves no preparation, and
+        the next cycle solves whole.
+        """
+        if self.ocp is None or not getattr(self.ocp, "split_rti", False):
+            return
+        if solution.outcome is Outcome.FAILED or self.guess is None:
+            return
+        if self.reference is None or not self.reference_anchored:
+            return
+        rejection, horizon = hz.resample(
+            self.reference, self.reference_progress, self.grid
+        )
+        if rejection is not None:
+            return
+        predicted = solution.states[1]
+        q_eq = predicted[cs.X_PASSIVE_POSITION : cs.X_PASSIVE_POSITION + PASSIVE_DOF]
+        try:
+            self.ocp.prepare(predicted, horizon, q_eq, self.guess)
+        except Exception:
+            self.forget_preparation()
+            return
+        self.prepared = True
+        self.prepared_horizon = horizon
 
     def ladder(self, solution, max_consecutive_failures: int, solve_budget_s: float):
         """Publish this solve, shift the last one, or hand control back."""
@@ -644,8 +716,16 @@ class Cycle:
         self.progress_stalled = False
         self.progress_marked = False
 
+    def forget_preparation(self) -> None:
+        """Drop a standing preparation: next cycle solves whole, as it used to."""
+        self.prepared = False
+        self.prepared_horizon = None
+
     def forget_plan(self) -> None:
         """Drop the warm start and the horizon a shift would be taken from."""
+        # Every break in output -- gate, escalation, payload step, mode change,
+        # failure -- reaches here, and a preparation never outlives one of them.
+        self.forget_preparation()
         # Carry goes with them: a break in output (gate, escalation, payload
         # step, mode change) is reactivation, so next cycle re-seeds from the
         # measurement, not a state that kept integrating unmanned.
