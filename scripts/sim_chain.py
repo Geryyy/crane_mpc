@@ -395,10 +395,7 @@ def planned_path(plan):
     """
     places = np.linspace(0.0, 1.0, 4 * PATH_POINTS)
     return mpc_a2b.Path(
-        control=ocp_runtime.path_control(evaluate(plan.timing.coefficients, places)),
-        progress=lambda when: float(
-            np.interp(when, plan.timing.time, plan.timing.sigma)
-        ),
+        control=ocp_runtime.path_control(evaluate(plan.timing.coefficients, places))
     )
 
 

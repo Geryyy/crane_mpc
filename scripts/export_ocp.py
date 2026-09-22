@@ -504,7 +504,7 @@ def generate(
     # identity, not just the three numbers the dynamics use
     fit = read_fit(Path(cs.default_actuator_path()))
     check_fit_is_one_artifact(fit)
-    ocp, scale, model = build_ocp(
+    ocp, scale, model, _chamber = build_ocp(
         (descriptions / DESCRIPTION).read_text(), parameters, hydraulics
     )
     # before code generation, so a bad fit stops generation rather than complaining after

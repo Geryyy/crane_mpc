@@ -46,7 +46,6 @@ except ImportError:
     from crane_mpc import solver as ocp_runtime  # noqa: E402
 
 configure_fixed_data = ocp_runtime.configure_fixed_data
-constraint_data = ocp_runtime.constraint_data
 position_box = ocp_runtime.position_box
 solver_signature = ocp_runtime.solver_signature
 stage_parameters = ocp_runtime.stage_parameters
@@ -72,22 +71,18 @@ class Path:
     """
     The curve the cost is written against, and how the plan means to spend it.
 
-    `control` is the path in its own parameter, `progress` takes a virtual time
-    to where the plan is on it. Separated because that is the point: geometry
-    does not bend in time, and a timing law does not leave the path.
+    `control` is the path in its own parameter. The timing law that used to ride
+    alongside it went when `s` became the path parameter: where on the path to be
+    is the optimizer's choice now, so nothing here reads a `sigma(t)`.
     """
 
     control: np.ndarray
-    progress: object
 
 
 def line_path(a: np.ndarray, b: np.ndarray, duration: float) -> Path:
     """Build this script's own A-to-B: a joint-space line, quintic in time."""
     samples = np.linspace(a, b, 4 * ocp_runtime.problem.PATH_POINTS)
-    return Path(
-        control=ocp_runtime.path_control(samples),
-        progress=lambda time: minimum_jerk(time, duration)[0],
-    )
+    return Path(control=ocp_runtime.path_control(samples))
 
 
 @dataclass
@@ -335,7 +330,9 @@ def create_solver(
     if arguments.rebuild and cache.is_dir():
         # generated, gitignored cache dir; no source/user output can land here
         shutil.rmtree(cache)
-    ocp, scale, model = export_ocp.build_ocp(description, parameters, hydraulics)
+    ocp, scale, model, _chamber = export_ocp.build_ocp(
+        description, parameters, hydraulics
+    )
     solver, _ = ocp_runtime.load_or_build(
         ocp, parameters, hydraulics, description, verbose=arguments.verbose_build
     )
@@ -577,8 +574,14 @@ def simulate(
     eq_times, q_eq_table = equilibrium_table(
         bias_u, base_parameter, on_path, dt, table_count, passive_guess
     )
+    # The node threads this pair out of `build_ocp`; here `create_solver` has
+    # already dropped it, and re-deriving one tuple beats a fourth argument
+    # through five scripts that neither need nor pass it.
+    chamber = ocp_runtime.problem.chamber_forces(
+        model, float(hydraulics["system_pressure_pa"]), cs.K_ACTUATED_DOF
+    )
     u_max, extend, retract = configure_fixed_data(
-        solver, model, scale, parameters, hydraulics
+        solver, chamber, scale, parameters, hydraulics
     )
 
     state = np.zeros(cs.NX)

@@ -153,12 +153,17 @@ def weight_matrices(parameters: dict) -> tuple[np.ndarray, np.ndarray]:
 
 
 def constraint_data(
-    model, scale: np.ndarray, hydraulics: dict
+    chamber: tuple, scale: np.ndarray, hydraulics: dict
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """Scaled bounds of `h` (constraints 6 and 7) and the physical force limits."""
-    extend, retract = problem.chamber_forces(
-        model, float(hydraulics["system_pressure_pa"]), cs.K_ACTUATED_DOF
-    )
+    """
+    Scaled bounds of `h` (constraints 6 and 7) and the physical force limits.
+
+    `chamber` is `build_ocp`'s own `(extend, retract)`, so these bounds are
+    conditioned by the numbers the divisors were built from. Half of what comes
+    back is `+-1` by construction -- `scale` is the larger of each pair, and the
+    pump divisor *is* the planning limit -- so this only names the other half.
+    """
+    extend, retract = chamber
     extend = np.abs(extend)
     retract = np.abs(retract)
     lower_h = np.concatenate([-retract[: cs.K_PLANNED_DOF] / scale[: cs.NU], [0.0]])
@@ -299,7 +304,7 @@ def slack_prices(parameters: dict) -> dict:
 
 def configure_fixed_data(
     solver: AcadosOcpSolver,
-    model,
+    chamber: tuple,
     scale: np.ndarray,
     parameters: dict,
     hydraulics: dict,
@@ -311,7 +316,7 @@ def configure_fixed_data(
     """
     intervals = problem.shooting_intervals(parameters)
     weight, terminal_weight = weight_matrices(parameters)
-    lower_h, upper_h, extend, retract = constraint_data(model, scale, hydraulics)
+    lower_h, upper_h, extend, retract = constraint_data(chamber, scale, hydraulics)
     # Input box: five joint commands plus progress acceleration (not an axis, own bound).
     u_max = np.concatenate(
         [
@@ -564,7 +569,7 @@ class Ocp:
         self.intervals = problem.shooting_intervals(parameters)
         self.solve_budget_s = float(parameters["solve_budget"])
 
-        self._ocp, self.scale, self.model = problem.build_ocp(
+        self._ocp, self.scale, self.model, self._chamber = problem.build_ocp(
             description_xml, parameters, hydraulics
         )
         signature = solver_signature(parameters, hydraulics, description_xml)
@@ -669,7 +674,7 @@ class Ocp:
             "levenberg_marquardt", float(self.parameters["levenberg_marquardt"])
         )
         return configure_fixed_data(
-            self.solver, self.model, self.scale, self.parameters, self.hydraulics
+            self.solver, self._chamber, self.scale, self.parameters, self.hydraulics
         )
 
     # -- the model, asked the two questions the solver does not answer ----------
@@ -789,12 +794,24 @@ class Ocp:
         )
         return Guess(states, inputs)
 
-    def _checked_x0(self, x0: np.ndarray, horizon, q_eq: np.ndarray) -> np.ndarray:
-        """Validate the cycle's arguments and return `x0` with `s` re-origined."""
-        intervals = self.intervals
+    @staticmethod
+    def _origined_x0(x0: np.ndarray) -> np.ndarray:
+        """
+        `x0` as this problem's own state, with `s` pinned to zero.
+
+        `s` is virtual time within one cycle; the caller's reference origin
+        carries what came before.
+        """
         x0 = np.asarray(x0, dtype=float).copy()
         if x0.shape != (cs.NX,) or not np.all(np.isfinite(x0)):
             raise ValueError("x0 is not a finite state of this problem")
+        x0[cs.X_PROGRESS] = 0.0
+        return x0
+
+    def _checked_x0(self, x0: np.ndarray, horizon, q_eq: np.ndarray) -> np.ndarray:
+        """Validate the cycle's arguments and return `x0` with `s` re-origined."""
+        intervals = self.intervals
+        x0 = self._origined_x0(x0)
         if len(horizon) != intervals + 1:
             raise ValueError(
                 f"the horizon carries {len(horizon)} knots and the problem is posed "
@@ -814,8 +831,6 @@ class Ocp:
                 "the reference, its curvature or the sway equilibrium carries a "
                 "value that is not finite"
             )
-        # `s` is virtual time within one cycle; the caller's reference origin carries.
-        x0[cs.X_PROGRESS] = 0.0
         return x0
 
     def _path_parameters(self, horizon) -> np.ndarray:
@@ -944,7 +959,6 @@ class Ocp:
     ) -> Solution:
         """Read back what the solver answered, whichever phases produced it."""
         intervals = self.intervals
-        rate_max = float(self.parameters["limits"]["progress_rate_max"])
         qp_status = _last(self.solver.get_stats("qp_stat"))
         qp_iterations = _last(self.solver.get_stats("qp_iter"))
         iterations = int(self.solver.get_stats("sqp_iter"))
@@ -968,7 +982,7 @@ class Ocp:
             outcome = Outcome.CONVERGED
 
         advance = float(states[1][cs.X_PROGRESS]) if len(states) > 1 else 0.0
-        advance = float(np.clip(advance, 0.0, self.Ts * rate_max))
+        advance = float(np.clip(advance, 0.0, self.progress_ceiling(1)))
 
         return Solution(
             states=states,
@@ -1061,10 +1075,7 @@ class Ocp:
                 "on; a cycle whose preparation was invalidated takes `solve`"
             )
         self._prepared = False
-        x0 = np.asarray(x0, dtype=float).copy()
-        if x0.shape != (cs.NX,) or not np.all(np.isfinite(x0)):
-            raise ValueError("x0 is not a finite state of this problem")
-        x0[cs.X_PROGRESS] = 0.0
+        x0 = self._origined_x0(x0)
         # The bound only. Writing `x` here as well would move the point the
         # preparation linearised about, and the QP step -- already computed to
         # travel from that point to this bound -- would land on top of it: a

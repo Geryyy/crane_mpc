@@ -28,8 +28,13 @@ def chamber_forces(model, relief_pa: float, actuated_dof: int) -> tuple:
     """
     Return `(extend, retract)` at relief pressure: `F_i = A_A p_A - A_B p_B`.
 
-    Duplicated in `crane_ocp_export.chamber_forces`, which exporters reach before
-    this package is built.
+    The live one. `crane_ocp_export` carries a byte-identical copy, written when
+    an exporter could not reach this package; `export_ocp.py` resolves
+    `crane_mpc.problem` off the source tree now, nothing calls that copy, and it
+    can go once `concrete_block_stack` has a branch to take it on.
+
+    Both exporters condition their force rows by the **larger** of the pair, so
+    a row the planner conditions and a row the MPC conditions are one number.
     """
     pressure = np.full(actuated_dof, float(relief_pa))
     zero = np.zeros(actuated_dof)
@@ -243,9 +248,13 @@ def shooting_intervals(parameters: dict) -> int:
     return knots - 1
 
 
-def constraint_scale(model: cs.CraneSymbolicModel, hydraulics: dict) -> np.ndarray:
+def constraint_scale(model: cs.CraneSymbolicModel, hydraulics: dict) -> tuple:
     """
-    Return the divisor of each row of `h`, in that row's own physical unit.
+    Return `(scale, extend, retract)`: each `h` row's divisor and what set it.
+
+    The chamber pair rides along because `solver.constraint_data` needs the same
+    two numbers to bound the rows these divisors condition, and evaluating
+    `chamber_force` a second time there only risks the two disagreeing.
 
     Force row: divided by the larger of its two chamber forces at relief
     pressure, so the wider box end lands at one (dividing by the smaller
@@ -270,7 +279,7 @@ def constraint_scale(model: cs.CraneSymbolicModel, hydraulics: dict) -> np.ndarr
             "every row of h needs a finite positive divisor; a zero one is a "
             "constraint 6 or 7 with no right-hand side"
         )
-    return scale
+    return scale, extend, retract
 
 
 # ------------------------------------------------------------------- assembly
@@ -290,7 +299,7 @@ def build_ocp(description_xml: str, parameters: dict, hydraulics: dict) -> tuple
     model = cs.CraneSymbolicModel(
         description_xml, TOOL, actuator=cs.load_actuator_fit()
     )
-    scale = constraint_scale(model, hydraulics)
+    scale, extend, retract = constraint_scale(model, hydraulics)
 
     # --- `p`: the pinned tool coordinate and the payload body -----------------
     #
@@ -539,4 +548,4 @@ def build_ocp(description_xml: str, parameters: dict, hydraulics: dict) -> tuple
         if value is not None:
             setattr(ocp.solver_options, name, value)
 
-    return ocp, scale, model
+    return ocp, scale, model, (extend, retract)
