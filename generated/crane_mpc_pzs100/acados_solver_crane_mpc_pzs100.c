@@ -549,6 +549,9 @@ void crane_mpc_pzs100_acados_create_setup_nlp_in_numerical_values(crane_mpc_pzs1
     W_0[25+(NY0) * 25] = 1;
     W_0[26+(NY0) * 26] = 1;
     W_0[27+(NY0) * 27] = 1;
+    W_0[28+(NY0) * 28] = 1;
+    W_0[29+(NY0) * 29] = 1;
+    W_0[30+(NY0) * 30] = 1;
     ocp_nlp_cost_model_set(nlp_config, nlp_dims, nlp_in, 0, "W", W_0);
     free(W_0);
     double* yref = calloc(NY, sizeof(double));
@@ -589,6 +592,9 @@ void crane_mpc_pzs100_acados_create_setup_nlp_in_numerical_values(crane_mpc_pzs1
     W[25+(NY) * 25] = 1;
     W[26+(NY) * 26] = 1;
     W[27+(NY) * 27] = 1;
+    W[28+(NY) * 28] = 1;
+    W[29+(NY) * 29] = 1;
+    W[30+(NY) * 30] = 1;
 
     for (int i = 1; i < N; i++)
     {
@@ -619,6 +625,9 @@ void crane_mpc_pzs100_acados_create_setup_nlp_in_numerical_values(crane_mpc_pzs1
     W_e[14+(NYN) * 14] = 1;
     W_e[15+(NYN) * 15] = 1;
     W_e[16+(NYN) * 16] = 1;
+    W_e[17+(NYN) * 17] = 1;
+    W_e[18+(NYN) * 18] = 1;
+    W_e[19+(NYN) * 19] = 1;
     ocp_nlp_cost_model_set(nlp_config, nlp_dims, nlp_in, N, "W", W_e);
     free(W_e);
 

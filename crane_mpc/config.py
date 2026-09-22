@@ -75,6 +75,7 @@ WEIGHTS = (
     "tau_a",
     "u",
     "lag",
+    "tool",
     "progress",
     "progress_rate",
     "progress_accel",

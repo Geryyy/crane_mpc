@@ -208,7 +208,13 @@ Y_PLANNED_VELOCITY = cs.K_PLANNED_DOF
 Y_PASSIVE_POSITION = 2 * cs.K_PLANNED_DOF
 Y_PASSIVE_VELOCITY = Y_PASSIVE_POSITION + cs.K_PASSIVE_DOF
 Y_LAG = Y_PASSIVE_VELOCITY + cs.K_PASSIVE_DOF
-Y_PROGRESS = Y_LAG + 1
+#: Where the tool is against where the path says it should be, in metres. The
+#: target is a centimetre at the tool and every other tracking row is in joint
+#: space, where the same error is worth 2174 to 11905 mm depending on the pose
+#: -- a factor of 5.5 that no per-axis weight can absorb, which is why sweeping
+#: them is inert. Three rows, position only; orientation is a second metric.
+Y_TOOL = Y_LAG + 1
+Y_PROGRESS = Y_TOOL + 3
 Y_PROGRESS_RATE = Y_PROGRESS + 1
 NY_TERMINAL = Y_PROGRESS_RATE + 1
 Y_ACTUATED_FORCE = NY_TERMINAL
@@ -393,6 +399,19 @@ def build_ocp(description_xml: str, parameters: dict, hydraulics: dict) -> tuple
     # is a function of `s`, so it can't live in `yref` (acados subtracts it
     # as a constant) -- this is what makes `s` a decision variable.
     tracking = q_a - reference_position
+    # Both tool positions are taken at *this* stage's passive pair, so the row
+    # is the planned axes' own contribution and does not double-count the sway
+    # the two rows below already price. The reference is the path point, not the
+    # goal: this is the task-space reading of the tracking row above it, not a
+    # second terminal condition.
+    canonical = ca.SX.zeros(cs.K_GENERALIZED_DOF)
+    canonical[list(cs.K_PLANNED_ROWS)] = q_a
+    canonical[list(cs.K_PASSIVE_ROWS)] = q_u
+    canonical[cs.K_ACTUATED_ROWS[cs.K_TOOL_AXIS]] = model.p[cs.P_TOOL_POSITION]
+    at_machine = model.tool_position(canonical)
+    canonical[list(cs.K_PLANNED_ROWS)] = reference_position
+    at_path = model.tool_position(canonical)
+    tool = at_machine - at_path
     #
     # Lag row (`timber_crane_cost_js_pfc_pt2.cpp:62-74`): tracking error
     # projected on reference direction of travel, slewing axis only,
@@ -407,6 +426,7 @@ def build_ocp(description_xml: str, parameters: dict, hydraulics: dict) -> tuple
         q_u,
         dq_u,
         lag,
+        tool,
         theta,
         progress_rate,
         tau_a[: cs.K_PLANNED_DOF],

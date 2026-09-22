@@ -164,6 +164,9 @@ def weight_matrices(parameters: dict) -> tuple[np.ndarray, np.ndarray]:
             np.asarray(weights["dq_u"][:passive], dtype=float),
             [
                 float(weights["lag"]),
+            ],
+            np.full(3, float(weights["tool"])),
+            [
                 float(weights["progress"]),
                 float(weights["progress_rate"]),
             ],

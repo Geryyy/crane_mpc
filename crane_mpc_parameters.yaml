@@ -244,6 +244,16 @@ crane_mpc:
         1.0; this is that ratio against q_a's 4.0. Not tuned."
       validation:
         gt_eq<>: [0.0]
+    tool:
+      type: double
+      default_value: 0.0
+      read_only: true
+      description: "Q -- the tool's own distance from the path, in metres. Zero keeps the cost purely
+        joint-space, which is what shipped before this row existed. The brief's target is a centimetre
+        at the tool and joint space converts to it at anywhere from 2174 to 11905 mm per radian across
+        the workspace, so a per-axis weight cannot express it and sweeping one is inert. Position only."
+      validation:
+        gt_eq<>: [0.0]
     progress:
       type: double
       default_value: 8.0

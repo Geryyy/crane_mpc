@@ -94,7 +94,24 @@ crane_mpc:
       # reaches 0.965 of its path and the gain saturates above it. Seeds 2 and
       # 3 agree (goal median 107 and 161 mm, no refused cycle).
       lag: 40.0
-      progress: 80.0
+      # Task-space tracking, m. 0.0 is the joint-space-only cost that shipped
+      # before the row existed; swept below.
+      tool: 1000.0
+      # Answers `tool` above: with the tool row priced at 1000 the optimizer
+      # would rather sit on the path than travel it, so the pull to the end has
+      # to rise with it. Swept at tool 1000 over 20 moves:
+      #
+      #   progress    path rms    goal worst / median
+      #         80      30 mm       1412 /  275 mm
+      #       1280      35 mm        861 /  110 mm
+      #       5120      34 mm        510 /   34 mm
+      #      20480      37 mm        145 /   24 mm   (seed 1)
+      #      20480      43 mm        268 /   31 mm   (seed 2)
+      #
+      # Arrival keeps improving to 20480 and path error is flat across it. The
+      # cost is refused cycles: 1.0% on seed 1, 0.2% on seed 2, against 0 at
+      # 5120 -- watch it if the grid or the box ever changes.
+      progress: 20480.0
       progress_rate: 0.1
       progress_accel: 0.01
       # Scales the whole terminal prefix, progress row included -- which is
