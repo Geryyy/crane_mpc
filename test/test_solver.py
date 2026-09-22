@@ -287,3 +287,26 @@ def test_a_non_finite_input_never_reaches_a_solve(ocp, state):
     with pytest.raises(ValueError, match="curvature"):
         ocp.solve(state, horizon, q_eq)
 
+
+def test_a_swept_acados_setting_moves_the_cache(parameters, monkeypatch):
+    """
+    The one thing `scripts/sweep_ocp.py` rests on.
+
+    Every setting in `SOLVER_TUNING` is compiled into the `.so`, so a variant
+    the signature does not see opens its predecessor's solver and measures the
+    baseline again -- a null result that reads as "no difference".
+    """
+    hydraulics = parameters["hydraulics"]
+    description = problem.default_description().read_text()
+    before = solver_cache(parameters, hydraulics, description)
+
+    monkeypatch.setenv(problem.TUNING_ENV, '{"hpipm_mode": "SPEED"}')
+    assert problem.solver_tuning()["hpipm_mode"] == "SPEED"
+    assert solver_cache(parameters, hydraulics, description) != before
+
+
+def test_a_misspelt_knob_is_refused_rather_than_ignored(monkeypatch):
+    """Silently dropped, it would re-measure the baseline under another name."""
+    monkeypatch.setenv(problem.TUNING_ENV, '{"hpipm_modes": "SPEED"}')
+    with pytest.raises(ValueError, match="hpipm_modes"):
+        problem.solver_tuning()

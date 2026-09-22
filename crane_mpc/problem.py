@@ -12,6 +12,8 @@ set by `solver.py` at configure time.
 
 from __future__ import annotations
 
+import json
+import os
 from pathlib import Path
 
 import casadi as ca
@@ -32,6 +34,75 @@ def chamber_forces(model, relief_pa: float, actuated_dof: int) -> tuple:
     extend = np.array(ca.evalf(model.chamber_force(pressure, zero))).ravel()
     retract = np.array(ca.evalf(model.chamber_force(zero, pressure))).ravel()
     return extend, retract
+
+
+# --- the acados backend, and the one place it is written down -----------------
+#
+# Every setting that is compiled into the solver and is a choice rather than a
+# consequence. `scripts/sweep_ocp.py` layers a variant over this through
+# `CRANE_MPC_OCP_OPTIONS`, and `solver.solver_signature` hashes the result --
+# without that a variant opens its predecessor's `.so` and reads as a null
+# result, which is how a sweep measures the baseline 33 times.
+#
+#     CRANE_MPC_OCP_OPTIONS='{"nlp_solver_type": "SQP", "nlp_solver_max_iter": 3}'
+#
+SOLVER_TUNING = {
+    # One Newton step per cycle: deterministic solve time, worth more than a
+    # converged step since the plant moves between cycles anyway.
+    "nlp_solver_type": "SQP_RTI",
+    # Read only when `nlp_solver_type` is not RTI, which is what makes a
+    # converging variant comparable against one Newton step.
+    "nlp_solver_max_iter": 1,
+    "qp_solver": "PARTIAL_CONDENSING_HPIPM",
+    "hpipm_mode": "BALANCE",
+    # None is acados' default, `N`: issue 129 measured smaller blocks worse
+    # (10.3 ms QP at `N`, 61-81 ms at 1).
+    "qp_solver_cond_N": None,
+    "qp_solver_iter_max": 50,
+    "qp_solver_warm_start": 0,
+    "qp_solver_ric_alg": 1,
+    # C3's actuator lag makes the model stiff: linearised fastest eigenvalue
+    # `|lambda| T_s = 8.5` at an ordinary pose (telescope `k = 3.5e6 N/m` vs
+    # effective mass), where ERK4 is stable only to ~2.8 and diverges in three
+    # intervals (HPIPM status 3). Two Gauss stages: order four, A-stable.
+    "integrator_type": "IRK",
+    "sim_method_num_stages": 2,
+    "sim_method_num_steps": 1,
+    "sim_method_newton_iter": 3,
+    # Gauss-Newton, so `J' W J` is positive semi-definite by construction and
+    # the exact nonlinear-cost Hessians acados would emit go unused.
+    "hessian_approx": "GAUSS_NEWTON",
+    # No line search: one full Newton step is RTI. No adaptive regularisation
+    # either -- `levenberg_marquardt` is a fixed constant added every cycle.
+    "globalization": "FIXED_STEP",
+    "regularize_method": "NO_REGULARIZE",
+    "qpscaling_scale_constraints": "NO_CONSTRAINT_SCALING",
+    "qpscaling_scale_objective": "NO_OBJECTIVE_SCALING",
+    # Unread under RTI, which never checks convergence. Here so that an
+    # `nlp_solver_type` variant can be swept honestly: at acados' 1e-6 a
+    # four-iteration SQP answers `ACADOS_MAXITER` and every cycle of it is
+    # scored as a failed one.
+    "nlp_solver_tol_stat": 1.0e-6,
+    "nlp_solver_tol_eq": 1.0e-6,
+    "nlp_solver_tol_ineq": 1.0e-6,
+    "nlp_solver_tol_comp": 1.0e-6,
+}
+
+#: Env var a sweep patches the table through. JSON object; an unknown key is an
+#: error, since a misspelt knob would otherwise re-measure the baseline.
+TUNING_ENV = "CRANE_MPC_OCP_OPTIONS"
+
+
+def solver_tuning() -> dict:
+    """`SOLVER_TUNING` with the environment's patch layered over it."""
+    patch = json.loads(os.environ.get(TUNING_ENV, "{}"))
+    unknown = set(patch) - set(SOLVER_TUNING)
+    if unknown:
+        raise ValueError(
+            f"{TUNING_ENV} carries {sorted(unknown)}, which is not a setting this "
+            f"problem writes; known: {sorted(SOLVER_TUNING)}"
+        )
+    return SOLVER_TUNING | patch
 
 
 TOOL = "pzs100"
@@ -418,27 +489,12 @@ def build_ocp(description_xml: str, parameters: dict, hydraulics: dict) -> tuple
 
     # --- grid and backend -------------------------------------------------------
     #
-    # RTI: one iteration per cycle, deterministic solve time -- worth more
-    # than a converged step since the plant moves between cycles anyway.
-    #
-    # IRK: C3's actuator lag makes the model stiff. Linearised fastest
-    # eigenvalue `|lambda| T_s = 8.5` at an ordinary pose (telescope
-    # `k = 3.5e6 N/m` vs effective mass); ERK4 stable only to ~2.8, diverges
-    # in three intervals (HPIPM status 3). Two Gauss stages: order four,
-    # A-stable.
-    ocp.solver_options.nlp_solver_type = "SQP_RTI"
-    ocp.solver_options.qp_solver = "PARTIAL_CONDENSING_HPIPM"
-    # No `qp_solver_cond_N` (default `N`): issue 129 measured smaller blocks
-    # worse (10.3 ms QP at `N`, 61-81 ms at 1).
-    ocp.solver_options.hessian_approx = "GAUSS_NEWTON"
-    ocp.solver_options.integrator_type = "IRK"
-    ocp.solver_options.sim_method_num_stages = 2
-    ocp.solver_options.sim_method_num_steps = 1
-    # No line search: one full Newton step is RTI. No adaptive
-    # regularisation either -- Levenberg-Marquardt below is a fixed acados
-    # constant added every cycle.
-    ocp.solver_options.globalization = "FIXED_STEP"
-    ocp.solver_options.regularize_method = "NO_REGULARIZE"
+    # Applied last, so a swept setting beats anything set above it; `None`
+    # leaves acados' own default (`qp_solver_cond_N` has no other spelling
+    # for "the horizon").
     ocp.solver_options.levenberg_marquardt = float(parameters["levenberg_marquardt"])
+    for name, value in solver_tuning().items():
+        if value is not None:
+            setattr(ocp.solver_options, name, value)
 
     return ocp, scale, model

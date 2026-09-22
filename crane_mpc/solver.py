@@ -337,6 +337,9 @@ def solver_signature(parameters: dict, hydraulics: dict, description_xml: str) -
     Hash what materially changes generated code.
 
     `W`/bounds/slack excluded (runtime API): retuning reuses the compiled solver.
+    The acados settings are **not** excluded -- they are compiled in, so a
+    sweep that left them out would open the previous variant's `.so` and read
+    as a null result.
     """
     digest = hashlib.sha256()
     generated = {
@@ -344,6 +347,7 @@ def solver_signature(parameters: dict, hydraulics: dict, description_xml: str) -
         "horizon_length": parameters["horizon_length"],
         "levenberg_marquardt": parameters["levenberg_marquardt"],
         "qp_solver_cond_N": parameters.get("qp_solver_cond_N"),
+        "tuning": problem.solver_tuning(),
     }
     digest.update(json.dumps(generated, sort_keys=True, default=str).encode())
     digest.update(json.dumps(hydraulics, sort_keys=True, default=str).encode())

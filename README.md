@@ -18,6 +18,8 @@ The node is Python and the solver is generated C:
 | `crane_mpc/horizon.py` | the reference read off the wire, resampled, and written back |
 | `crane_mpc/problem.py` | the OCP itself, as an `AcadosOcp` |
 | `scripts/export_ocp.py` | the same problem written out as the generated C in `generated/` |
+| `scripts/bench_ocp.py` | a corpus of sampled moves, and what the solver did on each cycle |
+| `scripts/sweep_ocp.py` | `bench_ocp.py` once per acados variant, tabled |
 
 `problem.py` is imported by both the node and the exporter, so the solver a
 deployment runs and the tree that is checked in are one definition of the
@@ -593,6 +595,58 @@ name and here by index, and the order is derived through `canonical_joints()`
 rather than written down -- only the name is stable across the two packages.
 
 Weights are conservative placeholders, not machine tuning.
+
+## Tuning the backend
+
+`SOLVER_TUNING` in `crane_mpc/problem.py` is every acados setting that is
+compiled into the solver and is a choice rather than a consequence. It is
+applied last, so a swept setting beats anything set above it, and it enters
+`solver_signature` -- **without that a variant would open its predecessor's
+`.so` and read as a null result**, which is how a sweep measures the baseline
+once per variant.
+
+    ./scripts/bench_ocp.py --moves 25            # one corpus, one solver
+    ./scripts/sweep_ocp.py --moves 25            # the corpus once per variant
+    CRANE_MPC_OCP_OPTIONS='{"hpipm_mode":"SPEED"}' ./scripts/bench_ocp.py
+
+The corpus draws both endpoints uniformly from the control-safe box, insets
+10 % of each span (sampled onto a bound, a move is about the bound), and sizes
+each move so the reference's **peak** rate reaches `--speed-fraction` of the
+binding axis' control-safe speed. Peak, not average: a minimum-jerk quintic
+peaks at 15/8 of its average, so sizing on the average would put every sample
+1.875x over constraint 2 and the whole corpus would measure the fallback path.
+
+At the shipped 0.6, `--moves 25` / 6252 cycles is the baseline every variant is
+read against: no cycle refused, none fell back, none over `solve_budget` and
+none over `Ts`. `qp_iter` 15 median, 18 at p90, 23 max -- a tight distribution,
+and the column to trust. Solve 8.27 ms median, 13.0 ms p90, 47.7 ms max, of
+which the QP is 6.6 ms median and linearisation 1.3 ms.
+
+What it bought: terminal error 0.434 rad median and 1.06 at p90, peak sway
+0.19 rad, peak cylinder force 0.42 of its limit -- and **peak pump use 0.93
+median, 1.03 at p90, 1.22 max**, which is the constraint this corpus actually
+stands on; nothing else comes near its bound. Headroom a variant buys shows up
+there rather than only in the timing columns. Progress rate bottoms at 0.956,
+i.e. the controller buys about 4 % more wall clock than plan time. Below about
+0.3 nothing is ever near a bound and the corpus stops distinguishing solvers.
+
+The quality columns are deterministic: the same corpus run under heavy
+contention reproduced all five to the digit and moved only the timing ones
+(p90 24.2 ms against 13.0 ms). That is the separation to rely on -- a variant
+that changes a quality column changed the controller, not the box.
+
+The unit is a **cycle**, not a move: the p90 is the column to read, because a
+median inside `solve_budget` with a p90 outside it is a controller that drops
+cadence on exactly the poses that are hard. Read a regression off `qp_iter`
+first and off milliseconds second: the same solver on the same corpus measured
+26 ms median in the run that compiled it and 8.6 ms minutes later on the same
+box, and the one-minute load average both runs recorded (5.1, 5.3) does not
+explain the gap. `wall_s` is not comparable between rows at all, since a cold
+variant pays for a compile.
+
+Nothing has been swept on this OCP yet; `scripts/sweep_grid.py` remains the
+oracle for the `Ts` x `horizon_length` grid, which is a different question and
+is answered in [config/crane_mpc.yaml](config/crane_mpc.yaml).
 
 ## Dependency resolution
 

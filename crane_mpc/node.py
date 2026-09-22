@@ -353,6 +353,19 @@ class MpcNode(Node):
             f"crane_mpc configured on {self._model.tool.value}: joints "
             f"{', '.join(self._joints)}, sway {', '.join(self._passive_joints)}."
         )
+        # `CRANE_MPC_OCP_OPTIONS` is inherited from the environment and changes
+        # which solver is compiled, so a variant left over from a sweep must
+        # not reach a machine unlogged.
+        patched = {
+            name: value
+            for name, value in problem.solver_tuning().items()
+            if value != problem.SOLVER_TUNING[name]
+        }
+        if patched:
+            self.get_logger().warning(
+                f"the acados backend is patched by {problem.TUNING_ENV}: {patched}. "
+                "This is a swept solver, not the one this package ships."
+            )
         self.adopt_reference()
 
     def ready(self) -> bool:
