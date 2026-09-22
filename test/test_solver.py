@@ -310,3 +310,32 @@ def test_a_misspelt_knob_is_refused_rather_than_ignored(monkeypatch):
     monkeypatch.setenv(problem.TUNING_ENV, '{"hpipm_modes": "SPEED"}')
     with pytest.raises(ValueError, match="hpipm_modes"):
         problem.solver_tuning()
+
+
+def test_hpipms_memory_survives_a_warm_cycle_and_not_a_cold_one(ocp, state):
+    """
+    The QP keeps its factorisation exactly when the plan it came from still
+    applies. Worth 5 QP iterations against 15 (scripts/bench_ocp.py), so an
+    unconditional `reset_qp_solver_mem=1` is a 3x regression that nothing else
+    here would notice -- tracking and sway are identical either way.
+    """
+    position = state[cs.X_PLANNED_POSITION : cs.X_PLANNED_POSITION + PLANNED]
+    horizon = horizon_holding(ocp, position)
+    q_eq = state[cs.X_PASSIVE_POSITION : cs.X_PASSIVE_POSITION + cs.K_PASSIVE_DOF]
+
+    dropped = []
+    original = ocp.solver.reset
+    ocp.solver.reset = lambda **kw: (
+        dropped.append(kw["reset_qp_solver_mem"]),
+        original(**kw),
+    )[1]
+    try:
+        # no guess is a cold cycle, and so is the payload step after it
+        guess = ocp.shifted(ocp.solve(state, horizon, q_eq))
+        assert ocp.solve(state, horizon, q_eq, guess).warm_started
+        ocp.set_payload(120.0, [0.1, 0.0, -0.4])
+        assert not ocp.solve(state, horizon, q_eq, guess).warm_started
+        ocp.set_payload(0.0, np.zeros(3))
+    finally:
+        ocp.solver.reset = original
+    assert dropped == [1, 0, 1]

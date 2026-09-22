@@ -617,10 +617,9 @@ peaks at 15/8 of its average, so sizing on the average would put every sample
 1.875x over constraint 2 and the whole corpus would measure the fallback path.
 
 At the shipped 0.6, `--moves 25` / 6252 cycles is the baseline every variant is
-read against: no cycle refused, none fell back, none over `solve_budget` and
-none over `Ts`. `qp_iter` 15 median, 18 at p90, 23 max -- a tight distribution,
-and the column to trust. Solve 8.27 ms median, 13.0 ms p90, 47.7 ms max, of
-which the QP is 6.6 ms median and linearisation 1.3 ms.
+read against: no cycle refused, none fell back, none over `solve_budget`, one
+over `Ts`. `qp_iter` **5 median, 11 at p90**, 28 max. Solve 5.06 ms median, of
+which the QP is 2.43 ms and linearisation 1.47 ms.
 
 What it bought: terminal error 0.434 rad median and 1.06 at p90, peak sway
 0.19 rad, peak cylinder force 0.42 of its limit -- and **peak pump use 0.93
@@ -630,10 +629,35 @@ there rather than only in the timing columns. Progress rate bottoms at 0.956,
 i.e. the controller buys about 4 % more wall clock than plan time. Below about
 0.3 nothing is ever near a bound and the corpus stops distinguishing solvers.
 
-The quality columns are deterministic: the same corpus run under heavy
-contention reproduced all five to the digit and moved only the timing ones
-(p90 24.2 ms against 13.0 ms). That is the separation to rely on -- a variant
-that changes a quality column changed the controller, not the box.
+Those five quality columns are deterministic, and that is the separation to
+rely on: a variant that moves one of them changed the controller, and a variant
+that moves only the timing ones changed the box. Two things demonstrate it on
+this very corpus -- running it under heavy contention reproduced all five to the
+digit while p90 went 13.0 ms to 24.2 ms, and keeping HPIPM's memory across a
+warm cycle (below) cut `qp_iter` from 15 to 5 and left all five untouched to
+four decimals. Only the `max` columns move, by a sample or two.
+
+### The QP is warm-started, and only that makes 5 possible
+
+`solver.py` drops the **iterate** every cycle -- the seed writes every stage, so
+a solve starts from this cycle's own guess and never last cycle's leftovers --
+but drops HPIPM's own factorisation only on a cold cycle
+(`reset_qp_solver_mem=0 if warm else 1`). A payload step, a failed cycle and the
+first cycle still restart from the central path, which is what they are for.
+
+Measured, same corpus: 15 QP iterations median against 5, 18 against 11 at p90,
+6.93 ms of QP against 2.43 ms, six cycles over `T_s` against one.
+**Both halves are needed and neither shows on its own**: with the memory dropped
+every cycle, `qp_solver_warm_start` measured *exactly* the baseline, which is a
+null result that reads as "this knob does nothing". HPIPM is an interior-point
+solver, so 15 was never a warm-start failure -- it is what an IPM costs from the
+central path, and 5 is what it costs from a neighbouring factorisation. An
+active-set backend (`FULL_CONDENSING_DAQP`, `FULL_CONDENSING_QPOASES`, both
+compiled in) is the other way at this, and is unswept.
+
+`test_hpipms_memory_survives_a_warm_cycle_and_not_a_cold_one` pins the sequence,
+because nothing else would notice the loss: reinstating an unconditional reset
+costs 3x the QP iterations and leaves tracking, sway, force and pump identical.
 
 The unit is a **cycle**, not a move: the p90 is the column to read, because a
 median inside `solve_budget` with a p90 outside it is a controller that drops

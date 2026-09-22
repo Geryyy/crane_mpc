@@ -793,8 +793,22 @@ class Ocp:
         # `s` is virtual time within one cycle; the caller's reference origin carries.
         x0[cs.X_PROGRESS] = 0.0
 
-        # acados' reset zeroes the iterate and QP memory; nothing of last cycle survives.
-        self.solver.reset(reset_qp_solver_mem=1)
+        # A payload step forces the cold start, whatever the caller passed.
+        # Decided here rather than below because the reset reads it.
+        warm = not self._payload_changed and guess is not None and guess.warm(intervals)
+        self._payload_changed = False
+
+        # The **iterate** is always dropped: `seed` below writes every stage, so
+        # what starts the solve is this call's own guess and never last cycle's
+        # leftovers. HPIPM's own memory is dropped only on a cold cycle -- it is
+        # an interior-point solver, and re-entering near the previous
+        # factorisation is worth 5 QP iterations against 15, 5.5 ms against
+        # 8.8 ms and six fewer cycles over `T_s` (scripts/bench_ocp.py, 25 moves
+        # / 6252 cycles; tracking, sway, force and pump identical to 4 decimals).
+        # A cold cycle must still drop it: that is what makes a payload step, a
+        # failure or a first cycle start from the central path rather than from
+        # a factorisation of a problem this one is not.
+        self.solver.reset(reset_qp_solver_mem=0 if warm else 1)
 
         force_reference = self.static_hold_force(x0)
         measured = x0[cs.X_PLANNED_POSITION : cs.X_PLANNED_POSITION + cs.K_PLANNED_DOF]
@@ -827,9 +841,6 @@ class Ocp:
             self.solver.constraints_set(stage, "lbx", lower)
             self.solver.constraints_set(stage, "ubx", upper)
 
-        # A payload step forces the cold start, whatever the caller passed.
-        warm = not self._payload_changed and guess is not None and guess.warm(intervals)
-        self._payload_changed = False
         seed = guess if warm else self.cold_start(x0)
         for stage in range(intervals + 1):
             if stage == 0:

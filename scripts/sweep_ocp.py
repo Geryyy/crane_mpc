@@ -54,8 +54,11 @@ DEFAULT_VARIANTS = {
     "cond_N_20": {"qp_solver_cond_N": 20},
     "qp_iter_25": {"qp_solver_iter_max": 25},
     "qp_iter_100": {"qp_solver_iter_max": 100},
+    # Shipped is 2. `0` is the regression row -- it is what this solver did
+    # before the QP memory survived a warm cycle, and it is the row to re-run
+    # if anyone reinstates an unconditional `reset_qp_solver_mem=1`.
+    "qp_warm_start_0": {"qp_solver_warm_start": 0},
     "qp_warm_start_1": {"qp_solver_warm_start": 1},
-    "qp_warm_start_2": {"qp_solver_warm_start": 2},
     "qp_ric_alg_0": {"qp_solver_ric_alg": 0},
     "qp_scaling": {
         "qpscaling_scale_constraints": "INF_NORM",

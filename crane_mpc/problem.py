@@ -59,7 +59,11 @@ SOLVER_TUNING = {
     # (10.3 ms QP at `N`, 61-81 ms at 1).
     "qp_solver_cond_N": None,
     "qp_solver_iter_max": 50,
-    "qp_solver_warm_start": 0,
+    # Primal **and** dual. Reachable only because `solver.py` keeps HPIPM's
+    # memory across a warm cycle; with the memory dropped every cycle this flag
+    # measured exactly the baseline, which is a null result that reads as "no
+    # effect". 2 against 0: QP iterations 15 -> 5 median, 18 -> 11 at p90.
+    "qp_solver_warm_start": 2,
     "qp_solver_ric_alg": 1,
     # C3's actuator lag makes the model stiff: linearised fastest eigenvalue
     # `|lambda| T_s = 8.5` at an ordinary pose (telescope `k = 3.5e6 N/m` vs

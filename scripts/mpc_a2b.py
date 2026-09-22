@@ -589,7 +589,10 @@ def simulate(
         # progress restart: s pinned at zero every cycle, origin above carries
         # what the last one bought (timber_crane_mpc.cpp:173-181)
         state[cs.X_PROGRESS] = 0.0
-        solver.reset(reset_qp_solver_mem=1)
+        # iterate always dropped, HPIPM's memory only on a cold cycle -- same
+        # split as `crane_mpc/solver.py`, which this harness has to mirror
+        warm_cycle = previous_x is not None and previous_u is not None
+        solver.reset(reset_qp_solver_mem=0 if warm_cycle else 1)
         for stage in range(intervals + 1):
             # stage's nominal virtual time: where s would be if nothing slipped.
             # anchoring on the previous solution's progress instead was tried and
