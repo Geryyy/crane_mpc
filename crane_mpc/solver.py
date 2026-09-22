@@ -839,21 +839,36 @@ class Ocp:
         )
         return Guess(states, inputs)
 
-    @staticmethod
-    def _origined_x0(x0: np.ndarray) -> np.ndarray:
+    def _origined_x0(self, x0: np.ndarray, path: PathCycle) -> np.ndarray:
         """
-        `x0` as this problem's own state, with `s` pinned to zero.
+        `x0` as this problem's own state, with the progress pair put in its box.
 
-        `s` is virtual time within one cycle; the caller's reference origin
-        carries what came before.
+        `s` is virtual time within one cycle, so it is pinned to zero and the
+        path's origin carries what came before.
+
+        `v_s` is projected into `[0, rate_max]`. Neither row is measured -- they
+        are the optimizer's own bookkeeping, carried from the last solution --
+        so a value outside the box is stale arithmetic, not an observation, and
+        clamping it is not overruling the machine. Left alone it is an
+        **infeasible** problem rather than a tight one: stage 0 is pinned with no
+        slack, the running stages box `v_s`, and `progress_accel_max` cannot
+        brake into the box within one interval. That is the loop that took
+        44.4% of cycles on the five-move benchmark -- a refused solve applies
+        the previous command, which carries `v_s` further out, which refuses the
+        next one.
         """
         x0 = np.asarray(x0, dtype=float).copy()
         if x0.shape != (cs.NX,) or not np.all(np.isfinite(x0)):
             raise ValueError("x0 is not a finite state of this problem")
         x0[cs.X_PROGRESS] = 0.0
+        x0[cs.X_PROGRESS_RATE] = min(
+            max(0.0, float(x0[cs.X_PROGRESS_RATE])), self.progress_rate_max(path)
+        )
         return x0
 
-    def _checked_x0(self, x0: np.ndarray, horizon, q_eq: np.ndarray) -> np.ndarray:
+    def _checked_x0(
+        self, x0: np.ndarray, horizon, q_eq: np.ndarray, path: PathCycle
+    ) -> np.ndarray:
         """
         Validate the cycle's arguments and return `x0` with `s` re-origined.
 
@@ -861,7 +876,7 @@ class Ocp:
         resampled knots to check, and the path it did bring is checked by
         `_resolved_path`.
         """
-        x0 = self._origined_x0(x0)
+        x0 = self._origined_x0(x0, path)
         if horizon is None:
             if not np.all(np.isfinite(np.asarray(q_eq, dtype=float))):
                 raise ValueError(
@@ -1132,11 +1147,12 @@ class Ocp:
         The path taken when nothing was prepared for this cycle: the first one,
         one after a failure, or one whose problem moved under the preparation.
         """
-        x0 = self._checked_x0(x0, horizon, q_eq)
+        cycle = self._resolved_path(horizon, path)
+        x0 = self._checked_x0(x0, horizon, q_eq, cycle)
         # A preparation this call overwrites is gone, and must not be consumable
         # by a later `feedback`.
         self._prepared = False
-        warm = self._write_problem(x0, self._resolved_path(horizon, path), q_eq, guess)
+        warm = self._write_problem(x0, cycle, q_eq, guess)
         if self.split_rti:
             self._set_phase(0)
         status = int(self.solver.solve())
@@ -1160,10 +1176,9 @@ class Ocp:
         before that cycle's measurement exists. Returns the seconds it cost,
         which are not on the measurement-to-command path.
         """
-        x0 = self._checked_x0(x0, horizon, q_eq)
-        self._prepared_warm = self._write_problem(
-            x0, self._resolved_path(horizon, path), q_eq, guess
-        )
+        cycle = self._resolved_path(horizon, path)
+        x0 = self._checked_x0(x0, horizon, q_eq, cycle)
+        self._prepared_warm = self._write_problem(x0, cycle, q_eq, guess)
         self._set_phase(1)
         self.solver.solve()
         self._prepared = True
@@ -1184,7 +1199,8 @@ class Ocp:
                 "on; a cycle whose preparation was invalidated takes `solve`"
             )
         self._prepared = False
-        x0 = self._origined_x0(x0)
+        # The preparation's own path: only the initial-state bound may move here.
+        x0 = self._origined_x0(x0, self._last_path)
         # The bound only. Writing `x` here as well would move the point the
         # preparation linearised about, and the QP step -- already computed to
         # travel from that point to this bound -- would land on top of it: a
