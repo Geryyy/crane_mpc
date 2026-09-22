@@ -21,6 +21,8 @@ import numpy as np
 from acados_template import AcadosModel, AcadosOcp
 from crane_model import symbolic as cs
 
+from . import bspline
+
 
 def chamber_forces(model, relief_pa: float, actuated_dof: int) -> tuple:
     """
@@ -168,19 +170,33 @@ SOLVER_PREFIX = "crane_mpc"
 # --- the OCP's own parameters, appended to the model's eleven ------------------
 #
 # `crane_symbolic`'s `p` is the tool coordinate and payload; what's appended
-# here is local to this problem: the reference model each stage tracks.
+# here is local to this problem: the path, and where on it this cycle starts.
 #
-# `s` is virtual time; cost compares against `q_a,ref(s)`. A spline can't
-# bake into a generated solver, so each stage carries a second-order
-# expansion about its nominal virtual time (value + 2 derivatives, same as
-# Marc's cost reads off the spline, `timber_crane_cost_js_pfc_pt2.cpp:35-37`).
+# A spline *can* bake into a generated solver -- its control points are
+# parameters and its basis is an expression, which is what robocrane's path
+# following does and what replaced the second-order expansion that used to sit
+# here. The expansion was only the path near one point; this is the path.
 #
-# At `s = s_nom`, `v_s = 1` every residual collapses to time-indexed tracking.
-P_PROGRESS_NOMINAL = cs.NP
-P_REFERENCE_POSITION = P_PROGRESS_NOMINAL + 1
-P_REFERENCE_FIRST = P_REFERENCE_POSITION + cs.K_PLANNED_DOF
-P_REFERENCE_SECOND = P_REFERENCE_FIRST + cs.K_PLANNED_DOF
-NP = P_REFERENCE_SECOND + cs.K_PLANNED_DOF
+# Two levels, because geometry and timing curve for different reasons and
+# separating them is the whole point:
+#
+# * `PATH`: `c(theta)`, the planner's curve in its own parameter, fitted once
+#   per plan. Its usual answer is a straight line in joint space, exact at any
+#   count; the curved candidate needs 30 for 1.3 mm at the tool.
+# * `TIMING`: `theta(w)` on `w = s/span`, the plan's own timing law over the
+#   window one horizon can reach, refitted per cycle. Scalar, smooth and
+#   monotone, so it is cheap; fitting `q_a,ref(t)` in one level instead needs
+#   more points and is worse, since a straight path still bends in time.
+PATH_POINTS = 30
+TIMING_POINTS = 8
+
+P_PATH_SPAN = cs.NP
+P_TIMING_CONTROL = P_PATH_SPAN + 1
+P_PATH_CONTROL = P_TIMING_CONTROL + TIMING_POINTS
+NP = P_PATH_CONTROL + PATH_POINTS * cs.K_PLANNED_DOF
+
+PATH_KNOTS = bspline.knot_vector(PATH_POINTS)
+TIMING_KNOTS = bspline.knot_vector(TIMING_POINTS)
 
 # --- the residual blocks -------------------------------------------------------
 #
@@ -314,16 +330,30 @@ def build_ocp(description_xml: str, parameters: dict, hydraulics: dict) -> tuple
     def block(offset):
         return parameter_vector[offset : offset + cs.K_PLANNED_DOF]
 
-    ds = progress - parameter_vector[P_PROGRESS_NOMINAL]
-    reference_position = (
-        block(P_REFERENCE_POSITION)
-        + block(P_REFERENCE_FIRST) * ds
-        + 0.5 * block(P_REFERENCE_SECOND) * ds * ds
+    # Where this stage sits in the window, and where that is on the path. `s` is
+    # still virtual time and still pinned to zero at stage zero, so the window
+    # starts here and `theta` carries the rest.
+    span = parameter_vector[P_PATH_SPAN]
+    timing = parameter_vector[P_TIMING_CONTROL : P_TIMING_CONTROL + TIMING_POINTS]
+    control = ca.reshape(
+        parameter_vector[P_PATH_CONTROL : P_PATH_CONTROL + PATH_POINTS * cs.NU],
+        cs.K_PLANNED_DOF,
+        PATH_POINTS,
+    ).T
+    window = progress / span
+    theta = bspline.casadi_value(
+        window, ca.reshape(timing, TIMING_POINTS, 1), TIMING_KNOTS
     )
-    # d/ds of the line above: velocity `q_ref'(s) * v_s`, so a slower plan
-    # asks a proportionally slower axis; tracking `q_ref'(s_nom)` instead
-    # would fight the progress term.
-    reference_velocity = block(P_REFERENCE_FIRST) + block(P_REFERENCE_SECOND) * ds
+    reference_position = bspline.casadi_value(theta, control, PATH_KNOTS).T
+    # d/ds through both levels: the path's tangent times how fast the timing
+    # spends it. Velocity is `q_a,ref'(s) * v_s`, so a slower plan asks a
+    # proportionally slower axis, which is what the progress state buys.
+    slope = bspline.casadi_slope(
+        window, ca.reshape(timing, TIMING_POINTS, 1), TIMING_KNOTS
+    )
+    reference_velocity = (
+        bspline.casadi_slope(theta, control, PATH_KNOTS).T * slope / span
+    )
 
     acados_model = AcadosModel()
     acados_model.name = f"{SOLVER_PREFIX}_{TOOL}"

@@ -1507,7 +1507,7 @@ int crane_mpc_pzs100_acados_update_params(crane_mpc_pzs100_solver_capsule* capsu
 {
     int solver_status = 0;
 
-    int casadi_np = 27;
+    int casadi_np = 170;
     if (casadi_np != np) {
         printf("acados_update_params: trying to set %i parameters for external functions."
             " External function has %i parameters. Exiting.\n", np, casadi_np);

@@ -21,23 +21,25 @@
 // **order**, so this is where the packing is written down rather than
 // guessed from the solver. Both halves are set on every stage before every
 // solve, so neither is a property of the artifact (issue 072).
-#define CRANE_MPC_OCP_PARAMETER_DOF 27
+#define CRANE_MPC_OCP_PARAMETER_DOF 170
 #define CRANE_MPC_OCP_PARAMETER_TOOL_POSITION 0
 #define CRANE_MPC_OCP_PARAMETER_PAYLOAD_MASS 1
 #define CRANE_MPC_OCP_PARAMETER_PAYLOAD_COM 2
 #define CRANE_MPC_OCP_PARAMETER_PAYLOAD_INERTIA 5
 
-// The rest of `p` is this OCP's own and is written per stage before every
-// solve: the stage's nominal virtual time, then the second-order expansion
-// of its reference about it -- value, d/ds, d^2/ds^2, per planned axis. The
-// progress state is virtual time, so the cost compares against
-// `q_a,ref(s)`; a spline cannot be baked into a generated solver, and this
-// local model is what carries both derivatives into the gradient and the
-// Hessian. At `s = s_nom` it is today's time-indexed reference exactly.
-#define CRANE_MPC_OCP_PARAMETER_PROGRESS_NOMINAL 11
-#define CRANE_MPC_OCP_PARAMETER_REFERENCE_POSITION 12
-#define CRANE_MPC_OCP_PARAMETER_REFERENCE_FIRST 17
-#define CRANE_MPC_OCP_PARAMETER_REFERENCE_SECOND 22
+// The rest of `p` is this OCP's own: the path, and the window it is read
+// over. One vector for the whole horizon, written once before every solve --
+// which stage a stage is, the progress state carries, not the parameters.
+// A clamped B-spline in two levels: `TIMING` takes `s/span` to where the
+// plan is on its path, `PATH` takes that to the planned joint values. The
+// control points are numbers here and the basis is in the generated code,
+// which is how a spline bakes into a solver; the second-order expansion
+// this replaced was only the path near one point.
+#define CRANE_MPC_OCP_PARAMETER_PATH_SPAN 11
+#define CRANE_MPC_OCP_PARAMETER_TIMING_CONTROL 12
+#define CRANE_MPC_OCP_PARAMETER_TIMING_POINTS 8
+#define CRANE_MPC_OCP_PARAMETER_PATH_CONTROL 20
+#define CRANE_MPC_OCP_PARAMETER_PATH_POINTS 30
 
 // The (row, column) of each of those six entries, in the order they are
 // packed. Theta_L is symmetric and about the payload's own centre of mass

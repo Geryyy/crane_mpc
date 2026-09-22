@@ -66,6 +66,9 @@ from crane_model.mujoco_plant import (  # noqa: E402
 )
 from crane_model.symbolic import K_ACTUATOR_FIT  # noqa: E402
 from crane_model.velocity_loop import VelocityLoop, load_velocity_loop  # noqa: E402
+from crane_mpc import solver as ocp_runtime  # noqa: E402
+from crane_mpc.problem import PATH_POINTS  # noqa: E402
+from crane_planning.ocp import evaluate  # noqa: E402
 
 AXIS_NAMES = mpc_a2b.AXIS_NAMES
 PLANNED = list(PLANNED_INDICES)
@@ -380,6 +383,25 @@ def next_start(plant, planner) -> object:
     return tune_planner.Start(q=q, dq_a=np.zeros(len(PLANNED)))
 
 
+def planned_path(plan):
+    """
+    Take the planner's curve as the cost wants it: geometry, and how it is spent.
+
+    `crane_planning` solves for a path and a timing law separately and only
+    resamples the two together on the way out. This takes them apart again --
+    `coefficients` is the curve in its own `sigma`, and `sigma(t)` is the law.
+    Fitting the resample instead would bake the timing into the geometry, and a
+    straight path still bends in time.
+    """
+    places = np.linspace(0.0, 1.0, 4 * PATH_POINTS)
+    return mpc_a2b.Path(
+        control=ocp_runtime.path_control(evaluate(plan.timing.coefficients, places)),
+        progress=lambda when: float(
+            np.interp(when, plan.timing.time, plan.timing.sigma)
+        ),
+    )
+
+
 def summarise(mpc, data, parameters, hydraulics, plan, chain, figures: bool) -> None:
     """Print what the move did, and write the figure and CSV where they are wanted."""
     if figures and not mpc.no_plot:
@@ -465,6 +487,7 @@ def main(argv: list[str] | None = None) -> int:
                 reference=tune_mpc.plan_reference(plan),
                 plant=chain.advance,
                 passive_guess=plan.q[0, list(PASSIVE_INDICES)],
+                path=planned_path(plan),
                 horizon=None if markers is None else chain.show_horizon,
             )
         except (CraneModelError, KeyError, ValueError, RuntimeError) as error:

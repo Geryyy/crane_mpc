@@ -22,7 +22,7 @@ import numpy as np
 from acados_template import AcadosOcp, AcadosOcpSolver, AcadosSim, AcadosSimSolver
 from crane_model import symbolic as cs
 
-from . import config, problem
+from . import bspline, config, problem
 
 #: Slack below this is round-off, not a violation (`ocp_solver.hpp` kSlackNoticeable).
 SLACK_NOTICEABLE = 1e-6
@@ -240,25 +240,44 @@ def stage_reference(
 
 def stage_parameters(
     base: np.ndarray,
-    nominal: float,
-    q_ref: np.ndarray,
-    dq_ref: np.ndarray,
-    ddq_ref: np.ndarray,
+    span: float,
+    timing: np.ndarray,
+    control: np.ndarray,
 ) -> np.ndarray:
-    """One stage's local reference model, bound into the acados parameter vector."""
+    """
+    Pack the path, and the window it is read over, into the parameter vector.
+
+    One vector for the whole horizon, not one per stage: which stage this is, is
+    carried by `s`, and the path does not know about stages.
+    """
     parameter = np.zeros(problem.NP)
     parameter[: cs.NP] = base
-    parameter[problem.P_PROGRESS_NOMINAL] = nominal
+    parameter[problem.P_PATH_SPAN] = float(span)
     parameter[
-        problem.P_REFERENCE_POSITION : problem.P_REFERENCE_POSITION + cs.K_PLANNED_DOF
-    ] = q_ref
-    parameter[
-        problem.P_REFERENCE_FIRST : problem.P_REFERENCE_FIRST + cs.K_PLANNED_DOF
-    ] = dq_ref
-    parameter[
-        problem.P_REFERENCE_SECOND : problem.P_REFERENCE_SECOND + cs.K_PLANNED_DOF
-    ] = ddq_ref
+        problem.P_TIMING_CONTROL : problem.P_TIMING_CONTROL + problem.TIMING_POINTS
+    ] = np.asarray(timing, dtype=float).reshape(-1)
+    # Point-major, which is what `ca.reshape` unpacks column by column.
+    parameter[problem.P_PATH_CONTROL :] = np.asarray(control, dtype=float).reshape(-1)
     return parameter
+
+
+def timing_control(progress_of, origin: float, span: float) -> np.ndarray:
+    """
+    Fit the plan's own timing over the window one horizon can reach.
+
+    `progress_of` takes a virtual time and gives where the plan is on its path,
+    in [0, 1]. Scalar, smooth and monotone, so a handful of control points carry
+    it; the window is the ceiling on `s`, not the nominal horizon, or the
+    optimizer could run past the end of what it was given.
+    """
+    places = origin + np.linspace(0.0, span, 4 * problem.TIMING_POINTS)
+    sigma = np.array([[float(progress_of(place))] for place in places])
+    return bspline.fit(sigma, problem.TIMING_POINTS)
+
+
+def path_control(samples) -> np.ndarray:
+    """Fit the planned curve itself, in its own parameter. Once per plan."""
+    return bspline.fit(np.asarray(samples, dtype=float), problem.PATH_POINTS)
 
 
 def slack_prices(parameters: dict) -> dict:
@@ -802,6 +821,24 @@ class Ocp:
         x0[cs.X_PROGRESS] = 0.0
         return x0
 
+    def _path_parameters(self, horizon) -> np.ndarray:
+        """
+        Fit the horizon's own knots as a path, until the planner hands one over.
+
+        `crane_planning` holds the curve as geometry and stage 2 of
+        `docs/features/path-following-mpc` takes it whole. Until then the node
+        has `Ts` samples of it, so the path is fitted to those and the timing is
+        the identity -- theta is the window, spent at the rate the samples imply.
+        Fitting is a cached matmul, so this is per cycle, not per stage.
+        """
+        span = self.intervals * self.Ts
+        return stage_parameters(
+            self._base_parameter,
+            span,
+            timing_control(lambda place: place / span, 0.0, span),
+            path_control(horizon.q_a_ref[:, : cs.K_PLANNED_DOF]),
+        )
+
     def _write_problem(
         self, x0: np.ndarray, horizon, q_eq: np.ndarray, guess: Guess | None
     ) -> bool:
@@ -841,13 +878,7 @@ class Ocp:
             self.solver.set(
                 stage,
                 "p",
-                stage_parameters(
-                    self._base_parameter,
-                    stage * self.Ts,
-                    horizon.q_a_ref[stage, : cs.K_PLANNED_DOF],
-                    horizon.dq_a_ref[stage, : cs.K_PLANNED_DOF],
-                    horizon.ddq_a_ref[stage, : cs.K_PLANNED_DOF],
-                ),
+                self._path_parameters(horizon),
             )
             self.solver.cost_set(
                 stage, "yref", terminal if stage == intervals else running
@@ -1070,13 +1101,7 @@ class Ocp:
         planned = cs.K_PLANNED_DOF
         passive = cs.K_PASSIVE_DOF
         for stage in range(self.intervals + 1):
-            parameter = stage_parameters(
-                self._base_parameter,
-                stage * self.Ts,
-                horizon.q_a_ref[stage, :planned],
-                horizon.dq_a_ref[stage, :planned],
-                horizon.ddq_a_ref[stage, :planned],
-            )
+            parameter = self._path_parameters(horizon)
             terminal = stage == self.intervals
             reference = stage_reference(q_eq, force_reference, terminal=terminal)
             if terminal:

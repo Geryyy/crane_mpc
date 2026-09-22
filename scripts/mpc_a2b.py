@@ -68,6 +68,29 @@ DEFAULT_B = np.array([0.60, 0.60, 1.20, 1.00, 0.50])
 
 
 @dataclass
+class Path:
+    """
+    The curve the cost is written against, and how the plan means to spend it.
+
+    `control` is the path in its own parameter, `progress` takes a virtual time
+    to where the plan is on it. Separated because that is the point: geometry
+    does not bend in time, and a timing law does not leave the path.
+    """
+
+    control: np.ndarray
+    progress: object
+
+
+def line_path(a: np.ndarray, b: np.ndarray, duration: float) -> Path:
+    """Build this script's own A-to-B: a joint-space line, quintic in time."""
+    samples = np.linspace(a, b, 4 * ocp_runtime.problem.PATH_POINTS)
+    return Path(
+        control=ocp_runtime.path_control(samples),
+        progress=lambda time: minimum_jerk(time, duration)[0],
+    )
+
+
+@dataclass
 class RunData:
     """Closed-loop samples, including the terminal sample at ``time[-1]``."""
 
@@ -506,6 +529,7 @@ def simulate(
     plant=None,
     passive_guess=None,
     horizon=None,
+    path=None,
 ) -> RunData:
     """
     Run the receding-horizon controller against a plant.
@@ -534,6 +558,15 @@ def simulate(
 
         def plant(state, control, parameter, step_s):
             return rk4_step(dynamics, state, control, parameter, step_s)
+
+    # The cost reads a path, not samples of one. Absent a planned curve this is
+    # the straight line the quintic above walks.
+    if path is None:
+        path = line_path(a, b, arguments.move_duration)
+    # `s`'s ceiling over the horizon, so the fitted window covers everywhere the
+    # optimizer may put it -- past that, `casadi_value` clamps and the reference
+    # would flatten where the progress ran fastest.
+    span = intervals * dt * float(parameters["limits"]["progress_rate_max"])
 
     # table is over virtual time, read at whatever virtual time the horizon reached;
     # sized for the worst case, a horizon that never slows down
@@ -597,19 +630,22 @@ def simulate(
         # split as `crane_mpc/solver.py`, which this harness has to mirror
         warm_cycle = previous_x is not None and previous_u is not None
         solver.reset(reset_qp_solver_mem=0 if warm_cycle else 1)
+        # The path and the window are the whole horizon's, so this is built once
+        # a cycle; which stage a stage is, `s` carries.
+        cycle_parameter = stage_parameters(
+            base_parameter,
+            span,
+            ocp_runtime.timing_control(path.progress, origin, span),
+            path.control,
+        )
         for stage in range(intervals + 1):
             # stage's nominal virtual time: where s would be if nothing slipped.
             # anchoring on the previous solution's progress instead was tried and
             # measured worse (issue 119 notes) -- so this is k*T_s
             nominal = stage * dt
             tau_virtual = origin + nominal
-            q_ref, dq_ref, ddq_ref = reference(tau_virtual)
             equilibrium = equilibrium_at(eq_times, q_eq_table, tau_virtual)
-            solver.set(
-                stage,
-                "p",
-                stage_parameters(base_parameter, nominal, q_ref, dq_ref, ddq_ref),
-            )
+            solver.set(stage, "p", cycle_parameter)
             solver.cost_set(
                 stage,
                 "yref",

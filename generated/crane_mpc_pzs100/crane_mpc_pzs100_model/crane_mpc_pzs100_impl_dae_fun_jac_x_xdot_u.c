@@ -71,7 +71,7 @@ static const casadi_int casadi_s0[3] = {25, 1, 1};
 static const casadi_int casadi_s1[3] = {6, 1, 1};
 static const casadi_int casadi_s2[3] = {0, 1, 1};
 static const casadi_int casadi_s3[3] = {0, 0, 1};
-static const casadi_int casadi_s4[3] = {27, 1, 1};
+static const casadi_int casadi_s4[3] = {170, 1, 1};
 static const casadi_int casadi_s5[175] =
   {25, 25, 0, 0, 7, 14, 21, 28,
   35, 42, 51, 60, 69, 78, 87, 95,
@@ -107,7 +107,7 @@ static const casadi_int casadi_s7[15] =
   {25, 6, 0, 1, 2, 3, 4, 5,
   6, 14, 15, 22, 16, 17, 19};
 
-/* crane_mpc_pzs100_impl_dae_fun_jac_x_xdot_u:(i0[25],i1[25],i2[6],i3[0],i4[],i5[27])->(o0[25],o1[25x25,147nz],o2[25x25,25nz],o3[25x6,6nz]) */
+/* crane_mpc_pzs100_impl_dae_fun_jac_x_xdot_u:(i0[25],i1[25],i2[6],i3[0],i4[],i5[170])->(o0[25],o1[25x25,147nz],o2[25x25,25nz],o3[25x6,6nz]) */
 static int casadi_f0(const casadi_real** arg, casadi_real** res, casadi_int* iw, casadi_real* w, int mem) {
   casadi_real a0000, a0001, a0002, a0003, a0004, a0005, a0006, a0007, a0008, a0009, a0010, a0011;
   casadi_real a0012, a0013, a0014, a0015, a0016, a0017, a0018, a0019, a0020, a0021, a0022, a0023;

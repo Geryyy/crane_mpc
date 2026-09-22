@@ -13,6 +13,8 @@ choose, which is what `casadi_value`/`casadi_slope` give as expression graphs.
 
 from __future__ import annotations
 
+from functools import lru_cache
+
 import casadi as ca
 import numpy as np
 
@@ -113,6 +115,25 @@ def casadi_slope(theta, control, knots: np.ndarray, order: int = ORDER):
     return total
 
 
+@lru_cache(maxsize=None)
+def _design(samples: int, control_points: int, order: int):
+    """
+    Give the basis at each sample, and the pseudo-inverse of its interior columns.
+
+    Cached: the basis is a recursion in Python and the shape never changes, but
+    the path behind it is refitted every cycle.
+    """
+    knots = knot_vector(control_points, order)
+    places = np.linspace(0.0, 1.0, samples)
+    design = np.array(
+        [
+            [_basis(place, order, index, knots) for index in range(control_points)]
+            for place in places
+        ]
+    )
+    return design, np.linalg.pinv(design[:, 1:-1])
+
+
 def fit(samples, control_points: int, order: int = ORDER) -> np.ndarray:
     """
     Least-squares control points for a path sampled uniformly in its own parameter.
@@ -128,14 +149,7 @@ def fit(samples, control_points: int, order: int = ORDER) -> np.ndarray:
             f"a clamped order-{order} spline needs at least {order + 1} control "
             f"points, got {control_points}"
         )
-    knots = knot_vector(control_points, order)
-    places = np.linspace(0.0, 1.0, len(samples))
-    design = np.array(
-        [
-            [_basis(place, order, index, knots) for index in range(control_points)]
-            for place in places
-        ]
-    )
+    design, interior = _design(len(samples), control_points, order)
     # Clamped, so the end control points *are* the end of the curve. Taking them
     # as known and fitting the interior against what is left keeps them exact;
     # writing them as two more least-squares rows only asks for them politely,
@@ -143,5 +157,5 @@ def fit(samples, control_points: int, order: int = ORDER) -> np.ndarray:
     control = np.zeros((control_points, samples.shape[1]))
     control[0], control[-1] = samples[0], samples[-1]
     held = np.outer(design[:, 0], control[0]) + np.outer(design[:, -1], control[-1])
-    control[1:-1] = np.linalg.lstsq(design[:, 1:-1], samples - held, rcond=None)[0]
+    control[1:-1] = interior @ (samples - held)
     return control
