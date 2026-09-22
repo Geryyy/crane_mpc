@@ -127,3 +127,29 @@ def test_the_wire_form_names_the_canonical_eight_and_carries_the_sway():
     # The actuated six keep their canonical rows around the sway pair.
     assert point.positions[0] == pytest.approx(0.3 * 0.04)
     assert point.positions[6] == pytest.approx(0.0)
+
+
+def test_the_effort_field_is_the_feedforward_velocity_not_a_torque():
+    """
+    `u - dq_a_ref`, the identity `crane_planning` writes.
+
+    The JTC adds `ff_velocity_scale*dq_ref` whether or not anyone wants it, so
+    the difference is what makes the open-loop branch the OCP's own `u`. Sending
+    `dq_a_ref` alone leaves C3's force state uncharged -- `tau_dot = k*(u_f - dq)`
+    is zero at `u == dq` -- which is the drift this field exists to remove.
+    """
+    from builtin_interfaces.msg import Time
+
+    horizon = ramp([0.0, 0.04])
+    horizon.u[:, 0] = 0.5  # slew: commanded faster than the 0.3 rad/s it moves
+    horizon.dq_a_ref[:, 4] = 0.2  # rotator, moving
+    horizon.u[:, 4] = 0.7  # and commanded ahead of itself
+
+    point = horizon_to_message(horizon, CANONICAL, Time(sec=0, nanosec=0)).points[1]
+    assert len(point.effort) == len(CANONICAL)
+    # Canonical rows 0 and 6 are the slew and the rotator: the actuated six sit
+    # around the sway pair, and effort has to land on the same rows as velocity.
+    assert point.effort[0] == pytest.approx(0.5 - 0.3)
+    assert point.effort[6] == pytest.approx(0.7 - 0.2)
+    # Passive rows carry no command, and the tool is pinned so both terms are 0.
+    assert [point.effort[row] for row in (4, 5, 7)] == pytest.approx([0.0, 0.0, 0.0])

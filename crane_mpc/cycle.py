@@ -619,6 +619,13 @@ class Cycle:
         self.horizon.dq_u_ref[:] = states[
             :, cs.X_PASSIVE_VELOCITY : cs.X_PASSIVE_VELOCITY + PASSIVE_DOF
         ]
+        # One input short of a knot: N intervals between N+1 knots. The last
+        # interval's command is held, as a zero-order hold already holds it.
+        commands = solution.inputs[:, : cs.NU]
+        if commands.size:
+            self.horizon.u[:-1, :PLANNED_DOF] = commands
+            self.horizon.u[-1, :PLANNED_DOF] = commands[-1]
+        self.horizon.u[:, TOOL_AXIS] = 0.0
         self.tcp_states = states.copy()
 
     def shift_previous_horizon(self) -> bool:
@@ -630,7 +637,7 @@ class Cycle:
             or len(self.last_tcp_states) != len(self.horizon)
         ):
             return False
-        for field_name in ("q_a_ref", "dq_a_ref", "q_u_ref", "dq_u_ref"):
+        for field_name in ("q_a_ref", "dq_a_ref", "q_u_ref", "dq_u_ref", "u"):
             previous = getattr(self.last_horizon, field_name)
             current = getattr(self.horizon, field_name)
             current[:-1] = previous[1:]

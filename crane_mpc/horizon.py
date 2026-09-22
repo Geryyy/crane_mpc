@@ -56,7 +56,8 @@ class Knots:
     N knots. In a reference `t` is time_from_start; in a horizon, index*Ts.
 
     Sway pair is the solved one, shifted by `Cycle.adopt_solution`; a
-    reference carries no sway, so it stays zero there.
+    reference carries no sway, so it stays zero there. `u` is likewise the
+    solved command and stays zero on a reference, which carries none.
     """
 
     t: np.ndarray  # (N,)
@@ -65,6 +66,7 @@ class Knots:
     ddq_a_ref: np.ndarray  # (N, 6)
     q_u_ref: np.ndarray  # (N, 2)
     dq_u_ref: np.ndarray  # (N, 2)
+    u: np.ndarray  # (N, 6) -- joint velocity command at Psi's input
 
     def __len__(self) -> int:
         return int(self.t.shape[0])
@@ -78,6 +80,7 @@ class Knots:
             np.zeros((count, ACTUATED_DOF)),
             np.zeros((count, PASSIVE_DOF)),
             np.zeros((count, PASSIVE_DOF)),
+            np.zeros((count, ACTUATED_DOF)),
         )
 
     def copy(self) -> Knots:
@@ -88,6 +91,7 @@ class Knots:
             self.ddq_a_ref.copy(),
             self.q_u_ref.copy(),
             self.dq_u_ref.copy(),
+            self.u.copy(),
         )
 
 
@@ -226,6 +230,14 @@ def horizon_to_message(horizon: Knots, joints, first_knot_valid_at):
     computation.
 
     No accelerations: `ddq_a_ref` is the OCP's stage residual, not a command.
+
+    `effort` carries a feed-forward *velocity*, not a torque, read under the
+    JTC's `effort_field_is_feedforward`. `u - dq_a_ref` is the same identity
+    `crane_planning` writes: the plugin adds `ff_velocity_scale*dq_ref` whether
+    or not anyone wants it, so the difference is what makes the open-loop branch
+    the OCP's own `u`. Without it the machine is commanded the reference velocity
+    and C3's force state never charges -- `tau_dot = k*(u_f - dq)` is zero at
+    `u == dq`. The tool row falls out at zero: it is pinned, so both terms are.
     """
     position = np.zeros((len(horizon), cs.K_GENERALIZED_DOF))
     velocity = np.zeros_like(position)
@@ -233,6 +245,8 @@ def horizon_to_message(horizon: Knots, joints, first_knot_valid_at):
     velocity[:, cs.K_ACTUATED_ROWS] = horizon.dq_a_ref
     position[:, cs.K_PASSIVE_ROWS] = horizon.q_u_ref
     velocity[:, cs.K_PASSIVE_ROWS] = horizon.dq_u_ref
+    effort = np.zeros_like(position)
+    effort[:, cs.K_ACTUATED_ROWS] = horizon.u - horizon.dq_a_ref
 
     message = JointTrajectory()
     message.header.stamp = first_knot_valid_at
@@ -241,6 +255,7 @@ def horizon_to_message(horizon: Knots, joints, first_knot_valid_at):
         JointTrajectoryPoint(
             positions=position[index].tolist(),
             velocities=velocity[index].tolist(),
+            effort=effort[index].tolist(),
             time_from_start=seconds_duration(float(horizon.t[index])),
         )
         for index in range(len(horizon))
