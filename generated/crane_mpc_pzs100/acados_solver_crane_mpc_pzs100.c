@@ -1235,7 +1235,7 @@ static void crane_mpc_pzs100_acados_create_set_opts(crane_mpc_pzs100_solver_caps
     ocp_nlp_solver_opts_set(nlp_config, capsule->nlp_opts, "globalization_full_step_dual", &globalization_full_step_dual);
 
     // set collocation type (relevant for implicit integrators)
-    sim_collocation_type collocation_type = GAUSS_LEGENDRE;
+    sim_collocation_type collocation_type = GAUSS_RADAU_IIA;
     for (int i = 0; i < N; i++)
         ocp_nlp_solver_opts_set_at_stage(nlp_config, nlp_opts, i, "dynamics_collocation_type", &collocation_type);
 
@@ -1260,7 +1260,7 @@ static void crane_mpc_pzs100_acados_create_set_opts(crane_mpc_pzs100_solver_caps
         ocp_nlp_solver_opts_set_at_stage(nlp_config, nlp_opts, i, "dynamics_newton_tol", &newton_tol_val);
 
     // set up sim_method_jac_reuse
-    bool tmp_bool = (bool) 0;
+    bool tmp_bool = (bool) 1;
     for (int i = 0; i < N; i++)
         ocp_nlp_solver_opts_set_at_stage(nlp_config, nlp_opts, i, "dynamics_jac_reuse", &tmp_bool);
 

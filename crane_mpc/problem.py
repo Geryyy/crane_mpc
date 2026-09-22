@@ -68,11 +68,28 @@ SOLVER_TUNING = {
     # C3's actuator lag makes the model stiff: linearised fastest eigenvalue
     # `|lambda| T_s = 8.5` at an ordinary pose (telescope `k = 3.5e6 N/m` vs
     # effective mass), where ERK4 is stable only to ~2.8 and diverges in three
-    # intervals (HPIPM status 3). Two Gauss stages: order four, A-stable.
+    # intervals (HPIPM status 3). Two implicit stages carry that comfortably.
     "integrator_type": "IRK",
     "sim_method_num_stages": 2,
     "sim_method_num_steps": 1,
     "sim_method_newton_iter": 3,
+    # Not for speed -- for what happens at a pose stiffer than the one above.
+    # Legendre is A-stable with `R(z) -> 1` as `z -> -inf`, so the stiff mode is
+    # bounded but undamped and rings; Radau IIA is L-stable (`R -> 0`) at one
+    # order less (3 against 4). At `z = -8.5` that is `|R|` 0.098 against 0.25,
+    # and the gap widens with the telescope out and a payload on.
+    #
+    # The order it gives up costs nothing measurable at `T_s`: 25 moves / 7k
+    # cycles, terminal error 0.434 -> 0.432, sway/pump identical, force 0.557 ->
+    # 0.556. It is not slower either (below).
+    "collocation_type": "GAUSS_RADAU_IIA",
+    # Reuse the IRK Jacobian across a step's Newton iterations instead of
+    # re-forming and re-factorising it three times. Same corpus: solve 4.96 ->
+    # 3.85 ms median and 16.1 -> 10.1 ms at p90 against Legendre without reuse,
+    # with `qp_iter` 5/11 unmoved -- this is integrator cost, not QP cost -- and
+    # every quality column within a digit. Two runs agree on the median; read
+    # the p90 with the load average the sweep recorded, not on its own.
+    "sim_method_jac_reuse": 1,
     # Gauss-Newton, so `J' W J` is positive semi-definite by construction and
     # the exact nonlinear-cost Hessians acados would emit go unused.
     "hessian_approx": "GAUSS_NEWTON",

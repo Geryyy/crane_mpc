@@ -60,16 +60,21 @@ DEFAULT_VARIANTS = {
     "qp_warm_start_0": {"qp_solver_warm_start": 0},
     "qp_warm_start_1": {"qp_solver_warm_start": 1},
     "qp_ric_alg_0": {"qp_solver_ric_alg": 0},
-    "qp_scaling": {
-        "qpscaling_scale_constraints": "INF_NORM",
-        "qpscaling_scale_objective": "OBJECTIVE_GERSHGORIN",
-    },
+    # No `qp_scaling` row: acados 0.5.5 refuses both qpscaling options under
+    # `SQP_RTI` outright (`acados_ocp.py:1301-1303`, NotImplementedError), so
+    # the row can only ever fail while this solver is an RTI one. Reinstate it
+    # in the same patch that moves `nlp_solver_type`, not before.
     # --- the integrator, where C3's stiffness is paid for ----------------------
     "irk_4_stages": {"sim_method_num_stages": 4},
     "irk_2_steps": {"sim_method_num_steps": 2},
     "irk_newton_2": {"sim_method_newton_iter": 2},
     "irk_newton_5": {"sim_method_newton_iter": 5},
     "gnsf": {"integrator_type": "GNSF"},
+    # Shipped is Radau IIA with Jacobian reuse. These two are the regression
+    # rows -- what the integrator cost before each half of that, measured at
+    # 4.96 ms median / 16.1 p90 against the shipped 3.85 / 10.1.
+    "irk_legendre": {"collocation_type": "GAUSS_LEGENDRE"},
+    "irk_no_jac_reuse": {"sim_method_jac_reuse": 0},
     # --- one Newton step, or more ---------------------------------------------
     # RTI is the shipped trade; these price what convergence would cost per
     # cycle, and `Ts` is what says whether it is affordable.
