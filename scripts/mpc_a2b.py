@@ -273,8 +273,8 @@ def load_settings(arguments: argparse.Namespace) -> tuple[dict, dict]:
     parameters["weights"]["lag"] = arguments.lag_scale * float(
         parameters["weights"]["lag"]
     )
-    parameters["weights"]["progress_rate"] = arguments.progress_scale * float(
-        parameters["weights"]["progress_rate"]
+    parameters["weights"]["progress"] = arguments.progress_scale * float(
+        parameters["weights"]["progress"]
     )
 
     positive(float(parameters["Ts"]), "--dt")
@@ -441,18 +441,18 @@ def equilibrium_table(
     guess=None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """
-    Precompute continuous-branch passive equilibria over **virtual** time.
+    Precompute continuous-branch passive equilibria along the **path**.
 
-    Indexed by seconds of nominal plan, so a slow-spending run reads the same
-    table more slowly rather than needing a second one; grid is the horizon's
-    own, `equilibrium_at` interpolates between knots.
+    Indexed by the path parameter, so a run that spends the path slowly reads
+    the same table more slowly rather than needing a second one; the grid is
+    uniform in theta and `equilibrium_at` interpolates between knots.
 
     `guess` seeds the first solve, later ones continue from their predecessor,
     picking the branch the table sits on. Zero suits a pose near the origin; a
     tilt near pi/2 (`initialization_outside.yaml`) converges onto a different
     solution, simulating a machine holding its load sideways.
     """
-    times = dt * np.arange(count)
+    times = np.linspace(0.0, 1.0, count)
     q_eq = np.zeros((count, cs.K_PASSIVE_DOF))
     guess = (
         np.zeros(cs.K_PASSIVE_DOF)
@@ -461,7 +461,7 @@ def equilibrium_table(
     )
 
     for index, time in enumerate(times):
-        q_ref_index, _, _ = reference(time)
+        q_ref_index = reference(time)
 
         def residual(passive: np.ndarray, q_ref_index=q_ref_index) -> np.ndarray:
             state = np.zeros(cs.NX)
@@ -563,16 +563,19 @@ def simulate(
     # the straight line the quintic above walks.
     if path is None:
         path = line_path(a, b, arguments.move_duration)
-    # `s`'s ceiling over the horizon, so the fitted window covers everywhere the
-    # optimizer may put it -- past that, `casadi_value` clamps and the reference
-    # would flatten where the progress ran fastest.
-    span = intervals * dt * float(parameters["limits"]["progress_rate_max"])
+    path_knots = ocp_runtime.problem.PATH_KNOTS
 
-    # table is over virtual time, read at whatever virtual time the horizon reached;
-    # sized for the worst case, a horizon that never slows down
+    def on_path(theta):
+        """Give the planned pose at a place on the path, which is what the cost reads."""
+        return ocp_runtime.bspline.value(
+            np.clip(theta, 0.0, 1.0), path.control, path_knots
+        )[0]
+
+    # Along the path, not along a clock: `origin` is where on it this cycle
+    # starts, and the table is read at the same parameter the cost is.
     table_count = steps + intervals + 1
     eq_times, q_eq_table = equilibrium_table(
-        bias_u, base_parameter, reference, dt, table_count, passive_guess
+        bias_u, base_parameter, on_path, dt, table_count, passive_guess
     )
     u_max, extend, retract = configure_fixed_data(
         solver, model, scale, parameters, hydraulics
@@ -583,8 +586,9 @@ def simulate(
     state[cs.X_PASSIVE_POSITION : cs.X_PASSIVE_POSITION + cs.K_PASSIVE_DOF] = (
         equilibrium_at(eq_times, q_eq_table, 0.0)
     )
-    # The plan is spent at nominal rate until a solve says otherwise.
-    state[cs.X_PROGRESS_RATE] = export_ocp.K_PROGRESS_RATE_REFERENCE
+    # The path parameter starts at rest; what spends it is the row that wants it
+    # at the end, not a nominal rate.
+    state[cs.X_PROGRESS_RATE] = 0.0
     # C3 block 3 starts holding its own weight; no force measurement in the stack,
     # so h_eff at the initial pose seeds it (zero would start with hydraulics off)
     state[cs.X_ACTUATED_FORCE : cs.X_ACTUATED_FORCE + cs.K_PLANNED_DOF] = np.asarray(
@@ -609,16 +613,21 @@ def simulate(
     previous_u: list[np.ndarray] | None = None
     budget = float(parameters["solve_budget"])
     rate_max = float(parameters["limits"]["progress_rate_max"])
+    # The plan's own pace, as path parameter per second: what the progress row
+    # asks for, until the end of the path is nearer than that.
+    nominal_rate = 1.0 / float(arguments.move_duration)
 
-    # reference origin, in virtual time -- what the progress state buys: horizon
-    # samples from here, not wall clock; each cycle advances by what the last
-    # solve's first interval was worth. Wall-clock indexing let the reference
-    # run away from a machine that fell behind.
+    # Where on the path this cycle starts, in [0, 1]. `s` is pinned to zero each
+    # cycle and this carries what the last solve bought -- the same bookkeeping
+    # as when it was virtual time, in the parameter the cost now reads.
     origin = 0.0
 
     for step in range(steps):
         virtual_time[step] = origin
-        q_ref_log[step], dq_ref_log[step], _ = reference(origin)
+        q_ref_log[step] = on_path(origin)
+        dq_ref_log[step] = state[
+            cs.X_PLANNED_VELOCITY : cs.X_PLANNED_VELOCITY + cs.K_PLANNED_DOF
+        ]
         q_eq_log[step] = equilibrium_at(eq_times, q_eq_table, origin)
         # one evaluation per cycle at measured state, held across horizon --
         # ocp_solver.cpp's approach, same trade mpc_node.cpp makes for q_eq
@@ -632,24 +641,25 @@ def simulate(
         solver.reset(reset_qp_solver_mem=0 if warm_cycle else 1)
         # The path and the window are the whole horizon's, so this is built once
         # a cycle; which stage a stage is, `s` carries.
-        cycle_parameter = stage_parameters(
-            base_parameter,
-            span,
-            ocp_runtime.timing_control(path.progress, origin, span),
-            path.control,
-        )
+        cycle_parameter = stage_parameters(base_parameter, origin, path.control)
         for stage in range(intervals + 1):
             # stage's nominal virtual time: where s would be if nothing slipped.
             # anchoring on the previous solution's progress instead was tried and
             # measured worse (issue 119 notes) -- so this is k*T_s
-            nominal = stage * dt
-            tau_virtual = origin + nominal
-            equilibrium = equilibrium_at(eq_times, q_eq_table, tau_virtual)
+            # How far along the path a stage could be if the rate ran flat out:
+            # what bounds `s`, and where the sway equilibrium is read.
+            nominal = stage * dt * rate_max
+            equilibrium = equilibrium_at(eq_times, q_eq_table, origin + nominal)
             solver.set(stage, "p", cycle_parameter)
             solver.cost_set(
                 stage,
                 "yref",
-                stage_reference(equilibrium, tau_hold, stage == intervals),
+                stage_reference(
+                    equilibrium,
+                    tau_hold,
+                    stage == intervals,
+                    origin + stage * dt * nominal_rate,
+                ),
             )
             if stage == 0:
                 lower = upper = state
@@ -657,8 +667,8 @@ def simulate(
                 lower, upper = state_bounds(
                     parameters, equilibrium, state[: cs.K_PLANNED_DOF]
                 )
-                # s's ceiling: what nominal seconds at the fastest allowed rate can reach
-                upper[cs.X_PROGRESS] = nominal * rate_max
+                # s's ceiling: the path's own end, or as far as the rate reaches
+                upper[cs.X_PROGRESS] = min(nominal, 1.0 - origin)
             solver.constraints_set(stage, "lbx", lower)
             solver.constraints_set(stage, "ubx", upper)
 
@@ -684,11 +694,12 @@ def simulate(
             if stage == 0:
                 value = state.copy()
             else:
-                equilibrium = equilibrium_at(eq_times, q_eq_table, origin + stage * dt)
+                reach = stage * dt * rate_max
+                equilibrium = equilibrium_at(eq_times, q_eq_table, origin + reach)
                 lower, upper = state_bounds(
                     parameters, equilibrium, state[: cs.K_PLANNED_DOF]
                 )
-                upper[cs.X_PROGRESS] = stage * dt * rate_max
+                upper[cs.X_PROGRESS] = min(reach, 1.0 - origin)
                 # only boxed prefix has bounds; force states held by constraint 6,
                 # left as the rollout produced them
                 boxed = lower.size
@@ -734,17 +745,18 @@ def simulate(
             )
             previous_x, previous_u = candidate_x, candidate_u
         elif previous_u is not None:
-            # Same shifted-previous-plan fallback used by mpc_node.
+            # Same shifted-previous-plan fallback used by mpc_node. The path
+            # parameter stays where it is: a refused solve bought no path.
             control = (
                 previous_u[1].copy() if len(previous_u) > 1 else previous_u[0].copy()
             )
-            advance = dt
+            advance = 0.0
             previous_x = previous_x[1:] + [previous_x[-1].copy()]
             previous_u = previous_u[1:] + [previous_u[-1].copy()]
             fallback[step] = True
         else:
             control = np.zeros(cs.NU_PROGRESS)
-            advance = dt
+            advance = 0.0
             fallback[step] = True
 
         controls[step] = control
@@ -755,23 +767,29 @@ def simulate(
             horizon(np.array(previous_x))
         state = plant(state, control, base_parameter, dt)
         states[step + 1] = state
-        origin += advance if math.isfinite(advance) and advance >= 0.0 else dt
+        origin = min(
+            1.0,
+            origin + (advance if math.isfinite(advance) and advance >= 0.0 else 0.0),
+        )
 
         if (
             step == 0
             or (step + 1) % max(1, int(round(1.0 / dt))) == 0
             or step + 1 == steps
         ):
-            reached, _, _ = reference(origin)
+            reached = on_path(origin)
             error = np.linalg.norm(state[: cs.K_PLANNED_DOF] - reached)
             print(
-                f"t={(step + 1) * dt:6.2f} s  s={origin:6.2f} s  "
+                f"t={(step + 1) * dt:6.2f} s  theta={origin:5.3f}  "
                 f"v_s={state[cs.X_PROGRESS_RATE]:5.3f}  status={status:2d}  "
                 f"solve={1e3 * solve_time:7.2f} ms  |q-qref|={error:.4f}"
             )
 
     virtual_time[steps] = origin
-    q_ref_log[steps], dq_ref_log[steps], _ = reference(origin)
+    q_ref_log[steps] = on_path(origin)
+    dq_ref_log[steps] = state[
+        cs.X_PLANNED_VELOCITY : cs.X_PLANNED_VELOCITY + cs.K_PLANNED_DOF
+    ]
     q_eq_log[steps] = equilibrium_at(eq_times, q_eq_table, origin)
 
     # u is a joint velocity at Psi's input under C3, not acceleration -- desired

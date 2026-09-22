@@ -21,7 +21,7 @@
 // **order**, so this is where the packing is written down rather than
 // guessed from the solver. Both halves are set on every stage before every
 // solve, so neither is a property of the artifact (issue 072).
-#define CRANE_MPC_OCP_PARAMETER_DOF 170
+#define CRANE_MPC_OCP_PARAMETER_DOF 162
 #define CRANE_MPC_OCP_PARAMETER_TOOL_POSITION 0
 #define CRANE_MPC_OCP_PARAMETER_PAYLOAD_MASS 1
 #define CRANE_MPC_OCP_PARAMETER_PAYLOAD_COM 2
@@ -30,15 +30,13 @@
 // The rest of `p` is this OCP's own: the path, and the window it is read
 // over. One vector for the whole horizon, written once before every solve --
 // which stage a stage is, the progress state carries, not the parameters.
-// A clamped B-spline in two levels: `TIMING` takes `s/span` to where the
-// plan is on its path, `PATH` takes that to the planned joint values. The
-// control points are numbers here and the basis is in the generated code,
-// which is how a spline bakes into a solver; the second-order expansion
-// this replaced was only the path near one point.
-#define CRANE_MPC_OCP_PARAMETER_PATH_SPAN 11
-#define CRANE_MPC_OCP_PARAMETER_TIMING_CONTROL 12
-#define CRANE_MPC_OCP_PARAMETER_TIMING_POINTS 8
-#define CRANE_MPC_OCP_PARAMETER_PATH_CONTROL 20
+// A clamped B-spline: the control points are numbers here and the basis
+// is in the generated code, which is how a spline bakes into a solver.
+// The progress state is the path parameter, so `ORIGIN` is where on the
+// path this cycle starts and `s` carries the rest of the horizon. The
+// second-order expansion this replaced was only the path near one point.
+#define CRANE_MPC_OCP_PARAMETER_PATH_ORIGIN 11
+#define CRANE_MPC_OCP_PARAMETER_PATH_CONTROL 12
 #define CRANE_MPC_OCP_PARAMETER_PATH_POINTS 30
 
 // The (row, column) of each of those six entries, in the order they are
@@ -116,10 +114,11 @@
 #define CRANE_MPC_OCP_RESIDUAL_PASSIVE_POSITION 10
 #define CRANE_MPC_OCP_RESIDUAL_PASSIVE_VELOCITY 12
 #define CRANE_MPC_OCP_RESIDUAL_LAG 14
-#define CRANE_MPC_OCP_RESIDUAL_PROGRESS_RATE 15
-#define CRANE_MPC_OCP_RESIDUAL_ACTUATED_FORCE 16
-#define CRANE_MPC_OCP_RESIDUAL_INPUT 21
-#define CRANE_MPC_OCP_RESIDUAL_TERMINAL_DOF 16
+#define CRANE_MPC_OCP_RESIDUAL_PROGRESS 15
+#define CRANE_MPC_OCP_RESIDUAL_PROGRESS_RATE 16
+#define CRANE_MPC_OCP_RESIDUAL_ACTUATED_FORCE 17
+#define CRANE_MPC_OCP_RESIDUAL_INPUT 22
+#define CRANE_MPC_OCP_RESIDUAL_TERMINAL_DOF 17
 
 // The axis the lag row is written on, and the progress row's reference.
 // The lag row is Marc's 1-D projection on the slewing joint reproduced and

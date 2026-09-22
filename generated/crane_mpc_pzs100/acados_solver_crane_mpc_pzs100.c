@@ -548,6 +548,7 @@ void crane_mpc_pzs100_acados_create_setup_nlp_in_numerical_values(crane_mpc_pzs1
     W_0[24+(NY0) * 24] = 1;
     W_0[25+(NY0) * 25] = 1;
     W_0[26+(NY0) * 26] = 1;
+    W_0[27+(NY0) * 27] = 1;
     ocp_nlp_cost_model_set(nlp_config, nlp_dims, nlp_in, 0, "W", W_0);
     free(W_0);
     double* yref = calloc(NY, sizeof(double));
@@ -587,6 +588,7 @@ void crane_mpc_pzs100_acados_create_setup_nlp_in_numerical_values(crane_mpc_pzs1
     W[24+(NY) * 24] = 1;
     W[25+(NY) * 25] = 1;
     W[26+(NY) * 26] = 1;
+    W[27+(NY) * 27] = 1;
 
     for (int i = 1; i < N; i++)
     {
@@ -616,6 +618,7 @@ void crane_mpc_pzs100_acados_create_setup_nlp_in_numerical_values(crane_mpc_pzs1
     W_e[13+(NYN) * 13] = 1;
     W_e[14+(NYN) * 14] = 1;
     W_e[15+(NYN) * 15] = 1;
+    W_e[16+(NYN) * 16] = 1;
     ocp_nlp_cost_model_set(nlp_config, nlp_dims, nlp_in, N, "W", W_e);
     free(W_e);
 
@@ -1507,7 +1510,7 @@ int crane_mpc_pzs100_acados_update_params(crane_mpc_pzs100_solver_capsule* capsu
 {
     int solver_status = 0;
 
-    int casadi_np = 170;
+    int casadi_np = 162;
     if (casadi_np != np) {
         printf("acados_update_params: trying to set %i parameters for external functions."
             " External function has %i parameters. Exiting.\n", np, casadi_np);

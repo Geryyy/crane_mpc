@@ -68,11 +68,17 @@ crane_mpc:
       # `lag`: tracking error on the reference's direction of travel, slewing
       # axis only. Marc's ratio was against q_a's 4.0 and no longer holds -- the
       # q_a raise above deliberately left this alone, which is what was measured.
-      # `progress_rate`:
-      # regulator toward 1s plan/1s wall clock, measured -- Marc's ratio (0.8)
-      # settles at 0.34 here.
+      #
+      # `progress` and `progress_rate` are the path-following pair and replaced
+      # the rate regulator that used to sit here at 160: the progress state is
+      # the path parameter now, so the cost says *end up at the end of the path*
+      # and prices the rate toward rest, instead of saying be here at this time.
+      # Regulating the pace is what pushed the horizon off the path, worst at
+      # its tail (400 mm against 230 mm at stage 0, measured). Ratio is
+      # robocrane's, whose pull is a hundredth of its tracking weight.
       lag: 40.0
-      progress_rate: 160.0
+      progress: 8.0
+      progress_rate: 0.1
       progress_accel: 0.01
       terminal_scale: 10.0
 

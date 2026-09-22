@@ -15,7 +15,6 @@ import numpy as np
 from crane_model import symbolic as cs
 
 from . import horizon as hz
-from . import problem
 from .solver import Outcome
 
 REFERENCE_TOPIC = "/crane/reference"
@@ -204,7 +203,8 @@ class Cycle:
 
         # OCP rows no sensor carries: lagged command, force state, progress pair.
         self.carried = np.zeros(cs.NX)
-        self.carried[cs.X_PROGRESS_RATE] = problem.K_PROGRESS_RATE_REFERENCE
+        # Path parameter now, so rest is where a fresh cycle starts from.
+        self.carried[cs.X_PROGRESS_RATE] = 0.0
         self.seed_force = True
         # Previous cycle's propagated velocity, read back as the carry -- not a
         # second integrator. `None` until propagated once.

@@ -138,7 +138,11 @@ def weight_matrices(parameters: dict) -> tuple[np.ndarray, np.ndarray]:
             np.asarray(weights["dq_a"][:planned], dtype=float),
             np.asarray(weights["q_u"][:passive], dtype=float),
             np.asarray(weights["dq_u"][:passive], dtype=float),
-            [float(weights["lag"]), float(weights["progress_rate"])],
+            [
+                float(weights["lag"]),
+                float(weights["progress"]),
+                float(weights["progress_rate"]),
+            ],
             np.asarray(weights["tau_a"][:planned], dtype=float),
             np.asarray(weights["u"][:planned], dtype=float),
             [float(weights["progress_accel"])],
@@ -219,18 +223,27 @@ def state_bounds(
 
 
 def stage_reference(
-    q_eq: np.ndarray, tau_ref: np.ndarray, terminal: bool
+    q_eq: np.ndarray, tau_ref: np.ndarray, terminal: bool, progress: float = 1.0
 ) -> np.ndarray:
     """
     Build a stage/terminal residual reference; tracking rows are zero (rides in `p`).
 
     `tau_ref` is `h_eff`; zeroed, it prices holding own weight and buys droop (issue 117).
+
+    `progress` is where on the path this stage is asked to be. robocrane asks for
+    the end of the path at every stage, which works where a horizon covers most
+    of one; here it covers a third, so asking for the end is asking for flat out
+    everywhere -- measured, 460 mm off path against 448, and 31 of 178 solves
+    refused. Asking for as far as the plan's own pace reaches by this stage is
+    the same thing wherever the end is in sight, and a pace everywhere else.
     """
     reference = np.zeros(problem.NY_TERMINAL if terminal else problem.NY)
     reference[
         problem.Y_PASSIVE_POSITION : problem.Y_PASSIVE_POSITION + cs.K_PASSIVE_DOF
     ] = q_eq
-    reference[problem.Y_PROGRESS_RATE] = problem.K_PROGRESS_RATE_REFERENCE
+    reference[problem.Y_PROGRESS] = min(
+        float(problem.K_PROGRESS_RATE_REFERENCE), float(progress)
+    )
     if not terminal:
         reference[
             problem.Y_ACTUATED_FORCE : problem.Y_ACTUATED_FORCE + cs.K_PLANNED_DOF
@@ -239,40 +252,20 @@ def stage_reference(
 
 
 def stage_parameters(
-    base: np.ndarray,
-    span: float,
-    timing: np.ndarray,
-    control: np.ndarray,
+    base: np.ndarray, origin: float, control: np.ndarray
 ) -> np.ndarray:
     """
-    Pack the path, and the window it is read over, into the parameter vector.
+    Pack the path and where this cycle starts on it into the parameter vector.
 
     One vector for the whole horizon, not one per stage: which stage this is, is
     carried by `s`, and the path does not know about stages.
     """
     parameter = np.zeros(problem.NP)
     parameter[: cs.NP] = base
-    parameter[problem.P_PATH_SPAN] = float(span)
-    parameter[
-        problem.P_TIMING_CONTROL : problem.P_TIMING_CONTROL + problem.TIMING_POINTS
-    ] = np.asarray(timing, dtype=float).reshape(-1)
+    parameter[problem.P_PATH_ORIGIN] = float(origin)
     # Point-major, which is what `ca.reshape` unpacks column by column.
     parameter[problem.P_PATH_CONTROL :] = np.asarray(control, dtype=float).reshape(-1)
     return parameter
-
-
-def timing_control(progress_of, origin: float, span: float) -> np.ndarray:
-    """
-    Fit the plan's own timing over the window one horizon can reach.
-
-    `progress_of` takes a virtual time and gives where the plan is on its path,
-    in [0, 1]. Scalar, smooth and monotone, so a handful of control points carry
-    it; the window is the ceiling on `s`, not the nominal horizon, or the
-    optimizer could run past the end of what it was given.
-    """
-    places = origin + np.linspace(0.0, span, 4 * problem.TIMING_POINTS)
-    sigma = np.array([[float(progress_of(place))] for place in places])
-    return bspline.fit(sigma, problem.TIMING_POINTS)
 
 
 def path_control(samples) -> np.ndarray:
@@ -827,15 +820,13 @@ class Ocp:
 
         `crane_planning` holds the curve as geometry and stage 2 of
         `docs/features/path-following-mpc` takes it whole. Until then the node
-        has `Ts` samples of it, so the path is fitted to those and the timing is
-        the identity -- theta is the window, spent at the rate the samples imply.
-        Fitting is a cached matmul, so this is per cycle, not per stage.
+        has `Ts` samples of it, so the path is fitted to those and this cycle
+        starts at the beginning of them. Fitting is a cached matmul, so this is
+        per cycle, not per stage.
         """
-        span = self.intervals * self.Ts
         return stage_parameters(
             self._base_parameter,
-            span,
-            timing_control(lambda place: place / span, 0.0, span),
+            0.0,
             path_control(horizon.q_a_ref[:, : cs.K_PLANNED_DOF]),
         )
 

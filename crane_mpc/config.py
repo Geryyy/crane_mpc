@@ -77,6 +77,7 @@ WEIGHTS = (
     "tau_a",
     "u",
     "lag",
+    "progress",
     "progress_rate",
     "progress_accel",
     "terminal_scale",
@@ -275,11 +276,11 @@ def check_settings(parameters: dict, hydraulics: dict) -> None:
         "must be finite and >= 0",
     )
     _refuse(
-        _offender(weights, ("progress_rate",), _positive),
-        "the progress-rate weight must be finite and **positive**: it is the only "
-        "price on spending time, and at zero the optimizer stops the plan for free "
-        "wherever tracking is hard, which is a controller that never arrives rather "
-        "than one that tracks time-indexed",
+        _offender(weights, ("progress",), _positive),
+        "the progress weight must be finite and **positive**: the progress state is "
+        "the path parameter, so this is the whole price on getting anywhere, and at "
+        "zero the machine sits on the path rather than travelling it -- a controller "
+        "that never arrives",
     )
 
     limits = parameters["limits"]

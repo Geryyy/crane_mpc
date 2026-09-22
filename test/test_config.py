@@ -64,15 +64,22 @@ def test_a_negative_weight_is_refused_and_names_the_entry(shipped):
     assert "J' W J" in message
 
 
-def test_the_only_price_on_spending_time_may_not_be_zero(shipped):
+def test_the_only_price_on_getting_anywhere_may_not_be_zero(shipped):
     """
-    Checked strictly, unlike other weights: at zero the optimizer stops the
-    plan for free wherever tracking is hard.
+    Checked strictly, unlike other weights: the progress state is the path
+    parameter, so at zero nothing makes the machine travel the path it is on.
+
+    Its rate may be zero -- that row is damping, and the velocity and flow rows
+    still bound how fast the path may be spent.
     """
-    shipped["weights"]["progress_rate"] = 0.0
+    shipped["weights"]["progress"] = 0.0
     message = refusal(shipped)
-    assert "progress_rate = 0" in message
+    assert "progress = 0" in message
     assert "never arrives" in message
+
+    shipped["weights"]["progress"] = 8.0
+    shipped["weights"]["progress_rate"] = 0.0
+    check_settings(shipped, shipped["hydraulics"])
 
 
 def test_a_control_safe_range_that_is_not_a_range_is_refused(shipped):

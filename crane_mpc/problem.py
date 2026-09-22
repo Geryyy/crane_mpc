@@ -177,26 +177,21 @@ SOLVER_PREFIX = "crane_mpc"
 # following does and what replaced the second-order expansion that used to sit
 # here. The expansion was only the path near one point; this is the path.
 #
-# Two levels, because geometry and timing curve for different reasons and
-# separating them is the whole point:
+# `c(theta)`, the planner's curve in its own parameter, fitted once per plan.
+# The progress state *is* `theta`, so no timing law lives in here: where on the
+# path to be is the optimizer's choice, and how fast to get there is what the
+# limits and the cost decide. `ORIGIN` is where this cycle starts, since `s` is
+# pinned to zero at stage zero and carries only the rest.
 #
-# * `PATH`: `c(theta)`, the planner's curve in its own parameter, fitted once
-#   per plan. Its usual answer is a straight line in joint space, exact at any
-#   count; the curved candidate needs 30 for 1.3 mm at the tool.
-# * `TIMING`: `theta(w)` on `w = s/span`, the plan's own timing law over the
-#   window one horizon can reach, refitted per cycle. Scalar, smooth and
-#   monotone, so it is cheap; fitting `q_a,ref(t)` in one level instead needs
-#   more points and is worse, since a straight path still bends in time.
+# The planner's usual answer is a straight line in joint space, exact at any
+# count; its curved candidate needs 30 points for 1.3 mm at the tool.
 PATH_POINTS = 30
-TIMING_POINTS = 8
 
-P_PATH_SPAN = cs.NP
-P_TIMING_CONTROL = P_PATH_SPAN + 1
-P_PATH_CONTROL = P_TIMING_CONTROL + TIMING_POINTS
+P_PATH_ORIGIN = cs.NP
+P_PATH_CONTROL = P_PATH_ORIGIN + 1
 NP = P_PATH_CONTROL + PATH_POINTS * cs.K_PLANNED_DOF
 
 PATH_KNOTS = bspline.knot_vector(PATH_POINTS)
-TIMING_KNOTS = bspline.knot_vector(TIMING_POINTS)
 
 # --- the residual blocks -------------------------------------------------------
 #
@@ -208,7 +203,8 @@ Y_PLANNED_VELOCITY = cs.K_PLANNED_DOF
 Y_PASSIVE_POSITION = 2 * cs.K_PLANNED_DOF
 Y_PASSIVE_VELOCITY = Y_PASSIVE_POSITION + cs.K_PASSIVE_DOF
 Y_LAG = Y_PASSIVE_VELOCITY + cs.K_PASSIVE_DOF
-Y_PROGRESS_RATE = Y_LAG + 1
+Y_PROGRESS = Y_LAG + 1
+Y_PROGRESS_RATE = Y_PROGRESS + 1
 NY_TERMINAL = Y_PROGRESS_RATE + 1
 Y_ACTUATED_FORCE = NY_TERMINAL
 Y_INPUT = Y_ACTUATED_FORCE + cs.K_PLANNED_DOF
@@ -221,8 +217,10 @@ NY = Y_INPUT + cs.NU_PROGRESS
 # and is the axis the progress variable buys time for.
 K_LAG_AXIS = 0
 
-# `v_s = 1`: one second of plan per wall-clock second, a constant not a
-# parameter. Marc declares `sDot_ref`; every deployed config sets it to 1.0.
+# `theta = 1`: the end of the path, which is what the progress row is priced
+# against now that the progress state is the path parameter. It was the rate's
+# reference -- one second of plan per wall-clock second -- until the cost
+# stopped saying when to be somewhere and started saying where to end up.
 K_PROGRESS_RATE_REFERENCE = 1.0
 
 
@@ -330,30 +328,22 @@ def build_ocp(description_xml: str, parameters: dict, hydraulics: dict) -> tuple
     def block(offset):
         return parameter_vector[offset : offset + cs.K_PLANNED_DOF]
 
-    # Where this stage sits in the window, and where that is on the path. `s` is
-    # still virtual time and still pinned to zero at stage zero, so the window
-    # starts here and `theta` carries the rest.
-    span = parameter_vector[P_PATH_SPAN]
-    timing = parameter_vector[P_TIMING_CONTROL : P_TIMING_CONTROL + TIMING_POINTS]
+    # Where on the path this stage is. `s` is pinned to zero at stage zero, so
+    # the parameter carries where the cycle starts and `s` carries the rest.
     control = ca.reshape(
         parameter_vector[P_PATH_CONTROL : P_PATH_CONTROL + PATH_POINTS * cs.NU],
         cs.K_PLANNED_DOF,
         PATH_POINTS,
     ).T
-    window = progress / span
-    theta = bspline.casadi_value(
-        window, ca.reshape(timing, TIMING_POINTS, 1), TIMING_KNOTS
-    )
+    theta = parameter_vector[P_PATH_ORIGIN] + progress
     reference_position = bspline.casadi_value(theta, control, PATH_KNOTS).T
-    # d/ds through both levels: the path's tangent times how fast the timing
-    # spends it. Velocity is `q_a,ref'(s) * v_s`, so a slower plan asks a
-    # proportionally slower axis, which is what the progress state buys.
-    slope = bspline.casadi_slope(
-        window, ca.reshape(timing, TIMING_POINTS, 1), TIMING_KNOTS
-    )
-    reference_velocity = (
-        bspline.casadi_slope(theta, control, PATH_KNOTS).T * slope / span
-    )
+    # The path's tangent, which is the velocity a machine travelling the path at
+    # `v_theta` would have. robocrane prices `dq_a` toward rest instead and lets
+    # the pull on `theta` buy the motion; on a KUKA under acceleration control
+    # that works, here it fights C3's force state and the dead time -- measured,
+    # 460 mm off path and 29 of 178 solves refused. So the row stays a tangent
+    # and the formulation's freedom lives in `theta`, which is where it matters.
+    tangent = bspline.casadi_slope(theta, control, PATH_KNOTS).T
 
     acados_model = AcadosModel()
     acados_model.name = f"{SOLVER_PREFIX}_{TOOL}"
@@ -386,16 +376,17 @@ def build_ocp(description_xml: str, parameters: dict, hydraulics: dict) -> tuple
     # Lag row (`timber_crane_cost_js_pfc_pt2.cpp:62-74`): tracking error
     # projected on reference direction of travel, slewing axis only,
     # unnormalised -- weight absorbs scale.
-    lag = tracking[K_LAG_AXIS] * reference_velocity[K_LAG_AXIS]
+    lag = tracking[K_LAG_AXIS] * tangent[K_LAG_AXIS]
     #
     # Progress row: quadratic regulator toward one (time-scaling); `yref`
     # carries the one, row itself is `v_s`.
     residual = ca.vertcat(
         tracking,
-        dq_a - reference_velocity * progress_rate,
+        dq_a - tangent * progress_rate,
         q_u,
         dq_u,
         lag,
+        theta,
         progress_rate,
         tau_a[: cs.K_PLANNED_DOF],
         u,

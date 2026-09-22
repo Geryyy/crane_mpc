@@ -244,25 +244,28 @@ crane_mpc:
         1.0; this is that ratio against q_a's 4.0. Not tuned."
       validation:
         gt_eq<>: [0.0]
-    progress_rate:
+    progress:
       type: double
-      default_value: 160.0
+      default_value: 8.0
       read_only: true
-      description: "w_sDot -- quadratic regulator on the progress rate toward one second of plan per second
-        of wall clock. At nominal rate the problem is exactly time-indexed tracking; the optimizer buys a
-        slower plan only where tracking, limits or flow make paying this cheaper. A regulator, not a linear
-        progress reward. Must be positive: at zero the plan stops for free wherever tracking is hard.
-        **The one measured weight here.** Marc's 0.2 against weight_qA 1.0 would be 0.8 against this q_a of
-        4.0, and at 0.8 the shipped A2B move -- followable, tightest axis at 43 % of dq_a_max -- settles at
-        rate 0.34 and spends 3.7 s of a 4 s plan in 7 s. The ratio does not transfer: q_a is 4x his, `u`
-        prices a velocity at 1.0 where weight_qADDot prices an acceleration at 0.25-0.5, and terminal_scale
-        has no counterpart, so a time price calibrated to his cost buys dawdling. The requirement instead is
-        that a followable reference must run at rate one. Measured on that move at 0.8/8/40/160: minimum rate
-        0.32/0.66/0.87/0.95, final error 0.170/0.134/0.137/0.137. At 160 the run reproduces issue 117's
-        time-indexed result (0.1375 vs 0.1379). scripts/cannot_follow.py is the other half: on an
-        unfollowable reference the rate still falls well below one."
+      description: "w_s -- the path parameter against the end of the path. The progress state *is* the path
+        parameter, so this is the whole price on getting anywhere: at zero nothing makes the machine finish,
+        and it will sit on the path forever rather than travel it. Replaced the rate regulator that used to
+        carry that job at 160.0, which bought time-indexed tracking and pushed the horizon off the path,
+        worst at its tail -- 400 mm against 230 mm at stage 0, measured on the A2B move. Ratio to q_a is
+        robocrane's, whose pull is a hundredth of its tracking weight. Not tuned."
       validation:
         gt<>: [0.0]
+    progress_rate:
+      type: double
+      default_value: 0.1
+      read_only: true
+      description: "w_sDot -- the path parameter's rate, priced toward rest. Damping, not a regulator: it is
+        what keeps the optimizer from spending the path in one step, while the joint velocity and flow rows
+        bound how fast it actually may. Was 160.0 and a regulator toward one second of plan per wall-clock
+        second, back when the progress state was virtual time. May be zero; the limits still bound the rate."
+      validation:
+        gt_eq<>: [0.0]
     progress_accel:
       type: double
       default_value: 0.01
