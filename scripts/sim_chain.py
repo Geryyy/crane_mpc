@@ -317,7 +317,7 @@ class Chain:
         rows = viewing.canonical_rows(
             states[:, position], states[:, passive], self.q_tool
         )
-        self.markers.path("horizon", rows, HORIZON_RGBA, width=0.05)
+        self.markers.path("horizon", rows, HORIZON_RGBA, width=0.05, samples=12)
 
     def _record(self, command, q_ref, dq_ref, forward) -> None:
         open_loop = self.ff_scale * dq_ref + (0.0 if forward is None else forward)
