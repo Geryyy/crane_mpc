@@ -97,7 +97,22 @@ crane_mpc:
       progress: 80.0
       progress_rate: 0.1
       progress_accel: 0.01
-      terminal_scale: 10.0
+      # Scales the whole terminal prefix, progress row included -- which is
+      # what makes the machine arrive. Scaling only the tracking rows was
+      # measured and is far worse (goal median 2533 mm against 262): the
+      # terminal progress weight is the arrival, not a race.
+      #
+      # 20 moves, seeds 1 and 2, `sim_chain --random 10`:
+      #
+      #   terminal   goal median   goal worst   path rms
+      #         10       295 mm      1894 mm     177 mm
+      #         20       196 mm      1468 mm     198 mm
+      #         30       228 mm       972 mm     273 mm
+      #
+      # The brief's target is the endpoint, so goal median picks it: 20, a
+      # third off it for 12% more path error. 30 is the choice if worst-case
+      # arrival ever matters more than typical.
+      terminal_scale: 20.0
 
     limits:
       # No q_a_lower/q_a_upper/q_a_margin/dq_a_max here: the control-safe box
