@@ -223,19 +223,21 @@ def state_bounds(
 
 
 def stage_reference(
-    q_eq: np.ndarray, tau_ref: np.ndarray, terminal: bool, progress: float = 1.0
+    q_eq: np.ndarray, tau_ref: np.ndarray, terminal: bool, progress: float
 ) -> np.ndarray:
     """
     Build a stage/terminal residual reference; tracking rows are zero (rides in `p`).
 
     `tau_ref` is `h_eff`; zeroed, it prices holding own weight and buys droop (issue 117).
 
-    `progress` is where on the path this stage is asked to be. robocrane asks for
-    the end of the path at every stage, which works where a horizon covers most
-    of one; here it covers a third, so asking for the end is asking for flat out
-    everywhere -- measured, 460 mm off path against 448, and 31 of 178 solves
-    refused. Asking for as far as the plan's own pace reaches by this stage is
-    the same thing wherever the end is in sight, and a pace everywhere else.
+    `progress` is where on the path this stage is asked to be -- no default, so
+    that a caller has to say. robocrane asks for the end of the path at every
+    stage, which works where a horizon covers most of one; here it covers a
+    third, so asking for the end is asking for flat out everywhere -- measured,
+    460 mm off path against 448, and 31 of 178 solves refused. Asking for as far
+    as the plan's own pace reaches by this stage is the same thing wherever the
+    end is in sight, and a pace everywhere else. `Ocp.nominal_progress` is
+    that pace.
     """
     reference = np.zeros(problem.NY_TERMINAL if terminal else problem.NY)
     reference[
@@ -830,6 +832,34 @@ class Ocp:
             path_control(horizon.q_a_ref[:, : cs.K_PLANNED_DOF]),
         )
 
+    def nominal_progress(self, stage: int) -> float:
+        """
+        Where on the path the plan's own pace puts this stage.
+
+        `bspline.fit` reads knot `i` at `theta = i/intervals`, and the path this
+        cycle is the horizon's own knots, so stage `k`'s plan point *is*
+        `k/intervals` -- no separate timing law to consult.
+
+        Asking every stage for the end of the path instead is asking for flat
+        out everywhere: `s` runs to its ceiling in the first 0.7 s of a 2.34 s
+        horizon and the tracking rows spend the rest resisting it (measured,
+        460 mm off path against 448 and 31 of 178 solves refused).
+        """
+        return stage / self.intervals
+
+    def progress_ceiling(self, stage: int) -> float:
+        """
+        `s`'s box top at this stage: as far as the rate reaches, or the path's end.
+
+        The end cap is what keeps `s` a path parameter. `bspline` clamps the
+        value past one but its *slope* stays the end tangent, so an uncapped `s`
+        leaves the velocity row asking for `tangent(1) * v_s` at every stage
+        beyond the path -- motion away from the goal, priced at the tracking
+        weight. Both robocrane variants box `theta` in [0, 1] for this reason.
+        """
+        rate_max = float(self.parameters["limits"]["progress_rate_max"])
+        return min(stage * self.Ts * rate_max, problem.K_PROGRESS_RATE_REFERENCE)
+
     def _write_problem(
         self, x0: np.ndarray, horizon, q_eq: np.ndarray, guess: Guess | None
     ) -> bool:
@@ -861,25 +891,28 @@ class Ocp:
         force_reference = self.static_hold_force(x0)
         measured = x0[cs.X_PLANNED_POSITION : cs.X_PLANNED_POSITION + cs.K_PLANNED_DOF]
         # Same box but for one entry, `s`'s ceiling; built once, moved per stage.
-        rate_max = float(self.parameters["limits"]["progress_rate_max"])
         lower, upper = state_bounds(self.parameters, q_eq, measured)
-        running = stage_reference(q_eq, force_reference, terminal=False)
-        terminal = stage_reference(q_eq, force_reference, terminal=True)
+        # The path is the whole horizon's, so one fit per cycle -- `s` carries
+        # which stage a stage is.
+        parameter = self._path_parameters(horizon)
         for stage in range(intervals + 1):
-            self.solver.set(
-                stage,
-                "p",
-                self._path_parameters(horizon),
-            )
+            self.solver.set(stage, "p", parameter)
             self.solver.cost_set(
-                stage, "yref", terminal if stage == intervals else running
+                stage,
+                "yref",
+                stage_reference(
+                    q_eq,
+                    force_reference,
+                    stage == intervals,
+                    self.nominal_progress(stage),
+                ),
             )
             if stage == 0:
                 # Initial condition: every row, actuator states included, pinned at x0.
                 self.solver.constraints_set(0, "lbx", x0)
                 self.solver.constraints_set(0, "ubx", x0)
                 continue
-            upper[cs.X_PROGRESS] = stage * self.Ts * rate_max
+            upper[cs.X_PROGRESS] = self.progress_ceiling(stage)
             self.solver.constraints_set(stage, "lbx", lower)
             self.solver.constraints_set(stage, "ubx", upper)
 
@@ -889,7 +922,7 @@ class Ocp:
                 state = x0
             else:
                 state = seed.states[stage].copy()
-                upper[cs.X_PROGRESS] = stage * self.Ts * rate_max
+                upper[cs.X_PROGRESS] = self.progress_ceiling(stage)
                 state[: cs.NBX] = np.clip(state[: cs.NBX], lower, upper)
             self.solver.set(stage, "x", state)
             if stage < intervals:
@@ -1091,10 +1124,12 @@ class Ocp:
         terminal_diagonal = np.diag(self._terminal_weight)
         planned = cs.K_PLANNED_DOF
         passive = cs.K_PASSIVE_DOF
+        parameter = self._path_parameters(horizon)
         for stage in range(self.intervals + 1):
-            parameter = self._path_parameters(horizon)
             terminal = stage == self.intervals
-            reference = stage_reference(q_eq, force_reference, terminal=terminal)
+            reference = stage_reference(
+                q_eq, force_reference, terminal, self.nominal_progress(stage)
+            )
             if terminal:
                 value = np.asarray(
                     self._terminal_residual(solution.states[stage], parameter)
@@ -1114,7 +1149,11 @@ class Ocp:
             terms.q_u += float(np.sum(row[problem.Y_PASSIVE_POSITION :][:passive]))
             terms.dq_u += float(np.sum(row[problem.Y_PASSIVE_VELOCITY :][:passive]))
             terms.lag += float(row[problem.Y_LAG])
-            terms.progress += float(row[problem.Y_PROGRESS_RATE])
+            # Both rows of the pair: the path-following one carries the weight
+            # (8 against 0.1), so reporting the rate alone hid the term.
+            terms.progress += float(
+                row[problem.Y_PROGRESS] + row[problem.Y_PROGRESS_RATE]
+            )
             terms.tau_a += float(np.sum(row[problem.Y_ACTUATED_FORCE :][:planned]))
             terms.u += float(np.sum(row[problem.Y_INPUT :][: cs.NU_PROGRESS]))
         return terms

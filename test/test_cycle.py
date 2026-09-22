@@ -479,3 +479,27 @@ def test_without_a_warm_start_there_is_nothing_to_prepare_from():
     one.prepare_next(solution(Outcome.CONVERGED))
     assert not one.prepared
     assert one.ocp.prepared_with == []
+
+
+def test_the_progress_the_solver_bought_is_read_as_a_path_parameter():
+    """
+    `s` spans the horizon's window, so a cycle's advance is `s` x that window.
+
+    Read as seconds it is a factor `duration()` short -- here 4.8x -- which is a
+    plan that crawls, not one that stalls, so nothing else in this file sees it.
+    """
+    window = hz.Grid(Ts, KNOTS).duration()
+    one = cycle()
+    one.reference_anchored = True
+
+    # The whole path in one cycle: the plan advances by the whole window.
+    one.advance(solution(Outcome.CONVERGED, 1.0), NOMINAL_NS, MIN_RATE, MAX_STALL)
+    assert one.reference_progress == pytest.approx(window)
+
+    # The plan's own pace: one interval of `s` buys one `Ts` of plan.
+    two = cycle()
+    two.reference_anchored = True
+    two.advance(
+        solution(Outcome.CONVERGED, Ts / window), NOMINAL_NS, MIN_RATE, MAX_STALL
+    )
+    assert two.reference_progress == pytest.approx(Ts)

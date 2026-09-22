@@ -676,7 +676,13 @@ class Cycle:
             self.carried = solution.states[1].copy()
 
         self.next_first_knot_ns += int(self.Ts * NANOSECONDS)
-        advance = solution.progress_advance
+        # `s` is a path parameter over the horizon's own window, not seconds:
+        # one unit of it is the whole window, so `duration()` converts. It was
+        # virtual time until the progress state became the path parameter
+        # (86ec918) and this consumer was not moved with it -- the plan then
+        # advanced at `s` per cycle, a factor `duration()` short, and only ran
+        # at all because the old cost pinned `s` to its ceiling every cycle.
+        advance = solution.progress_advance * self.grid.duration()
         spent = advance if np.isfinite(advance) and advance >= 0.0 else self.Ts
         self.reference_progress += spent
 
