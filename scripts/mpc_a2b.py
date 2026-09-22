@@ -16,7 +16,7 @@ import os
 import shutil
 import sys
 import warnings
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import casadi as ca
@@ -45,13 +45,7 @@ except ImportError:
     from crane_mpc import config as ocp_config  # noqa: E402
     from crane_mpc import solver as ocp_runtime  # noqa: E402
 
-configure_fixed_data = ocp_runtime.configure_fixed_data
-position_box = ocp_runtime.position_box
 solver_signature = ocp_runtime.solver_signature
-stage_parameters = ocp_runtime.stage_parameters
-stage_reference = ocp_runtime.stage_reference
-state_bounds = ocp_runtime.state_bounds
-weight_matrices = ocp_runtime.weight_matrices
 
 cs = export_ocp.cs
 
@@ -319,24 +313,26 @@ def parameter_vector(arguments: argparse.Namespace) -> np.ndarray:
 
 def create_solver(
     arguments: argparse.Namespace, parameters: dict, hydraulics: dict
-) -> tuple[AcadosOcpSolver, object, np.ndarray]:
+) -> tuple[ocp_runtime.Ocp, object, np.ndarray]:
     """
     Open this problem's compiled solver, compiling once if needed.
 
-    Node opens the same cache: two callers, one compile.
+    Returns the node's own `Ocp`, not a bare acados handle: everything a cycle
+    writes lives there, so this harness and the node cannot drift apart without
+    a test noticing. Node opens the same cache: two callers, one compile.
     """
     description = (export_ocp.DEFAULT_DESCRIPTIONS / export_ocp.DESCRIPTION).read_text()
     cache = ocp_runtime.solver_cache(parameters, hydraulics, description)
     if arguments.rebuild and cache.is_dir():
         # generated, gitignored cache dir; no source/user output can land here
         shutil.rmtree(cache)
-    ocp, scale, model, _chamber = export_ocp.build_ocp(
+    _acados, scale, model, _chamber = export_ocp.build_ocp(
         description, parameters, hydraulics
     )
-    solver, _ = ocp_runtime.load_or_build(
-        ocp, parameters, hydraulics, description, verbose=arguments.verbose_build
+    ocp = ocp_runtime.Ocp(
+        description, parameters, hydraulics, verbose=arguments.verbose_build
     )
-    return solver, model, scale
+    return ocp, model, scale
 
 
 def solver_stat(solver: AcadosOcpSolver, field: str) -> float:
@@ -517,7 +513,7 @@ def simulate(
     arguments: argparse.Namespace,
     parameters: dict,
     hydraulics: dict,
-    solver: AcadosOcpSolver,
+    ocp: ocp_runtime.Ocp,
     model: object,
     scale: np.ndarray,
     a: np.ndarray,
@@ -574,15 +570,10 @@ def simulate(
     eq_times, q_eq_table = equilibrium_table(
         bias_u, base_parameter, on_path, dt, table_count, passive_guess
     )
-    # The node threads this pair out of `build_ocp`; here `create_solver` has
-    # already dropped it, and re-deriving one tuple beats a fourth argument
-    # through five scripts that neither need nor pass it.
-    chamber = ocp_runtime.problem.chamber_forces(
-        model, float(hydraulics["system_pressure_pa"]), cs.K_ACTUATED_DOF
-    )
-    u_max, extend, retract = configure_fixed_data(
-        solver, chamber, scale, parameters, hydraulics
-    )
+    # Written by `Ocp` at construction, against the same weights and bounds the
+    # node writes; read back here only for the hydraulic-utilisation column.
+    extend = ocp.cylinder_force_max
+    retract = ocp.cylinder_force_retract
 
     state = np.zeros(cs.NX)
     state[cs.X_PLANNED_POSITION : cs.X_PLANNED_POSITION + cs.K_PLANNED_DOF] = a
@@ -612,9 +603,8 @@ def simulate(
     virtual_time = np.zeros(steps + 1)
     states[0] = state
 
-    previous_x: list[np.ndarray] | None = None
-    previous_u: list[np.ndarray] | None = None
-    budget = float(parameters["solve_budget"])
+    #: last accepted solve, the warm start for the next cycle
+    previous: ocp_runtime.Solution | None = None
     # The plan's own pace, as path parameter per second: what the progress row
     # asks for, until the end of the path is nearer than that. This path is the
     # whole move, not a horizon window, so the nominal is the move's own and
@@ -634,130 +624,56 @@ def simulate(
             cs.X_PLANNED_VELOCITY : cs.X_PLANNED_VELOCITY + cs.K_PLANNED_DOF
         ]
         q_eq_log[step] = equilibrium_at(eq_times, q_eq_table, origin)
-        # one evaluation per cycle at measured state, held across horizon --
-        # ocp_solver.cpp's approach, same trade mpc_node.cpp makes for q_eq
-        tau_hold = np.asarray(static_force(state, base_parameter)).reshape(-1)
-        # progress restart: s pinned at zero every cycle, origin above carries
-        # what the last one bought (timber_crane_mpc.cpp:173-181)
-        state[cs.X_PROGRESS] = 0.0
-        # iterate always dropped, HPIPM's memory only on a cold cycle -- same
-        # split as `crane_mpc/solver.py`, which this harness has to mirror
-        warm_cycle = previous_x is not None and previous_u is not None
-        solver.reset(reset_qp_solver_mem=0 if warm_cycle else 1)
-        # The path and the window are the whole horizon's, so this is built once
-        # a cycle; which stage a stage is, `s` carries.
-        cycle_parameter = stage_parameters(base_parameter, origin, path.control)
-        for stage in range(intervals + 1):
-            # stage's nominal virtual time: where s would be if nothing slipped.
-            # anchoring on the previous solution's progress instead was tried and
-            # measured worse (issue 119 notes) -- so this is k*T_s
-            # How far along the path a stage could be if the rate ran flat out:
-            # what bounds `s`, and where the sway equilibrium is read.
-            nominal = stage * dt * rate_max
-            equilibrium = equilibrium_at(eq_times, q_eq_table, origin + nominal)
-            solver.set(stage, "p", cycle_parameter)
-            solver.cost_set(
-                stage,
-                "yref",
-                stage_reference(
-                    equilibrium,
-                    tau_hold,
-                    stage == intervals,
-                    origin + stage * dt * nominal_rate,
-                ),
-            )
-            if stage == 0:
-                lower = upper = state
-            else:
-                lower, upper = state_bounds(
-                    parameters, equilibrium, state[: cs.K_PLANNED_DOF], rate_max
-                )
-                # s's ceiling: the path's own end, or as far as the rate reaches
-                upper[cs.X_PROGRESS] = min(nominal, 1.0 - origin)
-            solver.constraints_set(stage, "lbx", lower)
-            solver.constraints_set(stage, "ubx", upper)
+        # Everything the cycle writes is `Ocp`'s, so this harness and the node
+        # solve the same problem by construction rather than by inspection.
+        # What stays here is what the node gets from elsewhere: the path (the
+        # planner's, once stage 2 lands) and a sway equilibrium solved along it
+        # instead of frozen at the measurement.
+        path_cycle = ocp_runtime.PathCycle(
+            control=path.control,
+            origin=origin,
+            nominal_rate=nominal_rate,
+        )
+        q_eq_stage = np.array(
+            [
+                equilibrium_at(eq_times, q_eq_table, origin + stage * dt * rate_max)
+                for stage in range(intervals + 1)
+            ]
+        )
+        # `Ocp.shifted` is the warm start: last horizon one knot left, with the
+        # progress row re-origined by what that solve bought. Rebuilding the
+        # shift here is what let this harness and the node drift.
+        guess = None if previous is None else ocp.shifted(previous)
+        solution = ocp.solve(state, None, q_eq_stage, guess, path=path_cycle)
 
-        if previous_x is None or previous_u is None:
-            guess_x = [state.copy()]
-            for _ in range(intervals):
-                guess_x.append(
-                    rk4_step(
-                        dynamics,
-                        guess_x[-1],
-                        np.zeros(cs.NU_PROGRESS),
-                        base_parameter,
-                        dt,
-                    )
-                )
-            guess_u = [np.zeros(cs.NU_PROGRESS) for _ in range(intervals)]
-        else:
-            guess_x = previous_x[1:] + [previous_x[-1].copy()]
-            guess_u = previous_u[1:] + [previous_u[-1].copy()]
-
-        for stage in range(intervals + 1):
-            value = guess_x[stage].copy()
-            if stage == 0:
-                value = state.copy()
-            else:
-                reach = stage * dt * rate_max
-                equilibrium = equilibrium_at(eq_times, q_eq_table, origin + reach)
-                lower, upper = state_bounds(
-                    parameters, equilibrium, state[: cs.K_PLANNED_DOF], rate_max
-                )
-                upper[cs.X_PROGRESS] = min(reach, 1.0 - origin)
-                # only boxed prefix has bounds; force states held by constraint 6,
-                # left as the rollout produced them
-                boxed = lower.size
-                value[:boxed] = np.clip(value[:boxed], lower, upper)
-            solver.set(stage, "x", value)
-            if stage < intervals:
-                solver.set(stage, "u", np.clip(guess_u[stage], -u_max, u_max))
-
-        status = int(solver.solve())
-        solve_time = float(solver.get_stats("time_tot"))
+        status = solution.status
+        solve_time = solution.solve_time_s
         statuses[step] = status
         solve_times[step] = solve_time
         for field in TIMING_FIELDS:
-            value = solver_stat(solver, field)
+            value = solver_stat(ocp.solver, field)
             if field in CUMULATIVE_FIELDS:
                 value, cumulative[field] = value - cumulative[field], value
             timings[field][step] = value
-        candidate_x = [
-            np.asarray(solver.get(stage, "x")).copy() for stage in range(intervals + 1)
-        ]
-        candidate_u = [
-            np.asarray(solver.get(stage, "u")).copy() for stage in range(intervals)
-        ]
-        finite = all(np.all(np.isfinite(value)) for value in candidate_x + candidate_u)
-        accepted = (
-            status == 0
-            and finite
-            and (not arguments.enforce_budget or solve_time <= budget)
+        # `Ocp` calls a slow solve BUDGET_EXCEEDED whether or not this run cares;
+        # --enforce-budget is what decides whether that costs the cycle.
+        accepted = solution.outcome is ocp_runtime.Outcome.CONVERGED or (
+            solution.outcome is ocp_runtime.Outcome.BUDGET_EXCEEDED
+            and not arguments.enforce_budget
         )
 
         if accepted:
-            control = candidate_u[0]
-            # QP's own iterate at node one (satisfies linearised, not integrated,
-            # dynamics), clamped to what the rate box reaches in one interval --
-            # same as ocp_solver.cpp; an unclamped jump would skip plan the machine
-            # never tracked, while staying finite
-            advance = float(
-                np.clip(
-                    candidate_x[1][cs.X_PROGRESS],
-                    0.0,
-                    dt * rate_max,
-                )
-            )
-            previous_x, previous_u = candidate_x, candidate_u
-        elif previous_u is not None:
+            control = solution.inputs[0].copy()
+            advance = solution.progress_advance
+            previous = solution
+        elif previous is not None:
             # Same shifted-previous-plan fallback used by mpc_node. The path
             # parameter stays where it is: a refused solve bought no path.
-            control = (
-                previous_u[1].copy() if len(previous_u) > 1 else previous_u[0].copy()
-            )
+            inputs = previous.inputs
+            control = (inputs[1] if len(inputs) > 1 else inputs[0]).copy()
             advance = 0.0
-            previous_x = previous_x[1:] + [previous_x[-1].copy()]
-            previous_u = previous_u[1:] + [previous_u[-1].copy()]
+            carried = ocp.shifted(previous)
+            previous = replace(previous, states=carried.states, inputs=carried.inputs)
             fallback[step] = True
         else:
             control = np.zeros(cs.NU_PROGRESS)
@@ -768,8 +684,8 @@ def simulate(
         hydraulics_used[step] = hydraulic_utilisation(
             outputs, state, control, base_parameter, extend, retract, hydraulics
         )
-        if horizon is not None and previous_x is not None:
-            horizon(np.array(previous_x))
+        if horizon is not None and previous is not None:
+            horizon(previous.states)
         state = plant(state, control, base_parameter, dt)
         states[step + 1] = state
         origin = min(

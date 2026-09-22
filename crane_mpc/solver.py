@@ -109,6 +109,30 @@ class Solution:
 
 
 @dataclass
+class PathCycle:
+    """
+    The path a cycle is written against, and where on it the cycle starts.
+
+    `s` is pinned to zero at stage zero, so `origin` carries what earlier cycles
+    already spent and `s` carries only the rest -- `theta = origin + s`.
+
+    `nominal_rate` is the plan's own pace in path parameter per second, which
+    depends on what the path spans and so cannot be derived here: the node fits
+    one horizon window per cycle (`Ocp.window_path`), an offline harness fits a
+    whole move once. Everything else about the two is the same, which is the
+    point of naming it.
+    """
+
+    control: np.ndarray
+    origin: float
+    nominal_rate: float
+
+    def remaining(self) -> float:
+        """How much path parameter is left, which is `s`'s own ceiling."""
+        return max(0.0, problem.K_PROGRESS_RATE_REFERENCE - float(self.origin))
+
+
+@dataclass
 class CostTerms:
     """The NLS cost, term by term, summed over the horizon."""
 
@@ -231,6 +255,18 @@ def state_bounds(
         ]
     )
     return lower, upper
+
+
+def stage_equilibrium(q_eq: np.ndarray, stage: int) -> np.ndarray:
+    """
+    Return this stage's sway equilibrium: one held vector, or one row per stage.
+
+    The node reads one equilibrium at the measured state and holds it
+    (`ocp_solver.cpp`'s trade); a harness that knows the whole path can solve one
+    per stage. Taking either here is what lets the two share a cycle.
+    """
+    table = np.asarray(q_eq, dtype=float)
+    return table if table.ndim == 1 else table[stage]
 
 
 def stage_reference(
@@ -632,8 +668,11 @@ class Ocp:
         self.payload_mass_kg = 0.0
         self.payload_com_m = np.zeros(3)
         self._payload_changed = False
-        #: The parameter vector the last written problem carried, path included.
+        #: The parameter vector the last written problem carried, path included,
+        #: and the `PathCycle` it was built from -- what `_read_solution` and
+        #: `cost_terms` have to read the solution against.
         self._last_parameter: np.ndarray | None = None
+        self._last_path: PathCycle | None = None
 
         #: Whether the preparation/feedback split is reachable at all. acados
         #: refuses `rti_phase` outside `SQP_RTI`, so a swept `nlp_solver_type`
@@ -815,9 +854,21 @@ class Ocp:
         return x0
 
     def _checked_x0(self, x0: np.ndarray, horizon, q_eq: np.ndarray) -> np.ndarray:
-        """Validate the cycle's arguments and return `x0` with `s` re-origined."""
-        intervals = self.intervals
+        """
+        Validate the cycle's arguments and return `x0` with `s` re-origined.
+
+        `horizon` may be absent: a caller that brought its own `PathCycle` has no
+        resampled knots to check, and the path it did bring is checked by
+        `_resolved_path`.
+        """
         x0 = self._origined_x0(x0)
+        if horizon is None:
+            if not np.all(np.isfinite(np.asarray(q_eq, dtype=float))):
+                raise ValueError(
+                    "the sway equilibrium carries a value that is not finite"
+                )
+            return x0
+        intervals = self.intervals
         if len(horizon) != intervals + 1:
             raise ValueError(
                 f"the horizon carries {len(horizon)} knots and the problem is posed "
@@ -839,45 +890,44 @@ class Ocp:
             )
         return x0
 
-    def _path_parameters(self, horizon) -> np.ndarray:
+    def _path_parameters(self, path: PathCycle) -> np.ndarray:
+        """Pack the model parameters, this path and where the cycle starts on it."""
+        return stage_parameters(self._base_parameter, path.origin, path.control)
+
+    def window_path(self, horizon) -> PathCycle:
         """
-        Fit the horizon's own knots as a path, until the planner hands one over.
+        Fit this horizon's own knots as the path, starting at 0: the interim source.
 
         `crane_planning` holds the curve as geometry and stage 2 of
-        `docs/features/path-following-mpc` takes it whole. Until then the node
-        has `Ts` samples of it, so the path is fitted to those and this cycle
-        starts at the beginning of them. Fitting is a cached matmul, so this is
-        per cycle, not per stage.
+        `docs/features/path-following-mpc` hands it over whole -- at which point
+        a caller builds the `PathCycle` itself and this stops being the default.
+        `bspline.fit` reads knot `i` at `i/intervals`, so a window's own pace is
+        one window per `intervals * Ts`.
         """
-        return stage_parameters(
-            self._base_parameter,
-            0.0,
-            path_control(horizon.q_a_ref[:, : cs.K_PLANNED_DOF]),
+        return PathCycle(
+            control=path_control(horizon.q_a_ref[:, : cs.K_PLANNED_DOF]),
+            origin=0.0,
+            nominal_rate=problem.nominal_progress_rate(self.parameters),
         )
 
-    def nominal_progress(self, stage: int) -> float:
+    def nominal_progress(self, stage: int, path: PathCycle) -> float:
         """
-        Where on the path the plan's own pace puts this stage.
-
-        `bspline.fit` reads knot `i` at `theta = i/intervals`, and the path this
-        cycle is the horizon's own knots, so stage `k`'s plan point *is*
-        `k/intervals` -- no separate timing law to consult.
+        Where on the path the plan's own pace puts this stage, as `theta`.
 
         Asking every stage for the end of the path instead is asking for flat
         out everywhere: `s` runs to its ceiling in the first 0.7 s of a 2.34 s
         horizon and the tracking rows spend the rest resisting it (measured,
         460 mm off path against 448 and 31 of 178 solves refused).
         """
-        return stage / self.intervals
+        reached = float(path.origin) + stage * self.Ts * float(path.nominal_rate)
+        return min(problem.K_PROGRESS_RATE_REFERENCE, reached)
 
-    @property
-    def progress_rate_max(self) -> float:
-        """`v_s`'s ceiling: declared headroom against this grid's own pace."""
-        return float(
-            self.parameters["limits"]["progress_rate_headroom"]
-        ) * problem.nominal_progress_rate(self.parameters)
+    def progress_rate_max(self, path: PathCycle) -> float:
+        """`v_s`'s ceiling: declared headroom against this path's own pace."""
+        headroom = float(self.parameters["limits"]["progress_rate_headroom"])
+        return headroom * float(path.nominal_rate)
 
-    def progress_ceiling(self, stage: int) -> float:
+    def progress_ceiling(self, stage: int, path: PathCycle) -> float:
         """
         `s`'s box top at this stage: as far as the rate reaches, or the path's end.
 
@@ -887,11 +937,15 @@ class Ocp:
         beyond the path -- motion away from the goal, priced at the tracking
         weight. Both robocrane variants box `theta` in [0, 1] for this reason.
         """
-        reach = stage * self.Ts * self.progress_rate_max
-        return min(reach, problem.K_PROGRESS_RATE_REFERENCE)
+        reach = stage * self.Ts * self.progress_rate_max(path)
+        return min(reach, path.remaining())
 
     def _write_problem(
-        self, x0: np.ndarray, horizon, q_eq: np.ndarray, guess: Guess | None
+        self,
+        x0: np.ndarray,
+        path: PathCycle,
+        q_eq: np.ndarray,
+        guess: Guess | None,
     ) -> bool:
         """
         Write everything the solve reads except the initial-state bound's own value.
@@ -920,27 +974,42 @@ class Ocp:
 
         force_reference = self.static_hold_force(x0)
         measured = x0[cs.X_PLANNED_POSITION : cs.X_PLANNED_POSITION + cs.K_PLANNED_DOF]
-        # Same box but for one entry, `s`'s ceiling; built once, moved per stage.
+        rate_max = self.progress_rate_max(path)
+        # Same box but for two entries: `s`'s ceiling, and the sway rows when the
+        # caller knows an equilibrium per stage. Built once, moved per stage.
         lower, upper = state_bounds(
-            self.parameters, q_eq, measured, self.progress_rate_max
+            self.parameters, stage_equilibrium(q_eq, 0), measured, rate_max
         )
-        # The path is the whole horizon's, so one fit per cycle -- `s` carries
-        # which stage a stage is. Kept, because it is what `cost_terms` has to
-        # score against: by the time the node reports, `Cycle.adopt_solution`
-        # has overwritten `horizon.q_a_ref` in place with the solved states, so
-        # refitting from the horizon there scores the solution against itself.
-        parameter = self._path_parameters(horizon)
+        sway = slice(cs.X_PASSIVE_POSITION, cs.X_PASSIVE_POSITION + cs.K_PASSIVE_DOF)
+        travelling = np.asarray(q_eq, dtype=float).ndim > 1
+        q_u_max = np.asarray(self.parameters["limits"]["q_u_max"], dtype=float)
+
+        def box(stage: int) -> tuple[np.ndarray, np.ndarray]:
+            """Return the box at this stage; only the travelling entries move."""
+            if travelling:
+                equilibrium = stage_equilibrium(q_eq, stage)
+                lower[sway] = equilibrium - q_u_max
+                upper[sway] = equilibrium + q_u_max
+            upper[cs.X_PROGRESS] = self.progress_ceiling(stage, path)
+            return lower, upper
+
+        # Kept, because it is what `cost_terms` has to score against: by the time
+        # the node reports, `Cycle.adopt_solution` has overwritten
+        # `horizon.q_a_ref` in place with the solved states, so refitting from
+        # the horizon there scores the solution against itself.
+        parameter = self._path_parameters(path)
         self._last_parameter = parameter
+        self._last_path = path
         for stage in range(intervals + 1):
             self.solver.set(stage, "p", parameter)
             self.solver.cost_set(
                 stage,
                 "yref",
                 stage_reference(
-                    q_eq,
+                    stage_equilibrium(q_eq, stage),
                     force_reference,
                     stage == intervals,
-                    self.nominal_progress(stage),
+                    self.nominal_progress(stage, path),
                 ),
             )
             if stage == 0:
@@ -948,8 +1017,7 @@ class Ocp:
                 self.solver.constraints_set(0, "lbx", x0)
                 self.solver.constraints_set(0, "ubx", x0)
                 continue
-            upper[cs.X_PROGRESS] = self.progress_ceiling(stage)
-            self.solver.constraints_set(stage, "lbx", lower)
+            self.solver.constraints_set(stage, "lbx", box(stage)[0])
             self.solver.constraints_set(stage, "ubx", upper)
 
         seed = guess if warm else self.cold_start(x0)
@@ -958,7 +1026,7 @@ class Ocp:
                 state = x0
             else:
                 state = seed.states[stage].copy()
-                upper[cs.X_PROGRESS] = self.progress_ceiling(stage)
+                box(stage)
                 state[: cs.NBX] = np.clip(state[: cs.NBX], lower, upper)
             self.solver.set(stage, "x", state)
             if stage < intervals:
@@ -997,7 +1065,9 @@ class Ocp:
             outcome = Outcome.CONVERGED
 
         advance = float(states[1][cs.X_PROGRESS]) if len(states) > 1 else 0.0
-        advance = float(np.clip(advance, 0.0, self.progress_ceiling(1)))
+        advance = float(
+            np.clip(advance, 0.0, self.progress_ceiling(1, self._last_path))
+        )
 
         return Solution(
             states=states,
@@ -1028,12 +1098,33 @@ class Ocp:
         """
         self.solver.options_set("rti_phase", int(phase))
 
+    def _resolved_path(self, horizon, path: PathCycle | None) -> PathCycle:
+        """
+        Return the path this cycle is written against: the caller's, or the window's.
+
+        A caller that hands one over owns where it starts and how fast the plan
+        means to spend it; one that does not gets the horizon's own knots fitted
+        per cycle, which is what the node has until `crane_planning` publishes
+        geometry.
+        """
+        if path is None:
+            if horizon is None:
+                raise ValueError("a cycle needs either a horizon or a path")
+            return self.window_path(horizon)
+        if float(path.nominal_rate) <= 0.0:
+            raise ValueError(
+                f"the path's nominal rate is {path.nominal_rate:g}; a plan that never "
+                "advances cannot be the pace the progress row is priced against"
+            )
+        return path
+
     def solve(
         self,
         x0: np.ndarray,
         horizon,
         q_eq: np.ndarray,
         guess: Guess | None = None,
+        path: PathCycle | None = None,
     ) -> Solution:
         """
         One whole RTI step, linearisation and QP together.
@@ -1045,7 +1136,7 @@ class Ocp:
         # A preparation this call overwrites is gone, and must not be consumable
         # by a later `feedback`.
         self._prepared = False
-        warm = self._write_problem(x0, horizon, q_eq, guess)
+        warm = self._write_problem(x0, self._resolved_path(horizon, path), q_eq, guess)
         if self.split_rti:
             self._set_phase(0)
         status = int(self.solver.solve())
@@ -1059,6 +1150,7 @@ class Ocp:
         horizon,
         q_eq: np.ndarray,
         guess: Guess | None = None,
+        path: PathCycle | None = None,
     ) -> float:
         """
         Everything but the QP, against a **predicted** state, one cycle early.
@@ -1069,7 +1161,9 @@ class Ocp:
         which are not on the measurement-to-command path.
         """
         x0 = self._checked_x0(x0, horizon, q_eq)
-        self._prepared_warm = self._write_problem(x0, horizon, q_eq, guess)
+        self._prepared_warm = self._write_problem(
+            x0, self._resolved_path(horizon, path), q_eq, guess
+        )
         self._set_phase(1)
         self.solver.solve()
         self._prepared = True
@@ -1164,7 +1258,10 @@ class Ocp:
         for stage in range(self.intervals + 1):
             terminal = stage == self.intervals
             reference = stage_reference(
-                q_eq, force_reference, terminal, self.nominal_progress(stage)
+                stage_equilibrium(q_eq, stage),
+                force_reference,
+                terminal,
+                self.nominal_progress(stage, self._last_path),
             )
             if terminal:
                 value = np.asarray(

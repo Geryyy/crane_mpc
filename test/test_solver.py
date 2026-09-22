@@ -70,7 +70,9 @@ def hold_state(ocp):
     # `progress_accel_max` cannot brake into the box in one interval, and the
     # row carries no slack. It only read 1.0 here while the box was an absolute
     # 1.5/s that happened to be 3.5x nominal.
-    x[cs.X_PROGRESS_RATE] = ocp.progress_rate_max
+    x[cs.X_PROGRESS_RATE] = float(
+        ocp.parameters["limits"]["progress_rate_headroom"]
+    ) * problem.nominal_progress_rate(ocp.parameters)
     ocp.pin_tool(0.3)
     x[cs.X_ACTUATED_FORCE : cs.X_ACTUATED_FORCE + PLANNED] = ocp.static_hold_force(x)
     return x
