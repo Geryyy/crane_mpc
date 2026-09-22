@@ -85,7 +85,7 @@
 // the node's predictor, and a second copy inside the horizon double-counts
 // it (`docs/features/mpc-full-authority/brief.md` §2.2).
 #define CRANE_MPC_OCP_ACTUATOR_STIFFNESS {319074.22754530463, 1834000.0, 578000.0, 3500000.0, 7296.0}
-#define CRANE_MPC_OCP_ACTUATOR_COMMAND_LAG_S {0.1, 0.025, 0.0, 0.075, 0.125}
+#define CRANE_MPC_OCP_ACTUATOR_COMMAND_LAG_S {0.1, 0.025, 0.0, 0.05, 0.125}
 #define CRANE_MPC_OCP_ACTUATOR_DEAD_TIME_S 0.06
 
 // **Which** fit those came from. The path is the repository's name for the
@@ -97,7 +97,7 @@
 // above. A refit therefore fails `export_ocp.py --check` rather than
 // shipping under the previous fit's identity.
 #define CRANE_MPC_OCP_ACTUATOR_FIT_SOURCE "crane_model/config/c3_full_model.json"
-#define CRANE_MPC_OCP_ACTUATOR_FIT_DIGEST "dbd66c7f9b94147d"
+#define CRANE_MPC_OCP_ACTUATOR_FIT_DIGEST "8bef1ab248cec397"
 
 // The blocks of the stage residual
 // `y = [q_a, dq_a, q_u, dq_u, lag, v_s, tau_a, u]`. The order is §2's --
