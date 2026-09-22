@@ -505,6 +505,7 @@ def simulate(
     reference=None,
     plant=None,
     passive_guess=None,
+    horizon=None,
 ) -> RunData:
     """
     Run the receding-horizon controller against a plant.
@@ -515,6 +516,9 @@ def simulate(
     `plant` is `(state, control, parameter, dt) -> state` over the full `cs.NX`
     -- must carry C3's lag/progress/force rows since the controller reads them
     back. `passive_guess` picks the equilibrium branch, i.e. where the run starts.
+
+    `horizon`, if given, is handed the (N+1, NX) states in force each cycle --
+    the accepted solution, or the shifted previous one where a solve was refused.
     """
     dt = float(parameters["Ts"])
     intervals = export_ocp.shooting_intervals(parameters)
@@ -711,6 +715,8 @@ def simulate(
         hydraulics_used[step] = hydraulic_utilisation(
             outputs, state, control, base_parameter, extend, retract, hydraulics
         )
+        if horizon is not None and previous_x is not None:
+            horizon(np.array(previous_x))
         state = plant(state, control, base_parameter, dt)
         states[step + 1] = state
         origin += advance if math.isfinite(advance) and advance >= 0.0 else dt

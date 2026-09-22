@@ -15,6 +15,12 @@ between the plan and the joint is the shipped one:
 
     ./scripts/sim_chain.py --goal out --viewer
     ./scripts/sim_chain.py --goal out --dead-time 0
+    ./scripts/sim_chain.py --random --viewer    space for the next goal
+
+`--random` chains moves: each goal is a pose sampled inside the planner's own
+box, each move starts where the last one ended. With the viewer the overlays
+say what is being asked of the machine -- the plan's TCP curve in green, the
+horizon the solver is holding this cycle in orange, redrawn at T_s.
 
 Unknown flags pass through to `mpc_a2b` (cost multipliers, --horizon-knots, ...).
 
@@ -83,11 +89,20 @@ cs = mpc_a2b.cs
 sys.path.insert(0, str(PACKAGE.parent / "crane_planning" / "scripts"))
 
 import tune_planner  # noqa: E402
+from crane_model import viewing  # noqa: E402
 from crane_model.actuator import C3Actuator  # noqa: E402
-from crane_model.conventions import PASSIVE_INDICES, canonical_joints  # noqa: E402
+from crane_model.conventions import (  # noqa: E402
+    ACTUATED_INDICES,
+    GENERALIZED_DOF,
+    PASSIVE_INDICES,
+    Frame,
+    canonical_joints,
+)
+from crane_model.errors import CraneModelError  # noqa: E402
 from crane_model.mujoco_plant import (  # noqa: E402
     NX_RIGID,
     PLANNED_INDICES,
+    TOOL_INDEX,
     MujocoPlant,
     leave,
 )
@@ -95,6 +110,11 @@ from crane_model.symbolic import K_ACTUATOR_FIT  # noqa: E402
 from crane_model.velocity_loop import VelocityLoop, load_velocity_loop  # noqa: E402
 
 AXIS_NAMES = mpc_a2b.AXIS_NAMES
+
+#: The two overlays, as the tool traces them: what was planned, what the solver
+#: is holding right now.
+PLAN_RGBA = (0.15, 0.85, 0.45, 0.6)
+HORIZON_RGBA = (1.0, 0.45, 0.05, 0.9)
 
 
 def arguments(argv: list[str]) -> tuple[argparse.Namespace, list[str]]:
@@ -130,6 +150,18 @@ def arguments(argv: list[str]) -> tuple[argparse.Namespace, list[str]]:
         action="store_true",
         help="drop C3 block 4. The force state is then unbounded -- see actuator.py",
     )
+    parser.add_argument(
+        "--random",
+        type=int,
+        nargs="?",
+        const=0,
+        default=None,
+        metavar="N",
+        help="chain N random goals instead of --goal, each move starting where "
+        "the last ended; no N is as many as the window stays open. Space in the "
+        "viewer releases the next one. Plot and CSV are off -- one run, one figure",
+    )
+    parser.add_argument("--seed", type=int, default=None, help="--random's stream")
     parser.add_argument("--viewer", action="store_true")
     parser.add_argument(
         "--realtime",
@@ -143,11 +175,14 @@ def arguments(argv: list[str]) -> tuple[argparse.Namespace, list[str]]:
 class Chain:
     """The three blocks under the MPC, plus what they did, per controller tick."""
 
-    def __init__(self, description: str, model, q_tool: float, options) -> None:
+    def __init__(self, plant, model, q_tool: float, options, markers=None) -> None:
         self.options = options
         self.q_tool = float(q_tool)
         self.dynamics, _, _, _ = mpc_a2b.make_numeric_functions(model)
-        self.plant = MujocoPlant(description, timestep=options.timestep)
+        #: One plant per process, not per move: the viewer follows its data, so
+        #: a second one would open a second window.
+        self.plant = plant
+        self.markers = markers
 
         gains_by_joint, rate_hz = load_velocity_loop()
         gains = [gains_by_joint[canonical_joints()[index]] for index in PLANNED_INDICES]
@@ -181,8 +216,6 @@ class Chain:
         # The cylinders hold the crane up before anyone commands anything; from
         # tau = 0 the boom drops before the loop has an error to answer.
         self.actuator.reset(tau=self.plant.holding_force)
-        if self.options.viewer:
-            self.plant.open_viewer(self.options.realtime)
         self._seeded = True
 
     def advance(self, state, control, parameter, dt):
@@ -275,6 +308,17 @@ class Chain:
             )
         return following
 
+    def show_horizon(self, states) -> None:
+        """Draw the horizon in force this cycle, as the tool would trace it."""
+        if self.markers is None:
+            return
+        position = slice(cs.X_PLANNED_POSITION, cs.X_PLANNED_POSITION + cs.NU)
+        passive = slice(cs.X_PASSIVE_POSITION, cs.X_PASSIVE_POSITION + cs.K_PASSIVE_DOF)
+        rows = viewing.canonical_rows(
+            states[:, position], states[:, passive], self.q_tool
+        )
+        self.markers.path("horizon", rows, HORIZON_RGBA, width=0.05)
+
     def _record(self, command, q_ref, dq_ref, forward) -> None:
         open_loop = self.ff_scale * dq_ref + (0.0 if forward is None else forward)
         error = q_ref - self.plant.q[list(PLANNED_INDICES)]
@@ -316,58 +360,216 @@ class Chain:
             )
 
 
-def main(argv: list[str] | None = None) -> int:
-    options, forwarded = arguments(sys.argv[1:] if argv is None else argv)
-    mpc = mpc_a2b.parse_arguments(forwarded)
-    description, _, start, plan = tune_planner.plan_for(options)
+#: Draws before a goal, or `plan_move`, gives up. At ~1/3 accepted per plan,
+#: twelve is a 0.8% tail.
+GOAL_DRAWS = 12
 
-    rows = list(cs.K_PLANNED_ROWS)
-    mpc.a, mpc.b = plan.q[0, rows], plan.q[-1, rows]
-    mpc.move_duration = plan.duration
-    mpc.tool_position = float(start.q[-1])
-    if mpc.output == mpc_a2b.PACKAGE / "build" / "mpc_a2b.png":
-        mpc.output = mpc_a2b.PACKAGE / "build" / "sim_chain.png"
 
-    try:
-        parameters, hydraulics = mpc_a2b.load_settings(mpc)
-        a, b = mpc_a2b.validate_movement(mpc, parameters)
-        solver, model, scale = mpc_a2b.create_solver(mpc, parameters, hydraulics)
-        chain = Chain(description, model, mpc.tool_position, options)
-        data = mpc_a2b.simulate(
-            mpc,
-            parameters,
-            hydraulics,
-            solver,
-            model,
-            scale,
-            a,
-            b,
-            reference=tune_mpc.plan_reference(plan),
-            plant=chain.advance,
-            passive_guess=plan.q[0, list(PASSIVE_INDICES)],
+def random_goal(planner, start, rng) -> tuple[np.ndarray, float]:
+    """
+    Draw a TCP pose the machine can hold: sample the joints, take FK off them.
+
+    Sampling joint space and taking FK, rather than a box in Cartesian space:
+    the pose is one the box admits by construction, so nothing here can ask for
+    a reach the machine does not have. It can still be refused -- the planner's
+    IK is seeded near the start and a far draw leaves it in a local minimum, at
+    which point `plan_move` draws again. Roughly a third of draws survive.
+
+    Folded draws are thrown back here instead: the box admits poses the machine
+    is inside itself at, and a plan that ends at one leaves the next move with a
+    start the planner will not measure.
+    """
+    lower = np.where(planner.limits.bounded, planner.limits.lower, -np.pi)
+    upper = np.where(planner.limits.bounded, planner.limits.upper, np.pi)
+    q = np.zeros(GENERALIZED_DOF)
+    q[TOOL_INDEX] = start.q_tool
+    for _ in range(GOAL_DRAWS):
+        q[list(PLANNED_INDICES)] = rng.uniform(lower, upper)
+        q[list(PASSIVE_INDICES)] = planner.model.passive_equilibrium(
+            q[list(ACTUATED_INDICES)]
         )
-    except (KeyError, ValueError, RuntimeError) as error:
-        print(f"error: {error}", file=sys.stderr)
-        return 2
+        clearance = planner.model.collision_query(q, [])
+        if (
+            not clearance.collision
+            and clearance.minimum_distance_m > planner.config.margin_safety
+        ):
+            break
+    pose = planner.model.forward_kinematics(q, Frame.MOUNTING_BASE, Frame.TCP)
+    sample = tune_planner.Start(q=q, dq_a=np.zeros(len(PLANNED_INDICES)))
+    return np.asarray(pose.position_m), tune_planner.start_yaw(planner, sample)
 
-    if chain.predict:
-        # `advance` handed the solver a state predicted through the dead time, so
-        # that is what `simulate` logged. Put the machine's own states back before
-        # anything is summarised, plotted or written out.
-        data = replace(data, state=np.vstack([data.state[:1], chain.measured]))
 
-    if not mpc.no_plot:
+def plan_move(planner, start, options, rng):
+    """
+    Plan one move, or say so: a refused random goal is redrawn, a named one is not.
+
+    None means give up, and it has to be a return rather than a `SystemExit`:
+    the viewer is open by now and only `leave` may end a process that has one.
+    """
+    for _ in range(GOAL_DRAWS):
+        if rng is None:
+            position, yaw = tune_planner.goal_of(planner, start, options)
+        else:
+            position, yaw = random_goal(planner, start, rng)
+        print(
+            f"goal: [{position[0]:.3f} {position[1]:.3f} {position[2]:.3f}] m, "
+            f"yaw {np.degrees(yaw):.1f} deg"
+        )
+        try:
+            plan = planner.plan(
+                start,
+                position,
+                yaw,
+                scene=[],
+                avoid_collisions=True,
+                speed_scale=options.speed_scale,
+            )
+        except tune_planner.PlanningError as refusal:
+            print(f"refused: {refusal}")
+            if rng is None:
+                return None
+            continue
+        print(plan.message)
+        return plan
+    print(f"no goal this planner would take in {GOAL_DRAWS} draws", file=sys.stderr)
+    return None
+
+
+def next_start(plant, planner) -> object:
+    """
+    Where the next move starts: the pose this one reached, as both boxes take it.
+
+    A move ends where C3 and the inner loop left the machine, which is a hair
+    outside the planner's box often enough -- the telescope creeps past its stop
+    every move. Unclipped, the plan's own A lands outside the MPC's control-safe
+    box and `validate_movement` ends the whole chain over a millimetre. The
+    rotator is continuous and turn-counted to 4pi, so it is wrapped rather than
+    clipped: a 2pi is the same pose, and clipping one would be a real move.
+    """
+    rows = list(PLANNED_INDICES)
+    q = plant.q
+    inside = np.clip(q[rows], planner.limits.lower, planner.limits.upper)
+    wrapped = (q[rows] + np.pi) % (2.0 * np.pi) - np.pi
+    q[rows] = np.where(plant.continuous_axes, wrapped, inside)
+    return tune_planner.Start(q=q, dq_a=np.zeros(len(rows)))
+
+
+def summarise(mpc, data, parameters, hydraulics, plan, chain, figures: bool) -> None:
+    """Print what the move did, and write the figure and CSV where they are wanted."""
+    if figures and not mpc.no_plot:
         mpc_a2b.plot(mpc.output.resolve(), data, parameters, hydraulics, mpc.show)
-    if not mpc.no_csv:
+    if figures and not mpc.no_csv:
         csv_path = mpc.output.resolve().with_suffix(".csv")
         mpc_a2b.write_csv(csv_path, data)
         print(f"Wrote data: {csv_path}")
     mpc_a2b.print_summary(data, parameters)
     print(f"reference: {plan.duration:.2f} s plan, {plan.time.size} samples")
     chain.report()
+
+
+def main(argv: list[str] | None = None) -> int:
+    options, forwarded = arguments(sys.argv[1:] if argv is None else argv)
+    mpc = mpc_a2b.parse_arguments(forwarded)
+    if mpc.output == mpc_a2b.PACKAGE / "build" / "mpc_a2b.png":
+        mpc.output = mpc_a2b.PACKAGE / "build" / "sim_chain.png"
+    rng = None if options.random is None else np.random.default_rng(options.seed)
+    description = tune_planner.plan_example.description()
+
+    try:
+        planner = tune_planner.Planner(
+            description, tune_planner.plan_example.configure(options)
+        )
+        parameters, hydraulics = mpc_a2b.load_settings(mpc)
+        solver, model, scale = mpc_a2b.create_solver(mpc, parameters, hydraulics)
+    except (KeyError, ValueError, RuntimeError) as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 2
+
+    if options.random == 0 and not options.viewer:
+        print("error: --random with no count needs --viewer to end it", file=sys.stderr)
+        return 2
+
+    # The solver carries no A and B -- those are set per cycle -- so one compile
+    # serves every move, and one plant keeps one window.
+    plant = MujocoPlant(description, timestep=options.timestep)
+    start = anchor = tune_planner.start_of(planner, options.resettle_start)
+    offset = start.q[list(PASSIVE_INDICES)] - planner.model.passive_equilibrium(
+        start.q[list(ACTUATED_INDICES)]
+    )
+    print(f"start passive pair sits {np.degrees(offset)} deg off rest")
+    gate = viewing.SpaceGate()
+    markers = None
     if options.viewer:
+        # Placed before the window opens: planning takes seconds and nothing
+        # syncs meanwhile, so an unplaced plant is what would be on screen.
+        plant.set_state(start.q)
+        plant.open_viewer(options.realtime, key_callback=gate)
+        markers = viewing.Markers(plant)
+
+    moves = 0
+    while True:
+        plan = plan_move(planner, start, options, rng)
+        if plan is None:
+            if rng is None or start is anchor:
+                break
+            # Half a radian of tracking error folds the machine into itself, and
+            # the planner measures no start there. Go back to the pose the run
+            # opened at rather than end the session on one bad move.
+            print("no move from here; back to the pose this run opened at")
+            start = anchor
+            continue
+        if markers is not None:
+            markers.path("plan", plan.q, PLAN_RGBA, width=0.02)
+
+        rows = list(cs.K_PLANNED_ROWS)
+        mpc.a, mpc.b = plan.q[0, rows], plan.q[-1, rows]
+        mpc.move_duration = plan.duration
+        mpc.tool_position = start.q_tool
+        try:
+            a, b = mpc_a2b.validate_movement(mpc, parameters)
+            chain = Chain(plant, model, mpc.tool_position, options, markers)
+            data = mpc_a2b.simulate(
+                mpc,
+                parameters,
+                hydraulics,
+                solver,
+                model,
+                scale,
+                a,
+                b,
+                reference=tune_mpc.plan_reference(plan),
+                plant=chain.advance,
+                passive_guess=plan.q[0, list(PASSIVE_INDICES)],
+                horizon=None if markers is None else chain.show_horizon,
+            )
+        except (CraneModelError, KeyError, ValueError, RuntimeError) as error:
+            print(f"error: {error}", file=sys.stderr)
+            return 2
+
+        if chain.predict:
+            # `advance` handed the solver a state predicted through the dead time,
+            # so that is what `simulate` logged. Put the machine's own states back
+            # before anything is summarised, plotted or written out.
+            data = replace(data, state=np.vstack([data.state[:1], chain.measured]))
+        summarise(mpc, data, parameters, hydraulics, plan, chain, figures=rng is None)
+
+        moves += 1
+        if rng is None or (options.random and moves >= options.random):
+            break
+        if markers is not None:
+            markers.drop("horizon")
+        if plant.viewer is not None:
+            print("\nspace in the viewer for the next goal")
+        if not gate.wait(plant):
+            break
+        # The pose this move reached carries over; nothing else does. `simulate`
+        # builds its own initial state, so the next one opens at rest with the
+        # load hanging at equilibrium, whatever was still swinging here.
+        start = next_start(plant, planner)
+
+    if plant.viewer is not None:
         print("close the viewer window to finish")
-    chain.plant.hold_viewer()
+    plant.hold_viewer()
     return 0
 
 
