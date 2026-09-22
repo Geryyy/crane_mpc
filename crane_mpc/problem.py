@@ -248,6 +248,18 @@ def shooting_intervals(parameters: dict) -> int:
     return knots - 1
 
 
+def nominal_progress_rate(parameters: dict) -> float:
+    """
+    Return the plan's own pace, in path parameter per second, over one window.
+
+    `s` spans the window the path was fitted to, so running the plan at the
+    speed it was written at is one window per `intervals * Ts` seconds. A caller
+    whose path spans something else -- an offline harness fitting a whole move
+    -- has its own nominal and does not read this one.
+    """
+    return 1.0 / (shooting_intervals(parameters) * float(parameters["Ts"]))
+
+
 def constraint_scale(model: cs.CraneSymbolicModel, hydraulics: dict) -> tuple:
     """
     Return `(scale, extend, retract)`: each `h` row's divisor and what set it.

@@ -313,13 +313,16 @@ crane_mpc:
       validation:
         fixed_size<>: [2]
         lower_element_bounds<>: [0.0]
-    progress_rate_max:
+    progress_rate_headroom:
       type: double
       default_value: 1.5
       read_only: true
-      description: "Ceiling of the progress rate, s of plan per s of wall clock. The **floor is zero and is
-        not a parameter** -- the machine does not run the plan backwards. The ceiling is catch-up headroom
-        only: the plan was issued feasible at rate one against these same limits. Not tuned.
+      description: "Ceiling of the progress rate, as a multiple of the plan's own pace. The **floor is zero
+        and is not a parameter** -- the machine does not run the plan backwards. 1.5 is 50% catch-up.
+        **Dimensionless on purpose.** `s` is a path parameter, so a rate in 1/s only means something
+        against what the path spans: the node's spans one horizon window, an offline harness fitting a
+        whole move spans that. Declared as an absolute rate this number silently changed meaning with
+        `horizon_length` and `Ts`, and its own `gt_eq` compared it against `theta`'s end. Not tuned.
         **'These same limits' is no longer true and is a known gap.** crane_planning reads its box off the
         description (crane_planning/config.py:108-110), so since issues 126 and 128 it certifies boom and arm
         poses constraint 1 hard-refuses. A reference outside the box is absorbed by the progress rate on the
@@ -328,6 +331,7 @@ crane_mpc:
         crane_planning's and needs its own issue."
       validation:
         gt_eq<>: [1.0]
+        lt_eq<>: [10.0]
     progress_accel_max:
       type: double
       default_value: 2.0

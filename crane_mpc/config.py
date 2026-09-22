@@ -96,7 +96,7 @@ DERIVED = ("u_max",)
 LIMITS = (
     "q_u_max",
     "dq_u_max",
-    "progress_rate_max",
+    "progress_rate_headroom",
     "progress_accel_max",
 )
 SLACK = ("q_u", "dq_u", "cylinder_force", "pump_flow")
@@ -313,21 +313,17 @@ def check_settings(parameters: dict, hydraulics: dict) -> None:
         "constraints 2 to 5 of `mpc` §3 each need a finite positive bound; an invented "
         "or absent one is the silent stub the model API's contract 5 exists to prevent",
     )
-    # Nominal pace, in path parameter per second. `s` spans the horizon's own
-    # window, so one unit of it is `(horizon_length - 1) * Ts` seconds of plan
-    # and running the plan at its own speed is the reciprocal. Comparing against
-    # `K_PROGRESS_RATE_REFERENCE` instead -- as this did -- puts a rate against a
-    # path coordinate, and at the shipped grid that floor is 2.34x nominal: it
-    # forbade every honest catch-up ceiling rather than the dishonest ones.
-    window = (int(parameters["horizon_length"]) - 1) * float(parameters["Ts"])
-    nominal = 1.0 / window if window > 0.0 else math.inf
-    rate_max = float(limits["progress_rate_max"])
-    if not math.isfinite(rate_max) or rate_max < nominal:
+    # Headroom is a multiple of the plan's own pace, so the floor is a clean
+    # one and needs no grid to interpret. Declared as an absolute rate this
+    # compared against `K_PROGRESS_RATE_REFERENCE`, a path coordinate, and at
+    # the shipped grid that floor sat at 2.34x nominal -- it forbade every
+    # honest catch-up ceiling rather than the dishonest ones.
+    headroom = float(limits["progress_rate_headroom"])
+    if not math.isfinite(headroom) or headroom < 1.0:
         raise MpcConfigError(
-            f"progress_rate_max = {rate_max:g} is below the nominal rate "
-            f"{nominal:g} per second; under it the reference could never be spent "
-            "at its own pace, which is the behaviour every other page in the wiki "
-            "describes"
+            f"progress_rate_headroom = {headroom:g} is below one, so the reference "
+            "could never be spent at its own pace, which is the behaviour every "
+            "other page in the wiki describes"
         )
     _refuse(
         _offender(limits, ("progress_accel_max",), _positive),

@@ -511,7 +511,7 @@ def test_a_refused_solve_spends_one_interval_and_not_what_its_iterate_claims():
     the machine consumes is one interval of *that* plan -- not whatever `s` a
     solver that did not converge happens to hold.
 
-    Reading the iterate let the window run `progress_rate_max * duration()`
+    Reading the iterate let the window run `progress_rate_headroom * duration()`
     ahead per cycle, five cycles deep before the publisher stops, and the next
     converged cycle then refits the path to a window the machine is not in.
     """

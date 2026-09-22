@@ -615,10 +615,12 @@ def simulate(
     previous_x: list[np.ndarray] | None = None
     previous_u: list[np.ndarray] | None = None
     budget = float(parameters["solve_budget"])
-    rate_max = float(parameters["limits"]["progress_rate_max"])
     # The plan's own pace, as path parameter per second: what the progress row
-    # asks for, until the end of the path is nearer than that.
+    # asks for, until the end of the path is nearer than that. This path is the
+    # whole move, not a horizon window, so the nominal is the move's own and
+    # `problem.nominal_progress_rate` (which is the node's window) is not it.
     nominal_rate = 1.0 / float(arguments.move_duration)
+    rate_max = float(parameters["limits"]["progress_rate_headroom"]) * nominal_rate
 
     # Where on the path this cycle starts, in [0, 1]. `s` is pinned to zero each
     # cycle and this carries what the last solve bought -- the same bookkeeping
@@ -668,7 +670,7 @@ def simulate(
                 lower = upper = state
             else:
                 lower, upper = state_bounds(
-                    parameters, equilibrium, state[: cs.K_PLANNED_DOF]
+                    parameters, equilibrium, state[: cs.K_PLANNED_DOF], rate_max
                 )
                 # s's ceiling: the path's own end, or as far as the rate reaches
                 upper[cs.X_PROGRESS] = min(nominal, 1.0 - origin)
@@ -700,7 +702,7 @@ def simulate(
                 reach = stage * dt * rate_max
                 equilibrium = equilibrium_at(eq_times, q_eq_table, origin + reach)
                 lower, upper = state_bounds(
-                    parameters, equilibrium, state[: cs.K_PLANNED_DOF]
+                    parameters, equilibrium, state[: cs.K_PLANNED_DOF], rate_max
                 )
                 upper[cs.X_PROGRESS] = min(reach, 1.0 - origin)
                 # only boxed prefix has bounds; force states held by constraint 6,
@@ -743,7 +745,7 @@ def simulate(
                 np.clip(
                     candidate_x[1][cs.X_PROGRESS],
                     0.0,
-                    dt * float(parameters["limits"]["progress_rate_max"]),
+                    dt * rate_max,
                 )
             )
             previous_x, previous_u = candidate_x, candidate_u

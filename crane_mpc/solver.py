@@ -192,18 +192,24 @@ def position_box(
 
 
 def state_bounds(
-    parameters: dict, equilibrium: np.ndarray, measured: np.ndarray
+    parameters: dict,
+    equilibrium: np.ndarray,
+    measured: np.ndarray,
+    rate_max: float,
 ) -> tuple[np.ndarray, np.ndarray]:
     """
     One stage's box: rigid rows, lagged command, progress pair.
 
     Force rows are uncapped (constraint 6 holds them); `s`'s ceiling is zero, moved per stage.
+
+    `rate_max` is passed rather than read off `parameters`: the yaml declares
+    catch-up headroom, and turning that into a rate needs to know what the
+    path spans, which this function cannot see.
     """
     limits = parameters["limits"]
     u_max = np.asarray(limits["u_max"][: cs.K_PLANNED_DOF], dtype=float)
     q_lower, q_upper = position_box(parameters, measured)
     lag = u_max[list(cs.K_LAG_AXES)]
-    rate_max = float(limits["progress_rate_max"])
     lower = np.concatenate(
         [
             q_lower,
@@ -864,6 +870,13 @@ class Ocp:
         """
         return stage / self.intervals
 
+    @property
+    def progress_rate_max(self) -> float:
+        """`v_s`'s ceiling: declared headroom against this grid's own pace."""
+        return float(
+            self.parameters["limits"]["progress_rate_headroom"]
+        ) * problem.nominal_progress_rate(self.parameters)
+
     def progress_ceiling(self, stage: int) -> float:
         """
         `s`'s box top at this stage: as far as the rate reaches, or the path's end.
@@ -874,8 +887,8 @@ class Ocp:
         beyond the path -- motion away from the goal, priced at the tracking
         weight. Both robocrane variants box `theta` in [0, 1] for this reason.
         """
-        rate_max = float(self.parameters["limits"]["progress_rate_max"])
-        return min(stage * self.Ts * rate_max, problem.K_PROGRESS_RATE_REFERENCE)
+        reach = stage * self.Ts * self.progress_rate_max
+        return min(reach, problem.K_PROGRESS_RATE_REFERENCE)
 
     def _write_problem(
         self, x0: np.ndarray, horizon, q_eq: np.ndarray, guess: Guess | None
@@ -908,7 +921,9 @@ class Ocp:
         force_reference = self.static_hold_force(x0)
         measured = x0[cs.X_PLANNED_POSITION : cs.X_PLANNED_POSITION + cs.K_PLANNED_DOF]
         # Same box but for one entry, `s`'s ceiling; built once, moved per stage.
-        lower, upper = state_bounds(self.parameters, q_eq, measured)
+        lower, upper = state_bounds(
+            self.parameters, q_eq, measured, self.progress_rate_max
+        )
         # The path is the whole horizon's, so one fit per cycle -- `s` carries
         # which stage a stage is. Kept, because it is what `cost_terms` has to
         # score against: by the time the node reports, `Cycle.adopt_solution`

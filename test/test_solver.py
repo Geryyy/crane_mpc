@@ -55,10 +55,6 @@ def split_delay_ocp(parameters):
     values = dict(parameters)
     values["Ts"] = 0.04
     values["horizon_length"] = 4
-    # `s` spans the window, so a 0.12 s one runs at 8.33/s nominal. Keeping the
-    # shipped 1.5 here would be a grid that cannot spend its own plan, which
-    # `config.check_settings` now refuses. Same 1.5x headroom, this grid's rate.
-    values["limits"] = dict(values["limits"], progress_rate_max=12.5)
     return Ocp(
         problem.default_description().read_text(),
         values,
@@ -69,7 +65,12 @@ def split_delay_ocp(parameters):
 def hold_state(ocp):
     x = np.zeros(cs.NX)
     x[cs.X_PLANNED_POSITION + 1] = 0.5
-    x[cs.X_PROGRESS_RATE] = 1.0
+    # Inside `v_s`'s box, which is the declared headroom against this grid's
+    # pace. A state above it is infeasible at stage 1 rather than merely tight:
+    # `progress_accel_max` cannot brake into the box in one interval, and the
+    # row carries no slack. It only read 1.0 here while the box was an absolute
+    # 1.5/s that happened to be 3.5x nominal.
+    x[cs.X_PROGRESS_RATE] = ocp.progress_rate_max
     ocp.pin_tool(0.3)
     x[cs.X_ACTUATED_FORCE : cs.X_ACTUATED_FORCE + PLANNED] = ocp.static_hold_force(x)
     return x

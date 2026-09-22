@@ -92,9 +92,12 @@ crane_mpc:
       # derived by `crane_mpc.config.command_domain`.
       q_u_max: [0.2, 0.2]
       dq_u_max: [1.0, 0.5]
-      # `0 <= v_s <= progress_rate_max`. Floor is structural zero -- plan
-      # never runs backwards. Ceiling is catch-up headroom after a slowdown.
-      progress_rate_max: 1.5
+      # `0 <= v_s <= headroom * nominal`, where nominal is one path per
+      # `(horizon_length - 1) * Ts` -- 0.427/s at this grid. Floor is
+      # structural zero: the plan never runs backwards. 1.5 is 50% catch-up
+      # after a slowdown, and stays 50% if the grid changes, which an absolute
+      # rate did not.
+      progress_rate_headroom: 1.5
       progress_accel_max: 2.0
 
     slack:
