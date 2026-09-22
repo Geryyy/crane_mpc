@@ -9,13 +9,25 @@ crane_mpc:
     # sway 0.157 vs 0.161). 0.10/25 rejected: cheaper (7.3 ms) but 21% more
     # error, 17% more sway, QP iteration cap cold.
     # Nothing downstream samples the grid (JTC interpolates via PID). But
-    # 40*0.06=2.34s must cover the ~2s sway period and 2s fault-tolerance
+    # 80*0.06=4.74s must cover the ~2s sway period and 2s fault-tolerance
     # budget (old 1.96s missed both), and Ts must not exceed
     # sensor_to_valve_delay below or replay_schedule breaks two-command
-    # prediction.
+    # prediction -- so lookahead can only be bought in knots, not in a
+    # coarser grid.
+    #
+    # 40 -> 80 once the tool row was in, 20 moves on two seeds:
+    #
+    #   knots   goal worst (avg)   goal median (avg)   solve median
+    #      40        222 mm              27 mm            5.4 ms
+    #      60         92 mm              29 mm            8.8 ms
+    #      80         79 mm              24 mm           12.1 ms
+    #
+    # Worst-case arrival is what moves, and it is 2.8x. 12.1 ms leaves 6x to
+    # the 80 ms budget; the old note that sim load costs 2-4x still leaves the
+    # median inside it, and `solve_budget` catches the tail.
     # Publishes at 16.7 Hz vs a 25 Hz target; unresolved, own issue.
     Ts: 0.06
-    horizon_length: 40
+    horizon_length: 80
 
     # Transport dead time, common to all six axes. Modelled here in the
     # predictor, not in the plant: symbolic.py carries the other blocks with

@@ -64,7 +64,7 @@
 #define CRANE_MPC_PZS100_NY0    31
 #define CRANE_MPC_PZS100_NY     31
 #define CRANE_MPC_PZS100_NYN    20
-#define CRANE_MPC_PZS100_N      39
+#define CRANE_MPC_PZS100_N      79
 #define CRANE_MPC_PZS100_NH     6
 #define CRANE_MPC_PZS100_NHN    0
 #define CRANE_MPC_PZS100_NH0    6

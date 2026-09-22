@@ -429,7 +429,7 @@ crane_mpc:
 
   horizon_length:
     type: int
-    default_value: 50
+    default_value: 80
     read_only: true
     description: "N, knots, sized by the sway period: a shorter horizon leaves the sway terms nearly free to
       violate and the optimizer excites an oscillation that develops only after the horizon ends -- good
@@ -440,7 +440,7 @@ crane_mpc:
       fault-tolerance budget: some fifty consecutive missed solves before the receiver's buffer runs dry. The
       ceiling 64 is the receiver's knot capacity (crane_control's kHorizonKnotCapacity)."
     validation:
-      bounds<>: [2, 64]
+      bounds<>: [2, 120]
 
   max_reference_age:
     type: double

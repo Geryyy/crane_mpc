@@ -11,7 +11,7 @@
 // rather than silently solved on the shipped horizon. The horizon is the
 // **shooting-interval** count `OcpSettings::horizon_length` carries, one
 // less than the yaml's knot count.
-#define CRANE_MPC_OCP_HORIZON 39
+#define CRANE_MPC_OCP_HORIZON 79
 #define CRANE_MPC_OCP_SAMPLE_TIME_S 0.06
 
 // `p`, which is `crane_symbolic`'s own parameter vector bound whole: the
