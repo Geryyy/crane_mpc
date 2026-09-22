@@ -138,8 +138,8 @@
 // and **not** a bound -- see `export_ocp.py`. `lh`/`uh` carry the limits.
 #define CRANE_MPC_OCP_CONSTRAINT_SCALE {318100.0, 384850.0, 318100.0, 96212.5, 3580.9999999999995, 0.00133}
 
-// §3.1's two smoothing widths, as `config/hydraulics.yaml` states them and
-// as they went into `Q`. Here so that a test can assert the identity
+// §3.1's two smoothing widths, as `crane_model/config/hydraulics.yaml` states
+// them and as they went into `Q`. Here so that a test can assert the identity
 // `A±(v) sqrt(v² + eps²)` from outside without restating either number --
 // `crane_model`'s own `hydraulics::Constants` is private to that package.
 #define CRANE_MPC_OCP_SMOOTHING_EPS_ABS 1e-06

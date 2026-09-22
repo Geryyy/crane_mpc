@@ -7,12 +7,13 @@ that doesn't match it -- no warning, default runs. Issue 137's divergence
 """
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import yaml
 
 PACKAGE = Path(__file__).resolve().parent.parent
 DECLARATION = PACKAGE / "crane_mpc_parameters.yaml"
-SHIPPED = ("crane_mpc.yaml", "hydraulic_limits.yaml")
+SHIPPED = ("crane_mpc.yaml",)
 
 
 def _declared(node, prefix=""):
@@ -44,47 +45,91 @@ def test_every_shipped_key_is_a_declared_parameter():
     assert written - declared == set()
 
 
-# --- the pump is one number ---------------------------------------------------
-# Typed in separately before (1.4e-3 here, 0.0014 there, uncompared) though
-# also `crane_planning`'s. `crane_model/config/hydraulics.yaml` is the
-# source; this pins both copies.
-def test_the_pump_is_the_one_in_crane_model():
-    from crane_model.conventions import default_hydraulics_path
+# --- the hydraulic constants are crane_model's --------------------------------
+# Declared here only so a deployment can override, at sentinel 0.0; the numbers
+# live in crane_model/config/hydraulics.yaml and nothing shipped repeats one.
+HYDRAULICS = ("pump_flow_max", "pump_flow_planning_factor", "system_pressure_pa")
 
-    with open(default_hydraulics_path(), encoding="utf-8") as handle:
-        pump = yaml.safe_load(handle)["pump"]
+
+def test_the_hydraulic_constants_are_the_ones_in_crane_model():
+    from crane_model import hydraulic_limits
+    from crane_mpc import config
+
     declared = yaml.safe_load(DECLARATION.read_text())["crane_mpc"]["hydraulics"]
-    deployed = yaml.safe_load(
-        (PACKAGE / "config" / "hydraulic_limits.yaml").read_text()
+    assert set(declared) == set(HYDRAULICS)
+    for name in HYDRAULICS:
+        assert declared[name]["default_value"] == 0.0, name
+    for name in SHIPPED:
+        shipped = yaml.safe_load((PACKAGE / "config" / name).read_text())
+        assert "hydraulics" not in shipped["crane_mpc"]["ros__parameters"], name
+
+    # The sentinels resolve to crane_model's numbers, which is the whole contract.
+    values = SimpleNamespace(
+        hydraulics=SimpleNamespace(
+            **{name: declared[name]["default_value"] for name in HYDRAULICS}
+        )
     )
-    deployed = deployed["crane_mpc"]["ros__parameters"]["hydraulics"]
-
-    for here, there in (
-        ("pump_flow_max", "flow_max"),
-        ("pump_flow_planning_factor", "planning_factor"),
-    ):
-        assert declared[here]["default_value"] == pump[there], here
-        assert deployed[here] == pump[there], here
+    assert config.hydraulics_dict(values) == hydraulic_limits()
 
 
-# --- the control-safe box is one box ------------------------------------------
+# --- the machine's own numbers are crane_model's ------------------------------
 # Same rows bound `crane_planning`, which used to read its box off the
-# description and certified poses/speeds constraint 1 refuses. Box lives in
-# crane_model now; this pins declaration and deployed config to it, in
-# ACTUATED order below.
+# description and certified poses/speeds constraint 1 refuses. Neither file may
+# carry one: `config.machine_limits` is the only reader, and the ACTUATED order
+# below is the order it returns them in.
 ACTUATED = ("slewing", "boom", "arm", "telescope", "rotator", "tool")
 BOX_ROWS = ("q_a_lower", "q_a_upper", "dq_a_max", "q_a_margin")
 
 
 def test_the_control_safe_box_is_the_one_in_crane_model():
     from crane_model.conventions import control_safe_limits
+    from crane_mpc import config
 
     box = control_safe_limits()
-    declared = yaml.safe_load(DECLARATION.read_text())["crane_mpc"]["limits"]
-    deployed = yaml.safe_load((PACKAGE / "config" / "crane_mpc.yaml").read_text())
-    deployed = deployed["crane_mpc"]["ros__parameters"]["limits"]
-
+    resolved = config.machine_limits()
     for row in BOX_ROWS:
-        expected = [box[row][axis] for axis in ACTUATED]
-        assert declared[row]["default_value"] == expected, row
-        assert deployed[row] == expected, row
+        assert resolved[row] == [box[row][axis] for axis in ACTUATED], row
+
+    declared = yaml.safe_load(DECLARATION.read_text())["crane_mpc"]["limits"]
+    for name in SHIPPED:
+        shipped = yaml.safe_load((PACKAGE / "config" / name).read_text())
+        written = shipped["crane_mpc"]["ros__parameters"]["limits"]
+        for row in resolved:
+            assert row not in declared, row
+            assert row not in written, (name, row)
+
+
+def test_constraint_5_is_the_smaller_of_psis_domain_and_the_speed_bound():
+    """
+    `u^+` is a product of two crane_model tables, so it is derived, not typed.
+
+    The arm is the row that says so: 0.3059 is Psi's own edge, where the
+    shipped number was a hand-rounded 0.305. Every other row is bound by
+    `dq_a_max`, so a narrowing there now carries into constraint 5 by itself.
+    """
+    from crane_model.conventions import ACTUATED_INDICES, canonical_joints
+    from crane_model.velocity_loop import load_velocity_loop
+    from crane_mpc import config
+
+    gains, _rate_hz = load_velocity_loop()
+    joints = canonical_joints()
+    resolved = config.machine_limits()
+    for axis, index in enumerate(ACTUATED_INDICES):
+        clamp = gains[joints[index]]
+        assert resolved["u_max"][axis] == min(
+            abs(clamp.u_clamp_min), clamp.u_clamp_max, resolved["dq_a_max"][axis]
+        )
+
+
+def test_the_transport_delay_is_the_fitted_dead_time():
+    """
+    Declared, not read: it is the deployed sensor-to-valve path, which the
+    fit's own dead time only happens to equal. Pinned so the two stop agreeing
+    loudly rather than quietly.
+    """
+    from crane_model.symbolic import K_ACTUATOR_FIT
+
+    declared = yaml.safe_load(DECLARATION.read_text())["crane_mpc"]
+    assert declared["sensor_to_valve_delay"]["default_value"] == float(
+        K_ACTUATOR_FIT.dead_time_s
+    )

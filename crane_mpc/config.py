@@ -8,9 +8,11 @@ not a NaN blamed on the solver.
 Reasons are the deliverable, not the predicates: every message names the
 quantity, its value, and why the bound exists.
 
-Nothing here reads a file or parameter server: `parameter_dict`/
-`hydraulics_dict` reshape the generated `Params` object into the plain
+`parameter_dict` reshapes the generated `Params` object into the plain
 dicts `problem`/`solver` read; a yaml on disk arrives in the same shape.
+`hydraulics_dict`, `control_safe_box` and `command_domain` are where this
+node asks `crane_model` for a number. None of the three is a declared
+parameter, so no deployment can carry a second copy of the machine.
 """
 
 from __future__ import annotations
@@ -18,7 +20,15 @@ from __future__ import annotations
 import math
 
 import numpy as np
+from crane_model import hydraulic_limits
 from crane_model import symbolic as cs
+from crane_model.conventions import (
+    ACTUATED_INDICES,
+    CONTROL_SAFE_AXES,
+    canonical_joints,
+    control_safe_limits,
+)
+from crane_model.velocity_loop import load_velocity_loop
 
 from .problem import K_PROGRESS_RATE_REFERENCE
 
@@ -71,14 +81,22 @@ WEIGHTS = (
     "progress_accel",
     "terminal_scale",
 )
+#: Constraint 1's box and constraint 2's bound. Not declared as parameters:
+#: crane_model owns them and `crane_planning` intersects its description-read
+#: limits with the same rows, so a second copy here is how the two stacks drift.
+BOX = ("q_a_lower", "q_a_upper", "q_a_margin", "dq_a_max")
+
+#: Constraint 5's bound, derived rather than written: `u` is a velocity at
+#: Psi's input, so the smaller of Psi's identified domain and the control-safe
+#: speed bounds it. Both tables are crane_model's, the derivation is recorded
+#: under `derived.u_max` in control_safe_limits.yaml, and typing the product in
+#: is how it survives a narrowing of either factor.
+DERIVED = ("u_max",)
+
+#: Declared limits, i.e. the ones a deployment still writes.
 LIMITS = (
-    "q_a_lower",
-    "q_a_upper",
-    "q_a_margin",
-    "dq_a_max",
     "q_u_max",
     "dq_u_max",
-    "u_max",
     "progress_rate_max",
     "progress_accel_max",
 )
@@ -102,12 +120,74 @@ def parameter_dict(values) -> dict:
     for block, names in (("weights", WEIGHTS), ("limits", LIMITS), ("slack", SLACK)):
         group = getattr(values, block)
         shaped[block] = {name: getattr(group, name) for name in names}
+    shaped["limits"].update(machine_limits())
     return shaped
 
 
+def machine_limits() -> dict:
+    """Every limit row crane_model owns, in this problem's actuated order."""
+    box = control_safe_box()
+    return box | {"u_max": command_domain(box["dq_a_max"])}
+
+
+def control_safe_box() -> dict:
+    """
+    Read the four control-safe rows, in this problem's actuated order.
+
+    Read off `crane_model`, never declared: rows keyed by axis name there and
+    by index here, and the order is derived through `canonical_joints` rather
+    than written down, since only the name is stable across the two packages.
+    """
+    box = control_safe_limits()
+    joints = canonical_joints()
+    axis_of = {joint: axis for axis, joint in CONTROL_SAFE_AXES.items()}
+    axes = [axis_of[joints[index]] for index in ACTUATED_INDICES]
+    return {row: [box[row][axis] for axis in axes] for row in BOX}
+
+
+def command_domain(dq_a_max) -> list:
+    """
+    Constraint 5's `u^+`: the smaller of Psi's domain and the speed bound.
+
+    `u_clamp_min`/`u_clamp_max` in crane_model's velocity loop are Psi's
+    identified domain, and `crane_planning` reads the same pair as
+    `command_u_min`/`command_u_max`. Asymmetric there and one magnitude here,
+    so the smaller side is taken -- the direction issue 128 took on `dq_a_max`.
+    The tool carries no clamp (no campaign covers that axis), so its row is the
+    speed bound alone.
+
+    **This bounds what the MPC asks for, not what reaches Psi.** The deployed
+    clamp is on the inner loop's PI term alone and the feedforward is added
+    outside it (`crane_model/velocity_loop.py`), so a stalled axis can still
+    hand Psi more than its domain. Keeping `u` inside it is the part this node
+    owns; the rest is the inner loop's.
+    """
+    gains, _rate_hz = load_velocity_loop()
+    joints = canonical_joints()
+    return [
+        min(
+            abs(gains[joints[index]].u_clamp_min),
+            gains[joints[index]].u_clamp_max,
+            float(dq_a_max[axis]),
+        )
+        for axis, index in enumerate(ACTUATED_INDICES)
+    ]
+
+
 def hydraulics_dict(values) -> dict:
-    hydraulics = values.hydraulics
-    return {name: float(getattr(hydraulics, name)) for name in HYDRAULICS}
+    """
+    Resolve the hydraulic constants.
+
+    crane_model owns the numbers; a declared 0.0 means "take its", anything
+    else overrides it for this deployment.
+    """
+    home = hydraulic_limits()
+    declared = values.hydraulics
+    resolved = {}
+    for name in HYDRAULICS:
+        value = float(getattr(declared, name))
+        resolved[name] = home[name] if value == 0.0 else value
+    return resolved
 
 
 def _positive(value: float) -> bool:

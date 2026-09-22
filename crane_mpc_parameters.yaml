@@ -282,73 +282,14 @@ crane_mpc:
         gt_eq<>: [0.0]
 
   limits:
-    q_a_lower:
-      type: double_array
-      default_value: [-3.71, 0.0, -0.91, 0.0, -12.566370614359172, 0.2]
-      read_only: true
-      description: "Constraint 1, lower end. **Control-safe limits, not the URDF's** -- see
-        crane_model/config/control_safe_limits.yaml for provenance per number and which are weak.
-        **The boom's 0.0 is narrower than the description** (issue 128; -1.2 was the URDF's). The boom
-        four-bar stops closing at q2 = -1.1841609: below that the transmission discriminant is negative, the
-        pose does not exist and the ratio is not finite. The ratio is also negative on
-        (-1.18416, -1.15096), reaching -6.1, where constraint 6 under-reports cylinder force by over a
-        decade. The stroke limit s2 >= 1.253 m already excludes all of it at q2 >= -1.054, so the defect was
-        the box, not the row. The number is Marc's (timber_crane_model_cpp/.../joint_limits.hpp:14-30) and
-        the deployed mp_parameter_pzs100.yaml:135-224 qMinCtrl agrees to the digit; on [0.0, 1.563] the boom
-        ratio is 0.2806..0.4530, positive and bounded away from zero.
-        **A narrowed lower is not a refusal**: `position_box` never excludes the measured pose, so engaging
-        with the boom folded below 0.0 relaxes the bound to wherever the boom is. Intended -- the machine
-        cannot be below -1.184, so the relaxed bound stays on the finite branch, ratio bottoming at 0.1245,
-        and constraint 6 stays well formed. Refusing there would be a supervisor decision."
-      validation:
-        fixed_size<>: [6]
-    q_a_upper:
-      type: double_array
-      default_value: [3.71, 1.563, 1.324864, 2.236, 12.566370614359172, 0.7]
-      read_only: true
-      description: "Constraint 1, upper end; see q_a_lower. **The arm's 1.324864 is the one entry narrower
-        than the description, and it is what makes constraint 6 well formed** (issue 126). That row divides
-        joint torque by the arm's transmission ratio, which crosses zero at q3 = 1.8466647 -- a real dead
-        point, pivot and both cylinder attachments collinear -- and is negative above it, where the
-        asymmetric extend/retract bounds would be assigned the wrong way round. 4.6 was the URDF's and
-        admitted all of it. The number is Marc's (joint_limits.hpp:14-30), matched to the digit by deployed
-        mp_parameter_pzs100.yaml:146 qMaxCtrl, field-tested and 0.52 rad clear of the dead point. Force
-        authority corroborates: the static hold at q3 = 1.6 already needs 2.76x the force limit (issue 043)."
-      validation:
-        fixed_size<>: [6]
-    q_a_margin:
-      type: double_array
-      default_value: [0.048, 0.020, 0.021, 0.038, 0.127, 0.030]
-      read_only: true
-      description: "Constraint 1's margin per axis, rad (m telescope): the box carries q_a_lower + margin and
-        q_a_upper - margin. Marc's `joint_limit.safety_thresh` (0.05 everywhere) is **not** copied -- there
-        it set where a quadratic penalty started biting, here the bound is kept exactly, so the margin buys
-        distance rather than gradient. This is dq_a_max times the 60 ms transport dead time: the travel an
-        axis puts in before the loop can react. Zero is legal.
-        **It is the pre-128 dq_a_max times that dead time, deliberately** -- recomputing after that narrowing
-        would widen the effective position box, the wrong direction. So on the four axes 128 narrowed, the
-        margin now exceeds the product it came from; rotator and tool are unchanged (2.121947 x 0.06 =
-        0.12732, written 0.127).
-        A margin **never excludes the pose the machine is in** (`position_box` in crane_mpc/solver.py): a
-        fully retracted telescope sits exactly on q_a_lower[3] = 0, and one that did would fire the fallback
-        every cycle forever. Softening instead is unavailable -- constraint 1 is hard on purpose and
-        crane_msgs/SolverHealth has no violation slot, so Marc's `joint_limit.weight` has no home here."
-      validation:
-        fixed_size<>: [6]
-        lower_element_bounds<>: [0.0]
-    dq_a_max:
-      type: double_array
-      default_value: [0.764, 0.239067, 0.325733, 0.400000, 2.121947, 0.5]
-      read_only: true
-      description: "Constraint 2, |dq_a| <= dq_a^+. Every crane row is the deployed
-        qDotMinCtrl/qDotMaxCtrl (mp_parameter_pzs100.yaml:135-224); the tool row is hand-set. See
-        crane_model/config/control_safe_limits.yaml. **His box is asymmetric and this one cannot be** (single
-        magnitude per axis), so each entry is the *smaller* of his two (issue 128). It used to be the larger,
-        letting the boom extend 36 % and the telescope 58 % faster than the machine is driven
-        (-0.325963/+0.239067 and -0.630189/+0.400000). What retraction loses is the price of one bound."
-      validation:
-        fixed_size<>: [6]
-        lower_element_bounds<>: [0.0]
+    # Constraint 1's box (q_a_lower/q_a_upper/q_a_margin) and constraint 2's dq_a_max are
+    # **not declared here**: crane_model/config/control_safe_limits.yaml owns them, carries the
+    # provenance per number and is what crane_planning intersects its description-read limits
+    # with. `crane_mpc.config.control_safe_box` reads them in actuated order. A deployment
+    # override would be a second copy of the box, which is the drift issue 128 had to repair.
+    # u_max is not declared either: it is min(Psi's identified domain, dq_a_max) per axis, both
+    # crane_model tables, and `crane_mpc.config.command_domain` derives it rather than shipping
+    # the product -- which is what keeps it narrowing when either factor narrows.
     q_u_max:
       type: double_array
       default_value: [0.2, 0.2]
@@ -393,65 +334,38 @@ crane_mpc:
         decoration. Not tuned."
       validation:
         gt<>: [0.0]
-    u_max:
-      type: double_array
-      default_value: [0.764, 0.239067, 0.305, 0.400000, 2.121947, 0.5]
-      read_only: true
-      description: "Constraint 5, |u| <= u^+. **u is a joint velocity in rad/s (m/s telescope) at Psi's
-        input**, not an acceleration (C3; issue 116 changed the state layout to match). Two things bound it
-        and this is the smaller per axis (issue 117).
-        Psi's identified domain: the deployed inner loop saturates its total command to the fit's own
-        [X^min, X^max] scaled by command_authority, because outside it the spline is extrapolated past its
-        data. Asymmetric per direction; symmetric magnitude min(|X^min|, X^max) is sw 0.9357, ha 0.2880 (2-D
-        surface's first axis; 1-D fallback 0.2977), ka 0.3059, sa 0.5551, ro 2.3969, gripper identity with a
-        0.5 rad/s limit.
-        dq_a_max: the C3 chain has unit DC gain u to dq_a, so a larger u asks in steady state for a velocity
-        constraint 2 forbids -- an input box wider than the state box it drives is an infeasibility waiting
-        for a step reference.
-        Element-wise minimum, rounded inward. Issue 128's narrowing moved boom and telescope across, so Psi's
-        domain now binds on the arm alone. Marc's `acceleration.limit_scale` has no home: both arrays it
-        would scale are themselves deployment parameters."
-      validation:
-        fixed_size<>: [6]
-        lower_element_bounds<>: [0.0]
 
   hydraulics:
     pump_flow_max:
       type: double
-      default_value: 1.4e-3
+      default_value: 0.0
       read_only: true
-      description: "Q_P^max, m^3/s, before the planning factor below. From
-        crane_model/config/hydraulics.yaml `pump.flow_max`, which crane_planning also reads and which carries
-        the provenance; test_parameters_are_declared pins this and config/hydraulic_limits.yaml to it.
-        Measured 2023, **pre-retrofit and not re-verified**; post-retrofit flow limits exist for the boom and
-        telescope only, the other four carrying datasheet values, so this constraint sums six terms of which
-        two rest on a measurement of this machine. The control_recordings bags cannot close it -- /cranedata
-        carries pressures and encoder angles, not pump displacement."
+      description: "Q_P^max, m^3/s, before the planning factor below. Home is
+        crane_model/config/hydraulics.yaml `pump.flow_max`, which carries the provenance; 0.0 means take
+        crane_model's, a non-zero value overrides it for this deployment."
       validation:
-        gt<>: [0.0]
+        gt_eq<>: [0.0]
     pump_flow_planning_factor:
       type: double
-      default_value: 0.95
+      default_value: 0.0
       read_only: true
-      description: "0.95x discount on the line above -- the margin that number's weak evidence has always
-        carried. **Not a second kappa**: kappa is the planner's reservation on every physical limit so the
-        MPC has authority left to correct with, and this node is that consumer, so scaling by it here would
-        hand the reservation back. crane_planning applies exactly this factor to exactly this number, which
-        is what keeps a reference the MPC would reject a planner bug."
+      description: "Discount on the line above. Home is crane_model/config/hydraulics.yaml
+        `pump.planning_factor`, which carries the provenance; 0.0 means take crane_model's, a non-zero value
+        overrides it. **Not a second kappa**: kappa is the planner's reservation on every physical limit so
+        the MPC has authority left to correct with, and this node is that consumer, so scaling by it here
+        would hand the reservation back."
       validation:
         bounds<>: [0.0, 1.0]
     system_pressure_pa:
       type: double
-      default_value: 2.5e+7
+      default_value: 0.0
       read_only: true
-      description: "Relief setting F_i^max is derived from, Pa: cylinder force is effective piston area
-        times axis relief pressure, joint torque follows through the transmission. Chamber areas are recorded
-        but no relief setting is, so this is the one number constraint 6 cannot derive, and 2.5e7 (250 bar)
-        is a **plausible setting for a crane of this class, not a reading off this one**. Areas are asked of
-        crane_model, never repeated here, so they cannot drift. config/hydraulic_limits.yaml records why this
-        node keeps the two chamber forces apart where crane_planning takes the smaller."
+      description: "Relief setting F_i^max is derived from, Pa. Home is
+        crane_model/config/hydraulics.yaml `system_pressure_pa`, which carries the provenance; 0.0 means
+        take crane_model's, a non-zero value overrides it. Chamber areas are asked of crane_model, never
+        repeated here; this node keeps the two chamber forces apart where crane_planning takes the smaller."
       validation:
-        gt<>: [0.0]
+        gt_eq<>: [0.0]
 
   slack:
     q_u:

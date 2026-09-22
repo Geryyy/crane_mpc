@@ -1,5 +1,5 @@
 """
-Start the horizon producer, in shadow, with both of its configuration files.
+Start the horizon producer, in shadow, with its configuration file.
 
 Node-only: a component a profile includes, not a bringup. The including
 profile supplies `/robot_description`, `/joint_states` and
@@ -27,7 +27,7 @@ def generate_launch_description():
         [
             DeclareLaunchArgument("use_sim_time", default_value="false"),
             # Shadow by default; leaving it is deliberate. Passed as a node
-            # parameter so it wins over both files.
+            # parameter so it wins over the file.
             DeclareLaunchArgument(
                 "mode",
                 default_value="shadow",
@@ -75,16 +75,14 @@ def generate_launch_description():
             Node(
                 package="crane_mpc",
                 executable="crane_mpc_node",
-                # Key both config files are written under; renaming or
-                # namespacing the node silently applies neither.
+                # Key the config file is written under; renaming or
+                # namespacing the node silently applies none of it.
                 name="crane_mpc",
-                # Last file to declare a key wins, so machine limits go
-                # second (disjoint, kept so by `test_launch_contract.py`).
-                # Neither is optional: `hydraulics` defaults equal the
-                # second file's values, so a forgotten file looks identical.
+                # One file. The hydraulic constants live in crane_model and
+                # the node resolves them off its own 0.0 defaults, so nothing
+                # here repeats a number.
                 parameters=[
                     PathJoinSubstitution([share, "config", "crane_mpc.yaml"]),
-                    PathJoinSubstitution([share, "config", "hydraulic_limits.yaml"]),
                     {
                         "use_sim_time": ParameterValue(use_sim_time, value_type=bool),
                         "mode": ParameterValue(mode, value_type=str),

@@ -16,6 +16,7 @@ import numpy as np
 import pytest
 import yaml
 from crane_model import symbolic as cs
+from crane_mpc.config import machine_limits
 
 PACKAGE = Path(__file__).resolve().parent.parent
 BOOM_ROW = 1
@@ -38,8 +39,8 @@ def _ratio(name: str):
 
 
 def _shipped() -> dict:
-    with open(PACKAGE / "config" / "crane_mpc.yaml") as stream:
-        return yaml.safe_load(stream)["crane_mpc"]["ros__parameters"]["limits"]
+    """The box the node poses constraint 1 on. crane_model's, via one reader."""
+    return machine_limits()
 
 
 def _box(row: int) -> tuple:
@@ -67,19 +68,20 @@ def boom_box() -> tuple:
     return _box(BOOM_ROW)
 
 
-def test_the_declared_default_box_is_the_shipped_one():
+def test_the_box_has_no_second_home():
     """
-    The box has two homes; the tests above read one of them.
-
-    `crane_mpc_parameters.yaml`'s default runs when no config file is passed,
-    so fixing the number in only one place puts the singularities back in
-    reach with the suite green (issue 137's divergence, on a different row).
+    The box used to live in the declaration and in the shipped yaml both, so
+    fixing a number in one put the singularities back in reach with the suite
+    green (issue 137's divergence, on a different row). Now it lives in
+    crane_model and neither file may carry a row of it.
     """
-    with open(PACKAGE / "crane_mpc_parameters.yaml") as stream:
-        declared = yaml.safe_load(stream)["crane_mpc"]["limits"]
-    shipped = _shipped()
-    for row in ("q_a_lower", "q_a_upper"):
-        assert declared[row]["default_value"] == shipped[row], row
+    declared = yaml.safe_load((PACKAGE / "crane_mpc_parameters.yaml").read_text())
+    shipped = yaml.safe_load((PACKAGE / "config" / "crane_mpc.yaml").read_text())
+    for block in (
+        declared["crane_mpc"]["limits"],
+        shipped["crane_mpc"]["ros__parameters"]["limits"],
+    ):
+        assert set(block) & set(machine_limits()) == set()
 
 
 def test_the_ratio_is_finite_and_single_signed_over_the_configured_arm_box(

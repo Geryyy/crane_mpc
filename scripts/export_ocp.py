@@ -41,9 +41,9 @@ derivation (`crane_mpc.problem`); the header just records it. Its C++ reader
 
 ## No staleness guard, by decision -- except on the fit
 
-`config/hydraulics.yaml`, `config/hydraulic_limits.yaml` and the description
-all require a re-run and rebuild; **nothing fails when one of them and the
-checked-in tree disagree** -- rejected hashing inputs into generated code and
+`crane_model/config/hydraulics.yaml` and the description all require a re-run
+and rebuild; **nothing fails when one of them and the checked-in tree
+disagree** -- rejected hashing inputs into generated code and
 comparing in a test.
 
 **`c3_full_model.json` is the exception**: it exists in two copies reaching
@@ -76,6 +76,8 @@ sys.path.insert(0, str(PACKAGE.parent / "crane_ocp" / "scripts"))
 import crane_ocp_export as ox  # noqa: E402
 
 cs = ox.import_crane_symbolic(PACKAGE)
+
+from crane_model import hydraulic_limits  # noqa: E402
 
 # problem lives in the installed package (node builds it at startup); a from-scratch
 # build runs this before crane_mpc is installed, so source tree is the fallback --
@@ -399,8 +401,8 @@ def write_header(
         "// and **not** a bound -- see `export_ocp.py`. `lh`/`uh` carry the limits.",
         f"#define CRANE_MPC_OCP_CONSTRAINT_SCALE {{{scales}}}",
         "",
-        "// §3.1's two smoothing widths, as `config/hydraulics.yaml` states them and",
-        "// as they went into `Q`. Here so that a test can assert the identity",
+        "// §3.1's two smoothing widths, as `crane_model/config/hydraulics.yaml` states",
+        "// them and as they went into `Q`. Here so that a test can assert the identity",
         "// `A±(v) sqrt(v² + eps²)` from outside without restating either number --",
         "// `crane_model`'s own `hydraulics::Constants` is private to that package.",
         f"#define CRANE_MPC_OCP_SMOOTHING_EPS_ABS {constants.eps_abs!r}",
@@ -465,8 +467,8 @@ generated file that carries an absolute path, and the `main_*.c` carry a `main`.
 ## There is no staleness guard, and that is a decision
 
 The conditioning divisors and the smoothing widths come from
-`config/hydraulic_limits.yaml` and `crane_model/config/hydraulics.yaml`; the
-dynamics come from `pzs100.urdf` under `crane_model/test/description/`.
+`crane_model/config/hydraulics.yaml`; the dynamics come from `pzs100.urdf` under
+`crane_model/test/description/`.
 **Nothing in the build or the test suite fails when one of those files and this
 tree disagree.**
 
@@ -525,9 +527,8 @@ def main() -> int:
     parameters = ox.read_ros_parameters(
         PACKAGE / "config" / "crane_mpc.yaml", "crane_mpc"
     )
-    hydraulics = ox.read_ros_parameters(
-        PACKAGE / "config" / "hydraulic_limits.yaml", "crane_mpc"
-    )["hydraulics"]
+    # the constants live in crane_model; nothing here repeats them
+    hydraulics = hydraulic_limits()
 
     return ox.run(
         arguments.output,

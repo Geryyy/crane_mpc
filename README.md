@@ -548,14 +548,11 @@ bringup. Arguments are `use_sim_time`, `joint_states_topic` and
 `start_signal_action`; there is no `mode` argument, because leaving shadow is a
 deliberate separate act (issue 146) and not a launch's.
 
-**Both configuration files are passed, and `hydraulic_limits.yaml` is passed
-second.** Two reasons, and the second is the footgun: the `hydraulics` defaults
-in `crane_mpc_parameters.yaml` are equal to the values that file ships, so
-forgetting it costs nothing today and costs a constraint the day one of those
-numbers is re-measured. `test_launch_contract.py` holds all of it — that both
-files are in the list and unconditional, that their parameter sets are disjoint
-so the merge order decides nothing, and that every declared `hydraulics.*`
-parameter is carried by the machine file rather than by a default.
+**One configuration file is passed, unconditionally.** The hydraulic constants
+are not in it: they live in `crane_model/config/hydraulics.yaml` and the node
+resolves them off its own `0.0` defaults, so no file here can carry a stale copy.
+`test_launch_contract.py` holds that the file is in the list, unconditional, and
+keyed under this node's name.
 
 ## Parameters
 
@@ -577,9 +574,25 @@ built, and a problem cannot be rebuilt under a running horizon.
 once at startup against `horizon_length`, which is itself read-only, and a value
 judged against a number that cannot move must not be movable either.
 
-The hydraulic limits and their provenance are in
-[config/hydraulic_limits.yaml](config/hydraulic_limits.yaml); the pump rows come
-from `crane_model`. Weights are conservative placeholders, not machine tuning.
+### The machine's own numbers are not parameters
+
+Four groups used to be typed here and in `crane_model` both, which is how the
+planner spent a release certifying poses and speeds this node hard-refuses
+(issues 126, 128). They now have one home each:
+
+| what | where it lives | how it is read |
+|---|---|---|
+| `hydraulics.*` | `crane_model/config/hydraulics.yaml` | declared at `0.0`, which means "take crane_model's"; a non-zero value overrides it for one deployment |
+| constraint 1's box and `dq_a_max` | `crane_model/config/control_safe_limits.yaml` | `config.control_safe_box()`; **not declared**, so a deployment cannot carry a second copy |
+| constraint 5's `u^+` | the two tables above | `config.command_domain()`: the smaller of Psi's identified domain (`crane_model/config/velocity_loop.yaml`, `u_clamp_*`) and `dq_a_max`, per axis |
+| `sensor_to_valve_delay` | declared here | pinned by a test to the fit's `dead_time_s`; it is the deployed sensor-to-valve path, which that number only happens to equal |
+
+`crane_planning` intersects its description-read limits with the same box, so
+the two stacks now narrow together or not at all. Rows are keyed there by axis
+name and here by index, and the order is derived through `canonical_joints()`
+rather than written down -- only the name is stable across the two packages.
+
+Weights are conservative placeholders, not machine tuning.
 
 ## Dependency resolution
 

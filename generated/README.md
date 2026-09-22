@@ -46,8 +46,8 @@ generated file that carries an absolute path, and the `main_*.c` carry a `main`.
 ## There is no staleness guard, and that is a decision
 
 The conditioning divisors and the smoothing widths come from
-`config/hydraulic_limits.yaml` and `crane_model/config/hydraulics.yaml`; the
-dynamics come from `pzs100.urdf` under `crane_model/test/description/`.
+`crane_model/config/hydraulics.yaml`; the dynamics come from `pzs100.urdf` under
+`crane_model/test/description/`.
 **Nothing in the build or the test suite fails when one of those files and this
 tree disagree.**
 

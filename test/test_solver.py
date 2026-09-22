@@ -5,8 +5,10 @@ import pytest
 import yaml
 from acados_template import AcadosOcpSolver, AcadosSimSolver
 from ament_index_python.packages import get_package_share_directory
+from crane_model import hydraulic_limits
 from crane_model import symbolic as cs
 from crane_mpc import problem
+from crane_mpc.config import machine_limits
 from crane_mpc.horizon import Grid, Knots, resample
 from crane_mpc.solver import (
     Ocp,
@@ -29,7 +31,9 @@ def read_parameters(name):
 @pytest.fixture(scope="module")
 def parameters():
     values = read_parameters("crane_mpc.yaml")
-    values.update(read_parameters("hydraulic_limits.yaml"))
+    values.update({"hydraulics": hydraulic_limits()})
+    # neither the box nor u^+ is in the yaml; crane_model owns both
+    values["limits"].update(machine_limits())
     return values
 
 
@@ -282,3 +286,4 @@ def test_a_non_finite_input_never_reaches_a_solve(ocp, state):
     q_eq = state[cs.X_PASSIVE_POSITION : cs.X_PASSIVE_POSITION + cs.K_PASSIVE_DOF]
     with pytest.raises(ValueError, match="curvature"):
         ocp.solve(state, horizon, q_eq)
+

@@ -64,32 +64,15 @@ crane_mpc:
       terminal_scale: 10.0
 
     limits:
-      # Boom lower is Marc's 0.0, not -1.2 (issue 128): below q2=-1.1841609
-      # the four-bar pose doesn't exist, and the ratio is negative on
-      # (-1.18416,-1.15096), so -1.2 admitted 0.0158 rad of nonexistent poses.
-      # Provenance: crane_model/config/control_safe_limits.yaml.
-      q_a_lower: [-3.71, 0.0, -0.91, 0.0, -12.566370614359172, 0.2]
-      # Arm upper is the working branch, not 4.6: transmission ratio crosses
-      # zero at q3=1.8466647 (issue 126); Marc's 1.324864 sits 0.52 rad below it.
-      q_a_upper: [3.71, 1.563, 1.324864, 2.236, 12.566370614359172, 0.7]
-      # Constraint 2 is one-sided (|dq_a|<=dq_a^+), so only a symmetric box
-      # fits. Marc's asymmetric rows used to take his looser side (boom +36%,
-      # telescope +58%); now each is the smaller magnitude (issue 128): boom
-      # 0.326->0.239, telescope 0.630->0.400. Velocity rows have no
-      # `position_box`, so engaging inside this band forces braking.
-      dq_a_max: [0.764, 0.239067, 0.325733, 0.400000, 2.121947, 0.5]
-      # Marc's `joint_limit.safety_thresh`: tightens constraint 1's bound.
-      # dq_a_max * 60 ms transport delay = travel the axis can't react
-      # within. Kept at pre-128 dq_a_max on purpose (recomputing would widen
-      # the box, issue 128 forbids); rotator's 0.127 is a rounding of it.
-      q_a_margin: [0.048, 0.020, 0.021, 0.038, 0.127, 0.030]
+      # No q_a_lower/q_a_upper/q_a_margin/dq_a_max here: the control-safe box
+      # lives in crane_model/config/control_safe_limits.yaml, which carries the
+      # provenance per number and which crane_planning reads too. Resolved by
+      # `crane_mpc.config.control_safe_box`; writing one here would be the
+      # second copy issue 128 had to repair. No u_max either: constraint 5's
+      # bound is min(Psi's identified domain, dq_a_max), both crane_model's,
+      # derived by `crane_mpc.config.command_domain`.
       q_u_max: [0.2, 0.2]
       dq_u_max: [1.0, 0.5]
-      # `u` is a joint velocity at Psi's input, not acceleration: per axis,
-      # the smaller of Psi's identified domain (sw 0.9357, ha 0.2880, ka
-      # 0.3059, sa 0.5551, ro 2.3969) and dq_a_max. Narrowed dq_a_max moves
-      # boom/telescope over; only the arm is still bounded by the fit.
-      u_max: [0.764, 0.239067, 0.305, 0.400000, 2.121947, 0.5]
       # `0 <= v_s <= progress_rate_max`. Floor is structural zero -- plan
       # never runs backwards. Ceiling is catch-up headroom after a slowdown.
       progress_rate_max: 1.5

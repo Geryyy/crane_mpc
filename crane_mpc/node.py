@@ -429,7 +429,11 @@ class MpcNode(Node):
                 self.measurement(now), float(self._values.max_state_age)
             )
         if silence is None:
-            cycle.adopt_follower(self.follower_command(now), self._values.limits.u_max)
+            # u^+ is crane_model's, resolved when the problem was posed -- not a
+            # parameter, so the only copy is the one the solver was configured on
+            cycle.adopt_follower(
+                self.follower_command(now), self._ocp.parameters["limits"]["u_max"]
+            )
             silence = cycle.propagate()
         if silence is not None:
             self.fall_silent(silence)

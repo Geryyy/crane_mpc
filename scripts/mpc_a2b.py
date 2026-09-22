@@ -38,9 +38,11 @@ import export_ocp  # noqa: E402
 # same solver-config pieces the node writes, defined once; source tree is the
 # fallback for a from-scratch build, same as export_ocp resolves cs
 try:
+    from crane_mpc import config as ocp_config  # noqa: E402
     from crane_mpc import solver as ocp_runtime  # noqa: E402
 except ImportError:
     sys.path.insert(0, str(PACKAGE))
+    from crane_mpc import config as ocp_config  # noqa: E402
     from crane_mpc import solver as ocp_runtime  # noqa: E402
 
 configure_fixed_data = ocp_runtime.configure_fixed_data
@@ -209,16 +211,16 @@ def positive(value: float, name: str, allow_zero: bool = False) -> None:
 
 def load_settings(arguments: argparse.Namespace) -> tuple[dict, dict]:
     """Load deployment YAML and apply command-line tuning overrides."""
-    # same two reads export_ocp.generate makes, through the same helper -- harness
+    # same two reads export_ocp.main makes, through the same helpers -- harness
     # can't drift from the exporter about what a deployment is
     parameters = export_ocp.ox.read_ros_parameters(
         PACKAGE / "config" / "crane_mpc.yaml", "crane_mpc"
     )
-    hydraulics = export_ocp.ox.read_ros_parameters(
-        PACKAGE / "config" / "hydraulic_limits.yaml", "crane_mpc"
-    )["hydraulics"]
+    hydraulics = export_ocp.hydraulic_limits()
     # deep-copy through YAML: nested mapping also used to form the cache signature below
     parameters = yaml.safe_load(yaml.safe_dump(parameters))
+    # the box and u^+ are crane_model's; the yaml carries neither, same as the node
+    parameters["limits"].update(ocp_config.machine_limits())
     if arguments.dt is not None:
         parameters["Ts"] = arguments.dt
     if arguments.horizon_knots is not None:

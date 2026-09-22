@@ -6,7 +6,13 @@ import numpy as np
 import pytest
 import yaml
 from ament_index_python.packages import get_package_share_directory
-from crane_mpc.config import MpcConfigError, check_payload, check_settings
+from crane_model import hydraulic_limits
+from crane_mpc.config import (
+    MpcConfigError,
+    check_payload,
+    check_settings,
+    machine_limits,
+)
 
 
 def read_parameters(name):
@@ -18,7 +24,9 @@ def read_parameters(name):
 @pytest.fixture
 def shipped():
     parameters = read_parameters("crane_mpc.yaml")
-    parameters.update(read_parameters("hydraulic_limits.yaml"))
+    parameters.update({"hydraulics": hydraulic_limits()})
+    # the shipped yaml carries neither; the node resolves both off crane_model
+    parameters["limits"].update(machine_limits())
     return copy.deepcopy(parameters)
 
 
