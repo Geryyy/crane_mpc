@@ -129,7 +129,19 @@ crane_mpc:
       # The brief's target is the endpoint, so goal median picks it: 20, a
       # third off it for 12% more path error. 30 is the choice if worst-case
       # arrival ever matters more than typical.
-      terminal_scale: 20.0
+      # Re-picked once the tool row existed. 20 moves at tool 1000 /
+      # progress 20480, goal median and refused cycles per seed:
+      #
+      #    5    31.4 (0.0%) | 46.1 (0.6%)
+      #   20    23.7 (1.0%) | 30.7 (0.2%)
+      #   60    22.1 (0.6%) | 31.7 (0.1%)
+      #
+      # 20 and 60 are one number within run-to-run noise; 60 refuses less on
+      # both seeds, so 60. Refusals are all ACADOS_MINSTEP and come from the
+      # progress weight's four-order gap over the tracking rows -- acados
+      # refuses `qpscaling_*` under SQP_RTI, and `levenberg_marquardt` large
+      # enough to help destroys tracking (goal median 24 -> 210 mm at 1e-4).
+      terminal_scale: 60.0
 
     limits:
       # No q_a_lower/q_a_upper/q_a_margin/dq_a_max here: the control-safe box
