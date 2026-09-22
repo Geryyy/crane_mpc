@@ -41,7 +41,18 @@ crane_mpc:
       dq_u_settled: [0.04, 0.04]
 
     weights:
-      q_a: [4.0, 4.0, 4.0, 4.0, 1.0, 1.0]
+      # 10x from 4.0/1.0. At the old row the machine parked ~0.2 rad off the
+      # plan and stayed: tracking was too cheap against the rest of the cost and
+      # nothing integrates a standing error away. No single rival term is to
+      # blame -- u, dq_a, dq_u or progress switched off each leaves 0.47-0.55 on
+      # mpc_a2b's model-matched plant, against 0.504 as shipped. Two levers do
+      # work, this one and terminal_scale 10x; that one costs 6x the solve
+      # (3.6 -> 22 ms median, 3 of 178 cycles over budget), so it is this one.
+      # `--goal out` on the full chain: 0.202 -> 0.068 rad, 0.504 -> 0.082 on
+      # the model-matched plant. Pump peak 0.62 -> 0.85 of the planning limit,
+      # sway within 10%, no QP failure, solve 2.8 -> 3.6 ms median. Not zero and
+      # no weight makes it zero (0.046 at 100x) -- that wants an estimator.
+      q_a: [40.0, 40.0, 40.0, 40.0, 10.0, 10.0]
       dq_a: [0.4, 0.4, 0.4, 0.4, 0.1, 0.1]
       # Sway damped by rate alone, deliberately: q_eq frozen at measurement,
       # so this prices boom+arm travel, not swing. Node's own centre 20.0 is
@@ -55,7 +66,9 @@ crane_mpc:
       # 1.0 -- the two move together or not at all (issue 137).
       u: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
       # `lag`: tracking error on the reference's direction of travel, slewing
-      # axis only, at Marc's ratio against q_a's 4.0. `progress_rate`:
+      # axis only. Marc's ratio was against q_a's 4.0 and no longer holds -- the
+      # q_a raise above deliberately left this alone, which is what was measured.
+      # `progress_rate`:
       # regulator toward 1s plan/1s wall clock, measured -- Marc's ratio (0.8)
       # settles at 0.34 here.
       lag: 40.0
