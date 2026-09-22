@@ -399,7 +399,85 @@ def planned_path(plan):
     )
 
 
-def summarise(mpc, data, parameters, hydraulics, plan, chain, figures: bool) -> None:
+#: How finely the path is sampled when measuring distance to it. The metric is a
+#: minimum over `theta`, so this sets its resolution, not the path's.
+PATH_SAMPLES = 400
+
+
+def tool_positions(planner, rows: np.ndarray) -> np.ndarray:
+    """TCP position per canonical configuration, in the mounting base."""
+    return np.array(
+        [
+            planner.model.forward_kinematics(
+                row, Frame.MOUNTING_BASE, Frame.TCP
+            ).position_m
+            for row in rows
+        ]
+    )
+
+
+def tracking_report(planner, data, path, chain, goal) -> dict:
+    """
+    Score this move the way the brief does: millimetres at the tool.
+
+    Two different questions, and the formulation answers them separately:
+
+    * **off the path** -- the shortest distance from the tool to the curve as a
+      *set*, minimised over `theta`. A machine exactly on the path but behind it
+      scores zero here, which is the whole point of following a path rather than
+      a resample of one.
+    * **off the goal** -- where the tool stopped against where the move was for.
+      Spending time is free on the first metric and not on this one.
+
+    The path is joint-space, so its tool positions are taken with the passive
+    pair at rest; the machine's are taken with the sway it actually had, because
+    that is where the tool actually was.
+    """
+    measured = tool_positions(
+        planner,
+        viewing.canonical_rows(
+            data.state[:, POSITION], data.state[:, PASSIVE], chain.q_tool
+        ),
+    )
+    places = np.linspace(0.0, 1.0, PATH_SAMPLES)
+    on_path = ocp_runtime.bspline.value(
+        places, path.control, ocp_runtime.problem.PATH_KNOTS
+    )
+    # `passive_equilibrium` wants all six actuated rows, tool included, so the
+    # path's five go through a canonical frame first.
+    framed = viewing.canonical_rows(
+        on_path, np.zeros((len(on_path), len(PASSIVE_INDICES))), chain.q_tool
+    )
+    resting = np.array(
+        [
+            planner.model.passive_equilibrium(row[list(ACTUATED_INDICES)])
+            for row in framed
+        ]
+    )
+    curve = tool_positions(
+        planner, viewing.canonical_rows(on_path, resting, chain.q_tool)
+    )
+    # (samples, path samples) -- small enough to take whole, and a nearest-point
+    # search that starts from the wrong end is worse than no metric at all.
+    gap = np.linalg.norm(measured[:, None, :] - curve[None, :, :], axis=2).min(axis=1)
+    score = {
+        "path_worst": 1000 * float(gap.max()),
+        "path_rms": 1000 * float(np.sqrt((gap**2).mean())),
+        "goal_final": 1000 * float(np.linalg.norm(measured[-1] - goal)),
+        "cycles": int(data.fallback.size),
+        "refused": int(np.count_nonzero(data.status)),
+    }
+    print(
+        f"  TCP off the path:     worst {score['path_worst']:7.1f} mm   "
+        f"rms {score['path_rms']:7.1f} mm"
+    )
+    print(f"  TCP off the goal:     final {score['goal_final']:7.1f} mm")
+    return score
+
+
+def summarise(
+    mpc, data, parameters, hydraulics, plan, chain, planner, path, figures: bool
+) -> dict:
     """Print what the move did, and write the figure and CSV where they are wanted."""
     if figures and not mpc.no_plot:
         mpc_a2b.plot(mpc.output.resolve(), data, parameters, hydraulics, mpc.show)
@@ -408,8 +486,42 @@ def summarise(mpc, data, parameters, hydraulics, plan, chain, figures: bool) -> 
         mpc_a2b.write_csv(csv_path, data)
         print(f"Wrote data: {csv_path}")
     mpc_a2b.print_summary(data, parameters)
+    # The plan's own last configuration, not the CLI pose: a random goal has no
+    # pose to quote and the planner's endpoint is what the move was actually for.
+    goal = tool_positions(planner, plan.q[-1:])[0]
+    score = tracking_report(planner, data, path, chain, goal)
     print(f"reference: {plan.duration:.2f} s plan, {plan.time.size} samples")
     chain.report()
+    return score
+
+
+def benchmark(scores: list[dict]) -> None:
+    """
+    One block per run, so two runs of the same seed are read side by side.
+
+    The worst move is the number that matters and the median is the one that
+    flatters, so both are here. `refused` rides along because a move that fails
+    its way to a short trajectory can otherwise look like a well-tracked one.
+    """
+    if len(scores) < 2:
+        return
+    worst = lambda key: max(score[key] for score in scores)  # noqa: E731
+    median = lambda key: float(np.median([score[key] for score in scores]))  # noqa: E731
+    cycles = sum(score["cycles"] for score in scores)
+    refused = sum(score["refused"] for score in scores)
+    print(f"\nBenchmark over {len(scores)} moves")
+    print(
+        f"  TCP off the path:     worst {worst('path_worst'):7.1f} mm   "
+        f"median rms {median('path_rms'):7.1f} mm"
+    )
+    print(
+        f"  TCP off the goal:     worst {worst('goal_final'):7.1f} mm   "
+        f"median     {median('goal_final'):7.1f} mm"
+    )
+    print(
+        f"  cycles:               {cycles} of which {refused} refused "
+        f"({100.0 * refused / max(1, cycles):.1f}%)"
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -452,6 +564,7 @@ def main(argv: list[str] | None = None) -> int:
         markers = viewing.Markers(plant)
 
     moves = 0
+    scores: list[dict] = []
     while True:
         plan = plan_move(planner, start, options, rng)
         if plan is None:
@@ -466,6 +579,7 @@ def main(argv: list[str] | None = None) -> int:
             markers.path("plan", plan.q, PLAN_RGBA, width=0.02)
 
         rows = list(cs.K_PLANNED_ROWS)
+        path = planned_path(plan)
         mpc.a, mpc.b = plan.q[0, rows], plan.q[-1, rows]
         mpc.move_duration = plan.duration
         mpc.tool_position = start.q_tool
@@ -484,7 +598,7 @@ def main(argv: list[str] | None = None) -> int:
                 reference=tune_mpc.plan_reference(plan),
                 plant=chain.advance,
                 passive_guess=plan.q[0, list(PASSIVE_INDICES)],
-                path=planned_path(plan),
+                path=path,
                 horizon=None if markers is None else chain.show_horizon,
             )
         except (CraneModelError, KeyError, ValueError, RuntimeError) as error:
@@ -495,7 +609,19 @@ def main(argv: list[str] | None = None) -> int:
             # `simulate` logged the predicted states `advance` handed the solver;
             # put the machine's own back before summarising.
             data = replace(data, state=np.vstack([data.state[:1], chain.measured]))
-        summarise(mpc, data, parameters, hydraulics, plan, chain, figures=rng is None)
+        scores.append(
+            summarise(
+                mpc,
+                data,
+                parameters,
+                hydraulics,
+                plan,
+                chain,
+                planner,
+                path,
+                figures=rng is None,
+            )
+        )
 
         moves += 1
         if rng is None or (options.random and moves >= options.random):
@@ -510,6 +636,7 @@ def main(argv: list[str] | None = None) -> int:
         # the next move opens at rest with the load hanging at equilibrium.
         start = next_start(plant, planner)
 
+    benchmark(scores)
     if plant.viewer is not None:
         print("close the viewer window to finish")
     plant.hold_viewer()
