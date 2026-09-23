@@ -150,4 +150,11 @@
 #define CRANE_MPC_OCP_SOFT_PASSIVE_POSITION 5
 #define CRANE_MPC_OCP_SOFT_PASSIVE_VELOCITY 12
 
+// The rest of the tree, uncommitted: sha256 over every generated file
+// outside `REVIEWED`, on normalised content. A description or hydraulics
+// edit lands in the CasADi bodies and nothing else here (measured: a link
+// mass moves `impl_dae_*.c` and `_output.c`, the numbers above hold), so
+// shipping those bodies was the whole guard on them. This replaces it.
+#define CRANE_MPC_OCP_GENERATED_DIGEST "1cdb17f9ee72f162"
+
 #endif  // CRANE_MPC_OCP_GENERATED_H_
