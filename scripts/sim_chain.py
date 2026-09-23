@@ -62,6 +62,7 @@ from crane_model.conventions import (  # noqa: E402
 )
 from crane_model.errors import CraneModelError  # noqa: E402
 from crane_model.mujoco_plant import (  # noqa: E402
+    GROUND_Z,
     NX_RIGID,
     PLANNED_INDICES,
     TOOL_INDEX,
@@ -320,7 +321,8 @@ class Chain:
             )
 
 
-#: draws before a goal, or `plan_move`, gives up. At ~1/3 accepted, a 0.8% tail.
+#: draws before a goal, or `plan_move`, gives up. 62% of joint draws clear both
+#: collision and ground (2000 draws), so the tail is ~1e-5.
 GOAL_DRAWS = 12
 
 
@@ -330,6 +332,11 @@ def random_goal(planner, start, rng) -> tuple[np.ndarray, float]:
 
     Sampling joint space keeps the pose reachable by construction; a far draw can
     still leave the planner's IK in a local minimum, and `plan_move` redraws.
+
+    Joint limits alone let the tool swing below the ground the machine stands on
+    -- nothing in `collision_query` knows about the floor. Such a goal is one no
+    operator would give, so it is redrawn, with the same clearance the geometry
+    check uses.
     """
     lower = np.where(planner.limits.bounded, planner.limits.lower, -np.pi)
     upper = np.where(planner.limits.bounded, planner.limits.upper, np.pi)
@@ -343,12 +350,13 @@ def random_goal(planner, start, rng) -> tuple[np.ndarray, float]:
         # folded draws are thrown back: a plan ending there leaves the next move
         # with a start the planner will not measure.
         clearance = planner.model.collision_query(q, [])
+        pose = planner.model.forward_kinematics(q, Frame.MOUNTING_BASE, Frame.TCP)
         if (
             not clearance.collision
             and clearance.minimum_distance_m > planner.config.margin_safety
+            and pose.position_m[2] > GROUND_Z + planner.config.margin_safety
         ):
             break
-    pose = planner.model.forward_kinematics(q, Frame.MOUNTING_BASE, Frame.TCP)
     sample = tune_planner.Start(q=q, dq_a=np.zeros(len(PLANNED)))
     return np.asarray(pose.position_m), tune_planner.start_yaw(planner, sample)
 
