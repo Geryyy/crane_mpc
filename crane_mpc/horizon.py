@@ -5,7 +5,7 @@ Read off the wire, resampled onto the OCP's grid, written back as
 `trajectory_msgs/JointTrajectory`. Python port of `src/horizon_source.cpp`,
 knot-for-knot: arrays, not a vector of structs, since resample is one
 Hermite evaluation over all N knots, not N of them. ROS-free apart from the
-two marshalling functions, so the maths is tested offline.
+marshalling functions, so the maths is tested offline.
 """
 
 from __future__ import annotations
@@ -17,6 +17,8 @@ import numpy as np
 from builtin_interfaces.msg import Duration
 from crane_model import symbolic as cs
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
+
+from . import problem
 
 ACTUATED_DOF = cs.K_ACTUATED_DOF
 PASSIVE_DOF = cs.K_PASSIVE_DOF
@@ -218,6 +220,62 @@ def reference_from_message(message: JointTrajectory, joints):
         reference.q_a_ref[index] = positions[column]
         reference.dq_a_ref[index] = velocities[column]
     return reference, ""
+
+
+def path_from_message(message, joints):
+    """
+    Lift the planned columns out of a `crane_msgs/JointPath`.
+
+    Returns `(samples, duration, why)` -- `samples` is `None` and `why` says why
+    on a message this node cannot use. The rows are uniform in the planner's own
+    `sigma`, which is exactly what `solver.path_control` fits, so nothing here
+    interpolates: refusing a malformed message is the whole job.
+    """
+    names = list(message.joint_names)
+    columns = []
+    for joint in joints:
+        if joint not in names:
+            return None, 0.0, f"the path does not name {joint}"
+        columns.append(names.index(joint))
+    width = len(names)
+    if width == 0:
+        return None, 0.0, "the path names no joints"
+
+    flat = np.asarray(message.q_path, dtype=float)
+    if flat.size == 0 or flat.size % width:
+        return (
+            None,
+            0.0,
+            (
+                f"the path carries {flat.size} values, which is not a whole number of "
+                f"{width}-joint rows"
+            ),
+        )
+    rows = flat.size // width
+    if rows < problem.PATH_POINTS:
+        return (
+            None,
+            0.0,
+            (
+                f"the path carries {rows} samples, fewer than the "
+                f"{problem.PATH_POINTS} control points it is fitted to, so the fit "
+                "would be underdetermined rather than an approximation of the path"
+            ),
+        )
+    if not np.all(np.isfinite(flat)):
+        return None, 0.0, "the path carries a value that is not finite"
+
+    duration = duration_seconds(message.duration)
+    if not np.isfinite(duration) or duration <= 0.0:
+        return (
+            None,
+            0.0,
+            (
+                f"the path is spent in {duration:.3g} s; a plan that takes no time has "
+                "no pace to price progress against"
+            ),
+        )
+    return flat.reshape(rows, width)[:, columns], duration, ""
 
 
 def horizon_to_message(horizon: Knots, joints, first_knot_valid_at):

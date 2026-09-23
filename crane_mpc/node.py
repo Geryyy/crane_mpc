@@ -13,7 +13,7 @@ import rclpy
 from action_msgs.msg import GoalStatus, GoalStatusArray
 from control_msgs.msg import JointTrajectoryControllerState
 from crane_model import CraneModel, Payload, Tool, canonical_joints
-from crane_msgs.msg import PayloadEstimate, SolverHealth, SwaySettled
+from crane_msgs.msg import JointPath, PayloadEstimate, SolverHealth, SwaySettled
 from crane_msgs.srv import SetPayload
 from diagnostic_msgs.msg import DiagnosticArray
 from nav_msgs.msg import Path
@@ -31,6 +31,7 @@ from .cycle import (
     ACTUATED_INDICES,
     CONTROLLER_STATE_TOPIC,
     HORIZON_TOPIC,
+    JOINT_PATH_TOPIC,
     JOINT_STATE_TOPIC,
     PASSIVE_DOF,
     PASSIVE_INDICES,
@@ -50,7 +51,7 @@ from .cycle import (
     Silence,
 )
 from .parameters import crane_mpc as parameter_library
-from .solver import Ocp
+from .solver import Ocp, path_control
 
 #: How often a repeated complaint is logged, ms.
 WARN_PERIOD = 5.0
@@ -128,6 +129,7 @@ class MpcNode(Node):
         self._passive_velocity_stamp: Time | None = None
 
         self._reference_message: JointTrajectory | None = None
+        self._path_message: JointPath | None = None
         self._payload = Payload()
         self._payload_estimate: PayloadEstimate | None = None
         self._controller_state: JointTrajectoryControllerState | None = None
@@ -243,6 +245,7 @@ class MpcNode(Node):
         self.create_subscription(
             JointTrajectory, REFERENCE_TOPIC, self.on_reference, _latched()
         )
+        self.create_subscription(JointPath, JOINT_PATH_TOPIC, self.on_path, _latched())
         self.create_subscription(
             String, ROBOT_DESCRIPTION_TOPIC, self.on_robot_description, _latched()
         )
@@ -296,6 +299,10 @@ class MpcNode(Node):
     def on_reference(self, message: JointTrajectory) -> None:
         self._reference_message = message
         self.adopt_reference()
+
+    def on_path(self, message: JointPath) -> None:
+        self._path_message = message
+        self.adopt_path()
 
     def on_start_signal(self, message: GoalStatusArray) -> None:
         """Is a goal live on the action this node is gated on."""
@@ -367,6 +374,7 @@ class MpcNode(Node):
                 "This is a swept solver, not the one this package ships."
             )
         self.adopt_reference()
+        self.adopt_path()
 
     def ready(self) -> bool:
         return self._ocp is not None and self._model is not None
@@ -388,6 +396,33 @@ class MpcNode(Node):
             reference, Time.from_msg(self._reference_message.header.stamp).nanoseconds
         )
         self._reference_message = None
+
+    def adopt_path(self) -> None:
+        """
+        Fit the planner's curve once, here, rather than once per cycle in the OCP.
+
+        Refused, the node keeps whatever curve it had and `Cycle.resolved_path`
+        pairs by stamp, so a refusal cannot silently attach the last plan's
+        geometry to this one -- it falls back to the window fit instead.
+        """
+        if self._path_message is None or not self.ready():
+            return
+        samples, duration, why = hz.path_from_message(
+            self._path_message, self._joints[:PLANNED_DOF]
+        )
+        if samples is None:
+            self.get_logger().warn(
+                f"The path on {JOINT_PATH_TOPIC} was refused, so the horizon's own "
+                f"knots are the path this node follows: {why}."
+            )
+            self._path_message = None
+            return
+        self._cycle.adopt_path(
+            path_control(samples),
+            duration,
+            Time.from_msg(self._path_message.header.stamp).nanoseconds,
+        )
+        self._path_message = None
 
     def adopt_mode(self, requested: str) -> None:
         previous = self._cycle.adopt_mode(requested)

@@ -3,14 +3,17 @@
 import numpy as np
 import pytest
 from builtin_interfaces.msg import Duration
+from crane_mpc import problem
 from crane_mpc.horizon import (
     Grid,
     Knots,
     Rejection,
     horizon_to_message,
+    path_from_message,
     reference_from_message,
     resample,
 )
+from crane_msgs.msg import JointPath
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 
 JOINTS = ["sw", "ha", "ka", "sa", "ro", "gr"]
@@ -153,3 +156,68 @@ def test_the_effort_field_is_the_feedforward_velocity_not_a_torque():
     assert point.effort[6] == pytest.approx(0.7 - 0.2)
     # Passive rows carry no command, and the tool is pinned so both terms are 0.
     assert [point.effort[row] for row in (4, 5, 7)] == pytest.approx([0.0, 0.0, 0.0])
+
+
+# -- the planner's curve on the wire --------------------------------------------
+
+PLANNED = ["sw", "ha", "ka", "sa", "ro"]
+#: Enough rows to determine the fit; fewer is refused, not approximated.
+ROWS = problem.PATH_POINTS
+
+
+def joint_path(rows=ROWS, names=None, duration=2.0):
+    """A `JointPath` whose value at row `i`, column `j` is `i + j / 10`."""
+    names = PLANNED if names is None else names
+    message = JointPath()
+    message.joint_names = list(names)
+    message.q_path = [
+        float(row) + column / 10.0
+        for row in range(rows)
+        for column in range(len(names))
+    ]
+    whole = int(duration)
+    message.duration = Duration(sec=whole, nanosec=int((duration - whole) * 1e9))
+    return message
+
+
+def test_the_path_is_lifted_by_name_and_not_by_column():
+    # Wire order reversed against this node's: read by column the rows come back
+    # mirrored, and a mirrored path is a different move at the same cost.
+    message = joint_path(names=list(reversed(PLANNED)))
+    samples, duration, why = path_from_message(message, PLANNED)
+    assert why == ""
+    assert duration == pytest.approx(2.0)
+    expected = np.array(
+        [
+            [row + (len(PLANNED) - 1 - column) / 10.0 for column in range(len(PLANNED))]
+            for row in range(ROWS)
+        ]
+    )
+    assert samples == pytest.approx(expected)
+
+
+@pytest.mark.parametrize(
+    "spoil, clause",
+    [
+        (lambda m: m.q_path.pop(), "whole number"),
+        (lambda m: setattr(m, "duration", Duration()), "no pace"),
+        # A coarse path is what a second producer would send, and it is the one
+        # that fails silently: `pinv` answers an underdetermined fit with a curve
+        # that dives toward zero rather than refusing.
+        (
+            lambda m: setattr(m, "q_path", m.q_path[: 10 * len(PLANNED)]),
+            "underdetermined",
+        ),
+        (lambda m: setattr(m, "q_path", m.q_path[: len(PLANNED)]), "underdetermined"),
+        (
+            lambda m: setattr(m, "joint_names", ["sw", "ha", "ka", "sa", "zz"]),
+            "not name ro",
+        ),
+    ],
+)
+def test_a_path_this_node_cannot_use_is_refused_whole(spoil, clause):
+    message = joint_path()
+    spoil(message)
+    samples, _, why = path_from_message(message, PLANNED)
+    assert samples is None
+    assert clause in why

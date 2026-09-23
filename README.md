@@ -310,7 +310,10 @@ ramp runs out of plan and produces the zero. A ramp here would be a second
 producer of the same command, from the process that has just admitted it cannot
 compute one.
 
-### Nothing here fits a spline
+### Nothing here fits the outgoing spline
+
+This is the seam to the controller, not the path: the node does fit a clamped
+B-spline, once per plan, to the geometry on `/crane/joint_path` below.
 
 Two mechanisms hold the seam between horizons and this package owns neither
 outright: agreement by construction is issue 049's `x_0`, the measured state
@@ -559,6 +562,27 @@ recovery from an abort is to plan again. `sensor_msgs/JointState`
 carries no validity flag, so freshness is the whole test on both halves. The receiver's expiry ramp is the defined response. Past the end of a
 still-fresh reference, the reference supplied to the OCP holds the goal at zero
 velocity.
+
+### The path is geometry, and the reference is the same plan in time
+
+`crane_planning` publishes both: `crane_msgs/JointPath` on `/crane/joint_path`,
+latched, the planned curve `q_a(sigma)` sampled uniformly in its own parameter,
+and the timed `JointTrajectory` on `/crane/reference`. The cost is written against
+the curve and chooses where on it to be, so it needs no timing; `duration` is the
+pace the progress row is priced against, not a schedule.
+
+The two are paired by `header.stamp`, and only a pair drives: a curve whose stamp
+is not the running reference's belongs to another plan, and the node falls back to
+fitting this cycle's own resampled window — which is also what a deployment whose
+planner publishes no geometry keeps doing, unchanged. The curve is fitted to
+`PATH_POINTS` control points once, when it arrives.
+
+On the curve, the positions that go out to the controller are the curve at the
+progress the solve chose, `c(origin + s)` per knot, rather than the timed
+resample: the same quantity the cost measures, so the follower chases where the
+optimizer planned to be and not where the plan's own timing said to be at that
+instant. Still a plan quantity, so the JTC's position error — which on a velocity
+interface is its integral action — keeps something real to integrate.
 
 ## Launch
 

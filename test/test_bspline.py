@@ -68,3 +68,31 @@ def test_the_expression_is_the_curve_and_its_slope():
     )
     analytic = np.array([np.asarray(slope(place)).ravel() for place in probe])
     assert np.abs(analytic - difference).max() < 1.0e-6
+
+
+def test_de_boor_agrees_with_the_basis_sum():
+    """`value` evaluates by local support; the basis sum is what it has to match."""
+    rng = np.random.default_rng(0)
+    control = bspline.fit(np.cumsum(rng.normal(size=(120, 5)), axis=0) / 120, 30)
+    knots = bspline.knot_vector(30)
+    # The ends and outside the domain included: `value` clips, and `_basis` closes
+    # its last span, so the two have to agree about `theta = 1` as well.
+    theta = np.concatenate([[0.0, 1.0, -0.2, 1.4], rng.random(40)])
+    summed = np.array(
+        [
+            sum(
+                control[index] * bspline._basis(place, bspline.ORDER, index, knots)
+                for index in range(control.shape[0])
+            )
+            for place in np.clip(theta, 0.0, 1.0)
+        ]
+    )
+    assert bspline.value(theta, control, knots) == pytest.approx(summed, abs=1e-14)
+
+
+def test_a_fit_that_cannot_be_determined_is_refused_not_approximated():
+    # Two samples leave every interior control point at the minimum-norm answer,
+    # which in control-point space is joint space: the curve would leave the start,
+    # dive toward all-joints-zero and come back to the goal.
+    with pytest.raises(ValueError, match="cannot determine"):
+        bspline.fit(np.linspace(np.zeros(5), np.ones(5), 2), 30)

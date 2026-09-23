@@ -14,10 +14,12 @@ from dataclasses import dataclass, field
 import numpy as np
 from crane_model import symbolic as cs
 
+from . import bspline, problem
 from . import horizon as hz
-from .solver import PROGRESS_ROWS, Outcome
+from .solver import PROGRESS_ROWS, Outcome, PathCycle
 
 REFERENCE_TOPIC = "/crane/reference"
+JOINT_PATH_TOPIC = "/crane/joint_path"
 JOINT_STATE_TOPIC = "/joint_states"
 PAYLOAD_ESTIMATE_TOPIC = "/crane/payload_estimate"
 CONTROLLER_STATE_TOPIC = "/crane/controller_state"
@@ -188,6 +190,16 @@ class Cycle:
         self.reference_stamp_ns = 0
         self.reference_progress = 0.0
         self.reference_anchored = False
+        # The planner's own geometry, when it publishes it: control points fitted
+        # once per plan, the seconds it means to spend the whole path in, and how
+        # much of the path earlier cycles already spent. Without it `Ocp` fits
+        # this cycle's own window instead and `path_origin` goes unread.
+        self.path_control: np.ndarray | None = None
+        self.path_duration = 0.0
+        self.path_stamp_ns = 0
+        self.path_origin = 0.0
+        #: The path this cycle is written against, or `None` for the window fit.
+        self.path: PathCycle | None = None
         # `watch_progress` state; only published cycles feed it.
         self.progress_held = 0.0
         self.progress_stalled = False
@@ -253,11 +265,37 @@ class Cycle:
         self.reference = reference
         self.reference_stamp_ns = stamp_ns
         self.reference_anchored = False
+        # A new plan starts at its own beginning. The reference anchors the plan,
+        # so this belongs here and not in `adopt_path`: a curve is geometry and
+        # says nothing about how much of it has been spent.
+        self.path_origin = 0.0
         # Stall watch is per plan: a new reference is the re-plan a stall asks for.
         self.forget_stall()
         # A preparation is a linearisation of the plan that was; this is another
         # plan. `forget_plan` is not called here -- the warm start survives a
         # re-plan -- so the preparation has to be dropped on its own.
+        self.forget_preparation()
+
+    def adopt_path(self, control: np.ndarray, duration: float, stamp_ns: int) -> None:
+        """
+        Take the planner's curve, already fitted, for the plan stamped `stamp_ns`.
+
+        Stored rather than used: `resolved_path` only reaches for it once the
+        reference of the same stamp is the one this cycle is running, so a curve
+        that arrives before its reference, or after the next one, drives nothing.
+        """
+        self.path_control = np.asarray(control, dtype=float)
+        self.path_duration = float(duration)
+        self.path_stamp_ns = int(stamp_ns)
+        if self.reference_anchored and self.resolved_path() is not None:
+            # It arrived after its own reference, so that reference was anchored as
+            # a time-indexed one and has been spent as one. Both readings go back to
+            # the plan's start together: nothing has been spent *on the curve*, and
+            # leaving them apart is the truncation the anchor above describes.
+            self.reference_progress = 0.0
+            self.path_origin = 0.0
+        # A standing preparation was linearised about whichever path last cycle
+        # resolved; this may be the cycle that stops being the window fit.
         self.forget_preparation()
 
     def adopt_mode(self, requested: str) -> str:
@@ -318,9 +356,18 @@ class Cycle:
 
         self.anchor_cadence(now_ns)
         if not self.reference_anchored:
+            # Skipping the planning latency is what a time-indexed reference wants:
+            # the plan is that old, so its first seconds are past. A path-following
+            # cost wants the opposite -- its first stage is `c(origin)` and `origin`
+            # starts at the curve's start, so anchoring this reading L seconds in
+            # puts the two readings of one plan at different places on it, and it is
+            # this one the `max_reference_age` gate above reads. Anchored at L, that
+            # gate fires (L - max_reference_age)/duration of the path early.
             self.reference_progress = (
-                self.next_first_knot_ns - self.reference_stamp_ns
-            ) / 1e9
+                0.0
+                if self.resolved_path() is not None
+                else (self.next_first_knot_ns - self.reference_stamp_ns) / 1e9
+            )
             self.reference_anchored = True
         self.reference_progress = max(
             self.reference_progress, float(self.reference.t[0])
@@ -336,7 +383,35 @@ class Cycle:
                 f"horizon, so nothing is published on {HORIZON_TOPIC}: {rejection}.",
             )
         self.horizon = horizon
+        self.path = self.resolved_path()
         return None
+
+    def resolved_path(self) -> PathCycle | None:
+        """
+        Give the planner's curve for the plan now running, or `None` to fit the window.
+
+        Paired by stamp: the reference and the curve are one plan in two forms
+        and are published together, so a mismatch means one of them is the other
+        plan's. Falling back rather than refusing keeps a node whose planner does
+        not publish geometry working exactly as it did.
+        """
+        if self.path_control is None or self.path_duration <= 0.0:
+            return None
+        if self.path_stamp_ns != self.reference_stamp_ns:
+            return None
+        return PathCycle(
+            control=self.path_control,
+            origin=min(max(self.path_origin, 0.0), 1.0),
+            nominal_rate=1.0 / self.path_duration,
+        )
+
+    def path_span(self) -> float:
+        """Seconds one whole unit of path parameter stands for, on this cycle's path."""
+        if self.path is not None:
+            return 1.0 / self.path.nominal_rate
+        # The window fit spans one horizon, which is what `nominal_progress_rate`
+        # inverts -- so this is the same number, read off the grid.
+        return self.grid.duration()
 
     def anchor_cadence(self, now_ns: int) -> None:
         """Decide when the first knot takes effect: `now` plus transport delay."""
@@ -449,7 +524,9 @@ class Cycle:
             if on_preparation:
                 solution = self.ocp.feedback(self.x0)
             else:
-                solution = self.ocp.solve(self.x0, self.horizon, self.q_eq, self.guess)
+                solution = self.ocp.solve(
+                    self.x0, self.horizon, self.q_eq, self.guess, path=self.path
+                )
         except Exception as error:
             self.applied_previous = False
             self.consecutive_failures += 1
@@ -517,7 +594,12 @@ class Cycle:
         predicted = solution.states[1]
         q_eq = predicted[cs.X_PASSIVE_POSITION : cs.X_PASSIVE_POSITION + PASSIVE_DOF]
         try:
-            self.ocp.prepare(predicted, horizon, q_eq, self.guess)
+            # `advance` has already moved `path_origin` on, so this resolves the
+            # path as the *next* cycle will -- otherwise the preparation would
+            # stand on a path one interval behind the feedback phase's.
+            self.ocp.prepare(
+                predicted, horizon, q_eq, self.guess, path=self.resolved_path()
+            )
         except Exception:
             self.forget_preparation()
             return
@@ -599,14 +681,20 @@ class Cycle:
         """
         Write the solved horizon as the canonical eight the wire carries.
 
-        The planned positions are **not** written. `gates` put the plan itself in
-        `horizon.q_a_ref` (`hz.resample` of the reference at `reference_progress`)
-        and it stays there: that is the reference the JTC is meant to chase.
-        Overwriting it with the solved states re-anchored it on the measurement
-        every cycle -- stage 0 is `x0` pinned -- so `p e_pos`, which on a velocity
-        command interface *is* the integral action, saw no error to integrate and
-        the machine parked on the solver's steady-state offset (11 mrad, measured,
-        not decaying over 30 s).
+        The planned positions are never the **solved states**. That re-anchored
+        them on the measurement every cycle -- stage 0 is `x0` pinned -- so
+        `p e_pos`, which on a velocity command interface *is* the integral action,
+        saw no error to integrate and the machine parked on the solver's
+        steady-state offset (11 mrad, measured, not decaying over 30 s).
+
+        What they are is the plan, and which plan depends on what drove the cycle.
+        On the window fit, `gates` already put it there (`hz.resample` of the
+        reference at `reference_progress`) and it stays. On the planner's curve it
+        is the point the solve chose, `c(origin + s)` per knot: the same quantity
+        the cost was written against, so the JTC chases the place the optimizer
+        planned to be rather than where the plan's own timing said to be at that
+        instant. Still a plan quantity and still not the measurement, so the
+        integral action above keeps its error.
 
         `dq_a_ref` stays the solver's, so `effort = u - dq_a_ref` still makes the
         two open-loop branches sum to `u`; what changes is only what the position
@@ -616,6 +704,11 @@ class Cycle:
         self.horizon.dq_a_ref[:, :PLANNED_DOF] = states[
             :, cs.X_PLANNED_VELOCITY : cs.X_PLANNED_VELOCITY + PLANNED_DOF
         ]
+        if self.path is not None:
+            sigma = self.path.origin + states[:, cs.X_PROGRESS]
+            self.horizon.q_a_ref[:, :PLANNED_DOF] = bspline.value(
+                sigma, self.path.control, problem.PATH_KNOTS
+            )
         # The tool is pinned, not planned: it holds where it was measured.
         self.horizon.q_a_ref[:, TOOL_AXIS] = self.tool_position
         self.horizon.dq_a_ref[:, TOOL_AXIS] = 0.0
@@ -700,12 +793,16 @@ class Cycle:
             self.carried[PROGRESS_ROWS] = solution.states[1][PROGRESS_ROWS]
 
         self.next_first_knot_ns += int(self.Ts * NANOSECONDS)
-        # `s` is a path parameter over the horizon's own window, not seconds:
-        # one unit of it is the whole window, so `duration()` converts. It was
-        # virtual time until the progress state became the path parameter
+        # `s` is a path parameter, not seconds, so `path_span` converts -- one
+        # window for the window fit, the whole plan for the planner's curve. It
+        # was virtual time until the progress state became the path parameter
         # (86ec918) and this consumer was not moved with it -- the plan then
-        # advanced at `s` per cycle, a factor `duration()` short, and only ran
-        # at all because the old cost pinned `s` to its ceiling every cycle.
+        # advanced at `s` per cycle, a factor short, and only ran at all because
+        # the old cost pinned `s` to its ceiling every cycle.
+        #
+        # Both quantities move off the one number: `path_origin` is where on the
+        # curve the next cycle starts, `reference_progress` the same place read as
+        # the plan's own time, which is what the fallback's window is placed by.
         #
         # Only a converged solve gets to say how much plan it bought. On the
         # other rungs `ladder` published the previous horizon shifted by one
@@ -714,11 +811,24 @@ class Cycle:
         # `s` off a refused iterate instead let the window run up to 0.21 s of
         # plan per cycle ahead of the machine, and `max_consecutive_failures`
         # allows five in a row before the publisher stops.
-        if solution.outcome is Outcome.CONVERGED:
-            advance = solution.progress_advance * self.grid.duration()
-            spent = advance if np.isfinite(advance) and advance >= 0.0 else self.Ts
-        else:
-            spent = self.Ts
+        span = self.path_span()
+        nominal = self.Ts / span if span > 0.0 else 0.0
+        bought = (
+            float(solution.progress_advance)
+            if solution.outcome is Outcome.CONVERGED
+            else nominal
+        )
+        if not (np.isfinite(bought) and bought >= 0.0):
+            bought = nominal
+        if self.path is not None:
+            # Past the end of the curve `remaining()` is zero, so a converged solve
+            # buys nothing and neither reading would ever move again: no expiry, and
+            # `watch_progress` calling a finished move a stall. What is spent there
+            # is time at the goal, which is what `max_reference_age` bounds.
+            if self.path_origin >= 1.0:
+                bought = nominal
+            self.path_origin = min(self.path_origin + bought, 1.0)
+        spent = bought * span
         self.reference_progress += spent
 
         # Liveness runs on the wall clock deliberately -- the one quantity the
@@ -751,7 +861,13 @@ class Cycle:
         self.last_silence = why
         self.forget_plan()
         if self.reference_anchored:
-            # One nominal interval spent while nobody was driving.
+            # One nominal interval spent while nobody was driving, charged to both
+            # readings of where the plan is, as `advance` charges them -- and to the
+            # curve only while the curve is what drove, since nothing was spent on a
+            # path this cycle was not written against.
+            span = self.path_span()
+            if self.path is not None and span > 0.0:
+                self.path_origin = min(self.path_origin + self.Ts / span, 1.0)
             self.reference_progress += self.Ts
         # Stall count survives a silence; only the wall-clock mark doesn't.
         # Charging wall time here would call a dead producer a stopped machine;

@@ -2,16 +2,18 @@
 
 import math
 
+import numpy as np
 import pytest
 import rclpy
 from action_msgs.msg import GoalStatus, GoalStatusArray
+from builtin_interfaces.msg import Duration
 from conftest import export_for
 from control_msgs.msg import JointTrajectoryControllerState
 from crane_model import canonical_joints
 from crane_model import symbolic as cs
 from crane_mpc import config, problem
 from crane_mpc.node import MpcNode
-from crane_msgs.msg import SolverHealth
+from crane_msgs.msg import JointPath, SolverHealth
 from rclpy.parameter import Parameter
 from rclpy.time import Time
 from sensor_msgs.msg import JointState
@@ -315,3 +317,35 @@ def test_a_vanished_controller_closes_the_gate_it_had_opened(node):
     one.update()
     assert not one._start_signal_open
     assert one.published == {}
+
+
+def joint_path(stamp, target=POSE):
+    """The planner's curve for `reference`'s move: a joint-space line to `target`."""
+    message = JointPath()
+    message.header.stamp = stamp
+    message.joint_names = list(ACTUATED)[: cs.K_PLANNED_DOF]
+    rows = np.linspace(POSE[: cs.K_PLANNED_DOF], target[: cs.K_PLANNED_DOF], 40)
+    message.q_path = [float(value) for value in rows.reshape(-1)]
+    message.duration = Duration(sec=4)
+    return message
+
+
+def test_the_planners_curve_replaces_the_window_fit(node):
+    node.on_robot_description(String(data=problem.default_description().read_text()))
+    plan = reference(node)
+    node.on_reference(plan)
+    node.on_joint_state(joint_state(node))
+    # Nothing published geometry yet, so the OCP fits this cycle's own window.
+    assert node._cycle.resolved_path() is None
+
+    node.on_path(joint_path(plan.header.stamp))
+    path = node._cycle.resolved_path()
+    assert path is not None
+    # Fitted once on arrival, not once per cycle inside the OCP, and it is the fit
+    # that travels into the parameter vector.
+    assert path.control.shape == (problem.PATH_POINTS, cs.K_PLANNED_DOF)
+    # 1/duration: the pace the plan was written at, which is what the progress row
+    # is priced against.
+    assert path.nominal_rate == pytest.approx(0.25)
+    node.update()
+    assert node.published["_shadow_horizon_publisher"]

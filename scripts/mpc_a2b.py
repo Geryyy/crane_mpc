@@ -704,9 +704,11 @@ def simulate(
         if horizon is not None and previous is not None:
             horizon(previous.states)
         # What the node publishes as this interval's position reference: the
-        # plan, one interval on. `Cycle.adopt_solution` leaves those knots alone,
-        # so the loop underneath tracks the plan rather than a roll of the
-        # measurement -- which is what gives its `p e_pos` an error to integrate.
+        # plan, one interval on -- the plan and not a roll of the measurement,
+        # which is what gives the loop underneath a `p e_pos` to integrate.
+        # `Cycle.adopt_solution` writes the same curve, but at the progress the
+        # solve chose rather than at the nominal pace used here, so the two
+        # differ by exactly as much as the MPC has slowed the plan down.
         knots = np.array(
             [on_path(origin), on_path(min(1.0, origin + dt * nominal_rate))]
         )

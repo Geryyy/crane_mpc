@@ -18,6 +18,7 @@ from crane_mpc.cycle import (
     watch_progress,
 )
 from crane_mpc.solver import Outcome, Solution, Violation
+from crane_mpc.solver import path_control as ocp_path_control
 from crane_msgs.msg import SolverHealth, SupervisorStatus
 from rclpy.time import Time
 
@@ -442,8 +443,8 @@ class StubOcp:
     def __init__(self):
         self.prepared_with = []
 
-    def prepare(self, x0, horizon, q_eq, guess):
-        self.prepared_with.append((x0, horizon, q_eq, guess))
+    def prepare(self, x0, horizon, q_eq, guess, path=None):
+        self.prepared_with.append((x0, horizon, q_eq, guess, path))
         return 0.001
 
 
@@ -465,7 +466,7 @@ def test_a_prepared_cycle_linearises_about_the_state_it_predicts():
     one.prepare_next(answer)
 
     assert one.prepared
-    x0, _, _, _ = one.ocp.prepared_with[0]
+    x0, _, _, _, _ = one.ocp.prepared_with[0]
     # states[1], the optimizer's own one step ahead -- not the state this cycle
     # measured, and not a second integration.
     assert np.array_equal(x0, answer.states[1])
@@ -528,3 +529,121 @@ def test_a_refused_solve_spends_one_interval_and_not_what_its_iterate_claims():
         one.advance(solution(outcome, 1.0), NOMINAL_NS, MIN_RATE, MAX_STALL)
         assert one.reference_progress == pytest.approx(Ts)
         assert one.reference_progress < window
+
+
+# -- the planner's curve, against the window fit it replaces ---------------------
+
+
+def curve_cycle(duration=2.0, stamp_ns=1000):
+    """A cycle holding a reference and the curve of the same plan."""
+    one = cycle()
+    one.reference = hz.Knots.zeros(KNOTS)
+    one.reference.t[:] = np.linspace(0.0, Ts * (KNOTS - 1), KNOTS)
+    one.reference_stamp_ns = stamp_ns
+    one.reference_anchored = True
+    samples = np.linspace(np.zeros(cs.K_PLANNED_DOF), np.ones(cs.K_PLANNED_DOF), 40)
+    one.adopt_path(ocp_path_control(samples), duration, stamp_ns)
+    return one
+
+
+def test_a_curve_drives_only_the_plan_it_was_published_with():
+    one = curve_cycle(stamp_ns=1000)
+    assert one.resolved_path() is not None
+    # The planner stamps the two alike, so a mismatch means one of them belongs to
+    # another plan -- and attaching last plan's geometry to this reference would
+    # aim the cost at a path the machine is not on.
+    one.reference_stamp_ns = 2000
+    assert one.resolved_path() is None
+
+
+def test_the_advance_moves_both_readings_of_where_the_plan_is():
+    one = curve_cycle(duration=2.0)
+    one.path = one.resolved_path()
+    one.advance(solution(Outcome.CONVERGED, progress_advance=0.25), 0, 0.0, 1.0)
+    # A quarter of the path bought is a quarter of the path spent, which on a 2 s
+    # plan is 0.5 s of it: one quantity, two units.
+    assert one.path_origin == pytest.approx(0.25)
+    assert one.reference_progress == pytest.approx(0.5)
+
+
+def test_the_window_fallback_advances_exactly_as_it_did():
+    one = cycle()
+    one.reference = hz.Knots.zeros(KNOTS)
+    one.reference_anchored = True
+    one.path = None
+    one.advance(solution(Outcome.CONVERGED, progress_advance=0.25), 0, 0.0, 1.0)
+    # `s` spans the window when nobody hands a path over, so virtual time moves by
+    # the fraction of the window bought -- the arithmetic this refactor replaced.
+    assert one.reference_progress == pytest.approx(0.25 * hz.Grid(Ts, KNOTS).duration())
+
+
+def test_the_curve_is_what_the_follower_is_given_to_chase():
+    one = curve_cycle()
+    one.path = one.resolved_path()
+    one.tool_position = 0.0
+    answer = solution(Outcome.CONVERGED)
+    progress = np.linspace(0.0, 0.5, KNOTS)
+    answer.states[:, cs.X_PROGRESS] = progress
+    one.adopt_solution(answer)
+    # A joint-space line, so the point at `sigma` is `sigma` on every planned axis:
+    # the position reference is the path at the progress the solve chose, not the
+    # solved state (which counts up into the thousands here) and not the resample.
+    for knot, place in enumerate(progress):
+        assert one.horizon.q_a_ref[knot, : cs.K_PLANNED_DOF] == pytest.approx(
+            np.full(cs.K_PLANNED_DOF, place), abs=1e-9
+        )
+
+
+def test_a_curve_anchors_at_the_plans_start_and_not_the_planning_latency():
+    one = curve_cycle(duration=2.0, stamp_ns=0)
+    one.reference_anchored = False
+    # The plan was solved a second before this cycle. A time-indexed reference skips
+    # that second, because its first seconds are past; a path-following one may not,
+    # since `path_origin` starts at the curve's start and it is *this* reading the
+    # `max_reference_age` gate tests. Anchored a second in, that gate fires half a
+    # second of plan before the path is spent.
+    now = 1_000_000_000
+    assert one.gates(now, 1.0, 0.5) is None
+    assert one.reference_progress == 0.0
+
+    without = curve_cycle(duration=2.0, stamp_ns=0)
+    without.reference_anchored = False
+    without.path_control = None
+    assert without.gates(now, 1.0, 0.5) is None
+    assert without.reference_progress == pytest.approx(1.0)
+
+
+def test_a_late_curve_puts_both_readings_back_at_the_plans_start():
+    one = curve_cycle()
+    # It arrived after its own reference, which was anchored and spent as a
+    # time-indexed one; leaving the two readings apart is the same truncation.
+    one.reference_progress = 1.2
+    one.path_origin = 0.3
+    one.adopt_path(one.path_control, one.path_duration, one.reference_stamp_ns)
+    assert one.reference_progress == 0.0
+    assert one.path_origin == 0.0
+
+
+def test_the_curve_is_not_charged_while_the_window_fit_drives():
+    one = curve_cycle()
+    one.reference_stamp_ns = 2000
+    one.path = one.resolved_path()
+    assert one.path is None
+    one.advance(solution(Outcome.CONVERGED, progress_advance=0.25), 0, 0.0, 1.0)
+    # Nothing was spent on a path this cycle was not written against. Charged, a
+    # curve arriving later would start part-way along itself -- and 49 such cycles
+    # would start it at the goal, with `remaining()` zero and no way back.
+    assert one.path_origin == 0.0
+
+
+def test_a_spent_path_charges_time_so_the_plan_can_still_expire():
+    one = curve_cycle(duration=2.0)
+    one.path_origin = 1.0
+    one.path = one.resolved_path()
+    # `remaining()` is zero at the end of the curve, so a converged solve buys no
+    # progress. Without charging the interval anyway, neither the expiry gate nor
+    # `watch_progress` would ever move again: the node would hold the goal forever
+    # and report a stall for every move it finished.
+    one.advance(solution(Outcome.CONVERGED, progress_advance=0.0), 0, 0.5, 1.0)
+    assert one.reference_progress == pytest.approx(Ts)
+    assert not one.progress_stalled
