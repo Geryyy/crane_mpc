@@ -660,7 +660,7 @@ def simulate(
         # `Ocp.shifted` is the warm start: last horizon one knot left, with the
         # progress row re-origined by what that solve bought. Rebuilding the
         # shift here is what let this harness and the node drift.
-        guess = None if previous is None else ocp.shifted(previous)
+        guess = None if previous is None else ocp.carried(previous)
         solution = ocp.solve(state, None, q_eq_stage, guess, path=path_cycle)
 
         status = solution.status

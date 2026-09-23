@@ -462,7 +462,7 @@ class Cycle:
         self.solves += 1
         self.last_solution = solution
         self.guess = (
-            None if solution.outcome is Outcome.FAILED else self.ocp.shifted(solution)
+            None if solution.outcome is Outcome.FAILED else self.ocp.carried(solution)
         )
         if solution.outcome is Outcome.CONVERGED:
             self.consecutive_failures = 0

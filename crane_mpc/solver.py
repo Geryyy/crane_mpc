@@ -791,6 +791,35 @@ class Ocp:
             states[stage + 1] = self._stepper.get("x")
         return Guess(states, inputs)
 
+    def carried(self, solution: Solution) -> Guess:
+        """
+        Return the next cycle's warm start: the last solution, **not** shifted.
+
+        Shifting is the textbook RTI move and it is the wrong one here. One
+        Newton step per cycle is a small budget and the shift spends it:
+        dropping knot 0 and duplicating knot N perturbs the iterate, and the
+        single iteration goes on repairing that perturbation instead of
+        improving the plan. The result is a plan that defers its own correction
+        one knot further every cycle, and since only knot 0 is ever executed,
+        the correction never happens.
+
+        Measured on the model-matched plant (`mpc_a2b.py`, 25 s settle): shifted
+        walks *away* from the goal, 0.139 -> 0.209 rad over 29 s, monotonically,
+        with every solve converged and no fallback; unshifted decays to
+        1.4e-4 rad. The QP's own numbers say the same -- shifted, it moves `u0`
+        by 9e-5 per cycle against a 0.039 gap to the converged answer.
+
+        Over `sim_chain --random 10` on two seeds the endpoint median halves
+        (18.3 -> 9.5 mm, 42.8 -> 16.3 mm) and -- unlike buying more iterations --
+        so does the worst (40.2 -> 21.1 mm, 74.3 -> 24.9 mm), with path error a
+        shade better and six refused cycles gone. Sway median moves 0.142 ->
+        0.155 rad on one seed, which is the one column that pays.
+
+        `shifted` stays for the fallback below, where a shift is not a guess but
+        the answer: those knots get published against instants that have moved.
+        """
+        return Guess(states=solution.states.copy(), inputs=solution.inputs.copy())
+
     def shifted(self, solution: Solution) -> Guess:
         """Shift the horizon one knot left as the next warm start; progress row re-origined."""
         states = np.vstack([solution.states[1:], solution.states[-1:]])

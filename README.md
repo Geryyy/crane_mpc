@@ -244,12 +244,20 @@ directly comparable as they stand.**
 
 ## Starting a cycle, and failing one
 
-**Warm start.** Every cycle is linearised about the previous solution shifted one
-step with the last stage duplicated (`Ocp.shifted`). The shift is the whole
-content of the rule: an unshifted copy also converges and publishes a horizon
-that satisfies every contract here, it is simply one step of phase behind its own
-plan for as long as the node runs, and nothing downstream can see it. The test
-therefore reads the guess and not the answer.
+**Warm start.** Every cycle is linearised about the previous solution **as it
+is** (`Ocp.carried`), not shifted. An earlier note here had it the other way and
+called the difference one step of phase that nothing downstream could see; that
+was wrong, and it was the endpoint drift. One Newton step per cycle is a small
+budget and the shift spends it — dropping knot 0 and duplicating knot N perturbs
+the iterate, and the single iteration repairs that instead of improving the
+plan, so the plan defers its own correction one knot further every cycle while
+only knot 0 is ever executed.
+
+On the model-matched plant the shifted loop walks away from the goal,
+0.139 → 0.209 rad over 29 s, monotonically, every solve converged; unshifted
+decays to 1.4e-4 rad. Over twenty moves the endpoint median halves and so does
+the worst. `Ocp.shifted` remains, for the fallback: there a shift is not a guess
+but the answer, and those knots are published against instants that have moved.
 
 **Cold start.** On the first cycle and after any silence, from a rollout holding
 `u = 0` (`Ocp.cold_start`) — `N` steps of an acados integrator over the same
