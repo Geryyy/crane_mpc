@@ -10,16 +10,14 @@ which coasted its dead-time predictor at a frozen force (issue 125).
 from __future__ import annotations
 
 import hashlib
-import json
-import os
-import tempfile
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 
 import casadi as ca
+import crane_ocp_export as ox
 import numpy as np
-from acados_template import AcadosOcp, AcadosOcpSolver, AcadosSim, AcadosSimSolver
+from acados_template import AcadosOcpSolver, AcadosSim
 from crane_model import symbolic as cs
 
 from . import bspline, config, problem
@@ -398,118 +396,48 @@ def configure_fixed_data(
 # ------------------------------------------------------------- the compiled solver
 
 
-def _cache_root() -> Path:
-    """Where solvers are compiled: outside the source tree, as `crane_planning`'s is."""
-    return (
-        Path(os.environ.get("CRANE_MPC_OCP_CACHE", tempfile.gettempdir()))
-        / "crane_mpc_ocp"
-    )
+#: Env var naming where the export is written and read.
+EXPORT_ENV = "CRANE_MPC_OCP_EXPORT"
+
+#: What a caller is told to run when the export is missing or is another problem.
+EXPORT_COMMAND = "ros2 run crane_mpc export_ocp"
 
 
-def solver_signature(parameters: dict, hydraulics: dict, description_xml: str) -> str:
+def export_base() -> Path:
+    """Where `scripts/export_ocp.py` writes and this opens, one dir per problem."""
+    return ox.export_base(EXPORT_ENV, f"crane_mpc_{problem.TOOL}")
+
+
+def _file_digest(path) -> str:
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()[:16]
+
+
+def export_key(parameters: dict, hydraulics: dict, description_xml: str) -> dict:
     """
-    Hash what materially changes generated code.
+    Everything baked into generated code, field by field.
 
-    `W`/bounds/slack excluded (runtime API): retuning reuses the compiled solver.
-    The acados settings are **not** excluded -- they are compiled in, so a
-    sweep that left them out would open the previous variant's `.so` and read
-    as a null result.
+    `W`/bounds/slack are excluded on purpose -- they go in through the runtime
+    API every cycle, so retuning must reuse the exported solver, and it does.
+    The acados settings are **not** excluded: they are compiled in, so a variant
+    that left them out would open its predecessor's `.so` and read as a null
+    result.
+
+    A dict rather than one hash so `ox.divergence` can say *which* of these
+    moved. Re-exporting costs minutes; "the horizon moved" is actionable and
+    "the hash differs" is not.
     """
-    digest = hashlib.sha256()
-    generated = {
+    return {
         "Ts": parameters["Ts"],
         "horizon_length": parameters["horizon_length"],
         "levenberg_marquardt": parameters["levenberg_marquardt"],
         "qp_solver_cond_N": parameters.get("qp_solver_cond_N"),
         "tuning": problem.solver_tuning(),
+        "hydraulics": hydraulics,
+        "description": hashlib.sha256(description_xml.encode()).hexdigest()[:16],
+        "problem.py": _file_digest(problem.__file__),
+        "symbolic.py": _file_digest(cs.__file__),
+        "actuator_fit": _file_digest(cs.default_actuator_path()),
     }
-    digest.update(json.dumps(generated, sort_keys=True, default=str).encode())
-    digest.update(json.dumps(hydraulics, sort_keys=True, default=str).encode())
-    digest.update(description_xml.encode())
-    digest.update(Path(problem.__file__).read_bytes())
-    digest.update(Path(cs.__file__).read_bytes())
-    digest.update(Path(cs.default_actuator_path()).read_bytes())
-    return digest.hexdigest()[:16]
-
-
-def _installed_acados(target) -> None:
-    """
-    Point acados_template at the installed headers and libraries.
-
-    Use `/usr/local` only if `lib/link_libs.json` is present; else fall to `ACADOS_SOURCE_DIR`.
-    """
-    prefix = Path("/usr/local")
-    if (
-        (prefix / "include" / "acados").is_dir()
-        and (prefix / "lib" / "libacados.so").is_file()
-        and (prefix / "lib" / "link_libs.json").is_file()
-    ):
-        # acados 0.5.4 moved both onto `code_gen_options`; AcadosSim properties are read-only.
-        options = getattr(target, "code_gen_options", target)
-        options.acados_include_path = str(prefix / "include")
-        options.acados_lib_path = str(prefix / "lib")
-
-
-def solver_cache(parameters: dict, hydraulics: dict, description_xml: str) -> Path:
-    """Where this exact problem's compiled solver lives."""
-    signature = solver_signature(parameters, hydraulics, description_xml)
-    return _cache_root() / f"{problem.TOOL}_{signature}"
-
-
-def _compiled(json_path: Path, library: Path, what: str) -> bool:
-    """Is this cache entry a finished build; say so when not (a miss is minutes of `make`)."""
-    if json_path.is_file() and library.is_file():
-        return True
-    missing = "no json" if not json_path.is_file() else "no shared library"
-    print(f"crane_mpc: compiling {what}: {missing} in {json_path.parent}")
-    return False
-
-
-def load_or_build(
-    ocp, parameters: dict, hydraulics: dict, description_xml: str, verbose: bool = False
-) -> tuple[AcadosOcpSolver, dict]:
-    """
-    Open the compiled solver, compiling it once if need be.
-
-    Returned with the dims acados wrote beside it: json keeps them private, startup needs them.
-    """
-    cache = solver_cache(parameters, hydraulics, description_xml)
-    json_path = cache / "ocp.json"
-    name = f"{problem.SOLVER_PREFIX}_{problem.TOOL}"
-    library = cache / "code" / f"libacados_ocp_solver_{name}.so"
-
-    def opened():
-        # acados refuses ocp=None since 0.5; read back from json, nothing regenerated.
-        solver = AcadosOcpSolver(
-            AcadosOcp.from_json(str(json_path)),
-            json_file=str(json_path),
-            generate=False,
-            build=False,
-            verbose=verbose,
-        )
-        return solver, json.loads(json_path.read_text())["dims"]
-
-    if _compiled(json_path, library, f"the {name} solver"):
-        return opened()
-
-    cache.mkdir(parents=True, exist_ok=True)
-    if parameters.get("qp_solver_cond_N") is not None:
-        ocp.solver_options.qp_solver_cond_N = int(parameters["qp_solver_cond_N"])
-    ocp.code_export_directory = str(cache / "code")
-    _installed_acados(ocp)
-    AcadosOcpSolver.generate(ocp, json_file=str(json_path))
-    # acados emits exact nonlinear-cost Hessians under GAUSS_NEWTON; unused and slowest to compile.
-    makefile = cache / "code" / "Makefile"
-    makefile.write_text(
-        "\n".join(
-            line for line in makefile.read_text().splitlines() if "_hess.c" not in line
-        )
-        + "\n"
-    )
-    AcadosOcpSolver.build(str(cache / "code"), with_cython=False, verbose=verbose)
-    if not library.is_file():
-        raise RuntimeError(f"acados built no shared solver in {cache / 'code'}")
-    return opened()
 
 
 def _sub_steps(seconds: float, sample_time: float) -> int:
@@ -555,25 +483,21 @@ def replay_schedule(delay_s: float, step_s: float) -> list[ReplaySegment]:
     return segments
 
 
-def predictor_cache(signature: str, seconds: float, sample_time: float) -> Path:
+def predictor_label(seconds: float, sample_time: float) -> str:
+    """One integrator's name in the export: its interval and its sub-step count."""
+    return f"{seconds:g}_{_sub_steps(seconds, sample_time)}"
+
+
+def predictor_sim(ocp, seconds: float, sample_time: float) -> AcadosSim:
     """
-    Where this exact integrator's compiled library lives.
+    One acados integrator over the same model as the horizon.
 
-    Keyed by `load_or_build`'s own signature plus interval and sub-step count, so any
-    model rebuild rebuilds this too.
-    """
-    steps = _sub_steps(seconds, sample_time)
-    return _cache_root() / f"predictor_{problem.TOOL}_{signature}_{seconds:g}_{steps}"
+    IRK like the horizon: C3 is stiff at `T_s` (`|lambda| T_s` = 8.5 vs an
+    explicit stability limit near 2.8); sub-stepped so no step exceeds `T_s`.
 
-
-def _build_predictor(
-    ocp, signature: str, seconds: float, sample_time: float, verbose: bool
-):
-    """
-    Open an acados integrator over the same model, compiling it once if need be.
-
-    IRK like the horizon: C3 is stiff at `T_s` (`|lambda| T_s` = 8.5 vs an explicit
-    stability limit near 2.8); sub-stepped so no step exceeds `T_s`.
+    Built here and read by both sides -- `scripts/export_ocp.py` compiles exactly
+    the set `predictor_labels` names, and `Ocp` opens exactly that set, so the
+    two cannot disagree about which integrators exist.
     """
     sim = AcadosSim()
     sim.model = ocp.model
@@ -582,22 +506,32 @@ def _build_predictor(
     sim.solver_options.integrator_type = "IRK"
     sim.solver_options.num_stages = 2
     sim.solver_options.num_steps = _sub_steps(seconds, sample_time)
-    tree = predictor_cache(signature, seconds, sample_time)
-    sim.code_export_directory = str(tree / "code")
-    _installed_acados(sim)
-    json_path = tree / "sim.json"
-    library = tree / "code" / f"libacados_sim_solver_{ocp.model.name}.so"
-    fresh = _compiled(json_path, library, f"the {seconds:g} s predictor")
-    tree.mkdir(parents=True, exist_ok=True)
-    # acados only reuses when `generate is False`; unset, it codegens/makes every time.
-    return AcadosSimSolver(
-        sim,
-        json_file=str(json_path),
-        generate=not fresh,
-        build=not fresh,
-        check_reuse_possible=False,
-        verbose=verbose,
-    )
+    return sim
+
+
+def predictor_sims(ocp, parameters: dict) -> list:
+    """Every `(label, AcadosSim)` an export must carry for this configuration."""
+    sample_time = float(parameters["Ts"])
+    return [
+        (
+            predictor_label(seconds, sample_time),
+            predictor_sim(ocp, seconds, sample_time),
+        )
+        for seconds in predictor_intervals(parameters)
+    ]
+
+
+def predictor_intervals(parameters: dict) -> list:
+    """Every interval an `Ocp` will want an integrator for, longest first."""
+    sample_time = float(parameters["Ts"])
+    delay = float(parameters["sensor_to_valve_delay"])
+    wanted = {sample_time}
+    if delay > 0.0:
+        wanted.add(delay)
+        wanted.update(
+            segment.seconds for segment in replay_schedule(delay, sample_time)
+        )
+    return sorted(wanted, reverse=True)
 
 
 class Ocp:
@@ -622,9 +556,13 @@ class Ocp:
         self._ocp, self.scale, self.model, self._chamber = problem.build_ocp(
             description_xml, parameters, hydraulics
         )
-        signature = solver_signature(parameters, hydraulics, description_xml)
-        self.solver, self._dims = load_or_build(
-            self._ocp, parameters, hydraulics, description_xml, verbose=verbose
+        # Opened, never built: `scripts/export_ocp.py` compiled this and wrote
+        # the key beside it, and `ox.open_solver` refuses anything that is not
+        # this problem rather than starting on another machine's dynamics.
+        base = export_base()
+        key = export_key(parameters, hydraulics, description_xml)
+        self.solver, self._dims = ox.open_solver(
+            self._ocp, base, key, EXPORT_COMMAND, verbose=verbose
         )
         self._check_dimensions()
 
@@ -648,15 +586,18 @@ class Ocp:
         )
         self._slack_price = slack_prices(parameters)
 
-        self._stepper = _build_predictor(
-            self._ocp, signature, self.Ts, self.Ts, verbose
-        )
+        def predictor(seconds: float):
+            return ox.open_sim(
+                predictor_sim(self._ocp, seconds, self.Ts),
+                base,
+                key,
+                predictor_label(seconds, self.Ts),
+                verbose=verbose,
+            )
+
+        self._stepper = predictor(self.Ts)
         delay = float(parameters["sensor_to_valve_delay"])
-        self._predictor = (
-            _build_predictor(self._ocp, signature, delay, self.Ts, verbose)
-            if delay > 0.0
-            else None
-        )
+        self._predictor = predictor(delay) if delay > 0.0 else None
         self.delay_s = delay
         #: How the delay window splits between the commands in flight (issue 125).
         self.replay = replay_schedule(delay, self.Ts)
@@ -665,9 +606,7 @@ class Ocp:
             segment.seconds: (
                 self._stepper
                 if segment.seconds == self.Ts
-                else _build_predictor(
-                    self._ocp, signature, segment.seconds, self.Ts, verbose
-                )
+                else predictor(segment.seconds)
             )
             for segment in self.replay
         }

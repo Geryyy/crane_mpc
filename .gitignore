@@ -9,11 +9,3 @@ __pycache__/
 crane_mpc/parameters.py*
 # MuJoCo appends its warnings here, in whatever directory a run started in.
 MUJOCO_LOG.TXT
-# generated/: only the reviewable files are committed (REVIEWED in
-# scripts/export_ocp.py). The CasADi bodies are digested into the header.
-generated/*
-!generated/README.md
-!generated/crane_mpc_ocp_generated.h
-!generated/crane_mpc_pzs100/
-generated/crane_mpc_pzs100/*
-!generated/crane_mpc_pzs100/acados_solver_crane_mpc_pzs100.h

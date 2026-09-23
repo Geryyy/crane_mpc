@@ -17,7 +17,7 @@ The node is Python and the solver is generated C:
 | `crane_mpc/solver.py` | the solver wrapper: what is written before a solve and read after, the dead-time predictor and the static hold force |
 | `crane_mpc/horizon.py` | the reference read off the wire, resampled, and written back |
 | `crane_mpc/problem.py` | the OCP itself, as an `AcadosOcp` |
-| `scripts/export_ocp.py` | the same problem written out as the generated C in `generated/` |
+| `scripts/export_ocp.py` | **run this first**: the same problem generated, compiled and recorded |
 | `scripts/bench_ocp.py` | a corpus of sampled moves, and what the solver did on each cycle |
 | `scripts/sweep_ocp.py` | `bench_ocp.py` once per acados variant, tabled |
 
@@ -25,14 +25,26 @@ The node is Python and the solver is generated C:
 deployment runs and the tree that is checked in are one definition of the
 problem rather than two.
 
-The solver is compiled once, on the first startup that needs it, into a cache
-outside the source tree (`CRANE_MPC_OCP_CACHE`, default the system temporary
-directory), keyed by everything that changes generated code. Weights, bounds and
-slack prices are deliberately not in that key: retuning must reuse the compiled
-solver, and it does. The two integrators beside it — the cold-start stepper and
-the dead-time predictor — are cached under the same key (issue 134), which is
-what a warm startup of 0.13 s against a cold 5.0 s is (load 2.3; every timing
-here is worthless without it).
+**The solver is exported before anything runs, never at startup.**
+`./scripts/export_ocp.py` generates, compiles and writes a `manifest.json`
+carrying `solver.export_key` — the grid, every acados setting, the hydraulics
+table and digests of the description, `problem.py`, `crane_symbolic.py` and the
+C3 fit. `Ocp` recomputes that key, compares, and **refuses to start** on a
+mismatch, naming the field that moved. Weights, boxes and slack prices are
+deliberately outside the key: they go in through the runtime API every cycle, so
+retuning reuses the export.
+
+`CRANE_MPC_OCP_EXPORT` says where, defaulting to `~/.cache/crane_ocp/` — a
+persistent place, not the system temporary directory, because a step somebody
+runs has to survive a tmp sweep. The integrators ride in the same export.
+
+This replaced three build paths with one (`crane_ocp_export`): a `generated/`
+tree that nothing compiled, plus `crane_mpc` and `crane_planning` each
+generating *and* compiling the same problem again at startup into their own
+hashed cache. The trade is the export step. What it buys is that a startup can
+no longer compile the wrong thing quietly — and that `hessian_approx: EXACT`
+builds, which the old path could not, because it stripped the `_hess.c` acados
+only registers under `EXACT`.
 
 The C++ node this was ported from is gone (issue 132): it was kept for a parity
 run that could not pass, because the two had been deliberately diverged.
@@ -97,20 +109,20 @@ flows. Constraints 3, 4, 6, and 7 carry configured L1 slack; every solution
 reports whether slack was used and its penalty, while command constraints 1, 2,
 and 5 remain hard.
 
-### One solver ships: the PZS100, constrained
+### One solver ships: the PZS100
 
-    ./scripts/export_ocp.py            # rewrite `generated/`
-    ./scripts/export_ocp.py --check    # regenerate into a scratch tree and diff
+    ./scripts/export_ocp.py          # or: ros2 run crane_mpc export_ocp
 
-**Nothing compiles that tree**: the node builds its own solver at startup into
-`CRANE_MPC_OCP_CACHE` and never opens `generated/`. It is kept as the one
-reviewable form of the OCP — a diff of it is how a change to the problem becomes
-visible — and `--check` is what keeps it current. It regenerates and diffs in
-about 2 s and compiles nothing.
+The description is baked into a generated solver, so an artifact is one
+machine's, and the PZS100 is the machine that has to run; there is no tool
+selection anywhere in this package.
 
-`generated/` carries **one** artifact, `crane_mpc_pzs100/`. The description is
-baked into a generated solver, so an artifact is one machine's, and the PZS100 is
-the machine that has to run; there is no tool selection anywhere in this package.
+The offline harnesses are the one exception to "never build at startup":
+`mpc_a2b.py` and `sim_chain.py` export on demand, into a directory named for the
+problem, through the same `ox.export`. A sweep walks configurations no
+deliberate export could have anticipated — `sweep_ocp.py` visits one per acados
+variant — so a hand-run export per variant would make it unusable. The node has
+no such path.
 
 Whether the planner's kappa headroom already keeps the reference inside the
 cylinder-force and pump-flow rows — which would make the MPC's copy redundant —

@@ -226,7 +226,7 @@ def baked(parameters: dict, hydraulics: dict, description: str) -> dict:
     logs carrying the same one were produced by the same compiled `.so`.
     """
     return {
-        "signature": ocp_runtime.solver_signature(parameters, hydraulics, description),
+        "export_key": ocp_runtime.export_key(parameters, hydraulics, description),
         "Ts": float(parameters["Ts"]),
         "horizon_length": int(parameters["horizon_length"]),
         "levenberg_marquardt": float(parameters["levenberg_marquardt"]),

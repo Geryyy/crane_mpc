@@ -20,6 +20,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 
 import casadi as ca
+import crane_ocp_export as ox
 import numpy as np
 import yaml
 from acados_template import AcadosOcpSolver
@@ -44,8 +45,6 @@ except ImportError:
     sys.path.insert(0, str(PACKAGE))
     from crane_mpc import config as ocp_config  # noqa: E402
     from crane_mpc import solver as ocp_runtime  # noqa: E402
-
-solver_signature = ocp_runtime.solver_signature
 
 cs = export_ocp.cs
 
@@ -319,20 +318,38 @@ def create_solver(
     arguments: argparse.Namespace, parameters: dict, hydraulics: dict
 ) -> tuple[ocp_runtime.Ocp, object, np.ndarray]:
     """
-    Open this problem's compiled solver, compiling once if needed.
+    Open this problem's compiled solver, exporting it first if need be.
 
     Returns the node's own `Ocp`, not a bare acados handle: everything a cycle
     writes lives there, so this harness and the node cannot drift apart without
-    a test noticing. Node opens the same cache: two callers, one compile.
+    a test noticing.
+
+    **This exports; the node never does.** A sweep walks configurations that no
+    deliberate export step could have anticipated -- `sweep_ocp.py` alone visits
+    one per acados variant -- so requiring a hand-run export per variant would
+    make a sweep unusable. It is the same `ox.export` the export script calls,
+    into a directory named for the problem, so variants do not clobber each
+    other and a repeat run opens what the last one built.
     """
     description = (export_ocp.DEFAULT_DESCRIPTIONS / export_ocp.DESCRIPTION).read_text()
-    cache = ocp_runtime.solver_cache(parameters, hydraulics, description)
-    if arguments.rebuild and cache.is_dir():
-        # generated, gitignored cache dir; no source/user output can land here
-        shutil.rmtree(cache)
-    _acados, scale, model, _chamber = export_ocp.build_ocp(
+    key = ocp_runtime.export_key(parameters, hydraulics, description)
+    base = ocp_runtime.export_base()
+    if arguments.rebuild:
+        # generated export dir, named for this problem; no source or user output
+        shutil.rmtree(ox.solver_root(base, key), ignore_errors=True)
+    acados_ocp, scale, model, _chamber = export_ocp.build_ocp(
         description, parameters, hydraulics
     )
+    try:
+        ox.manifest(base, key, "the harness exports on demand")
+    except ox.StaleExport:
+        ox.export(
+            acados_ocp,
+            base,
+            key,
+            sims=ocp_runtime.predictor_sims(acados_ocp, parameters),
+            verbose=arguments.verbose_build,
+        )
     ocp = ocp_runtime.Ocp(
         description, parameters, hydraulics, verbose=arguments.verbose_build
     )

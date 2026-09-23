@@ -5,10 +5,11 @@ import math
 import pytest
 import rclpy
 from action_msgs.msg import GoalStatus, GoalStatusArray
+from conftest import export_for
 from control_msgs.msg import JointTrajectoryControllerState
 from crane_model import canonical_joints
 from crane_model import symbolic as cs
-from crane_mpc import problem
+from crane_mpc import config, problem
 from crane_mpc.node import MpcNode
 from crane_msgs.msg import SolverHealth
 from rclpy.parameter import Parameter
@@ -37,8 +38,18 @@ def context():
 
 
 @pytest.fixture
-def node(context):
+def node(context, export_base):
     node = MpcNode()
+    # The node builds its `Ocp` inside `configure`, from its declared parameters
+    # rather than from `config/crane_mpc.yaml` -- a different configuration from
+    # the one the shipped export carries, so it needs its own. Done here and not
+    # in `configured` because several tests hand a description over themselves.
+    export_for(
+        export_base,
+        config.parameter_dict(node._values),
+        config.hydraulics_dict(node._values),
+        problem.default_description().read_text(),
+    )
     # Budget overrun is tested separately, not left to decide every other assertion.
     node.set_parameters([Parameter("solve_budget", Parameter.Type.DOUBLE, 10.0)])
     published = {}

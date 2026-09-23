@@ -1,10 +1,14 @@
 """The solver wrapper: what it predicts, and what it plans."""
 
+import json
+
+import crane_ocp_export as ox
 import numpy as np
 import pytest
 import yaml
 from acados_template import AcadosOcpSolver, AcadosSimSolver
 from ament_index_python.packages import get_package_share_directory
+from conftest import export_for
 from crane_model import hydraulic_limits
 from crane_model import symbolic as cs
 from crane_mpc import problem
@@ -13,10 +17,9 @@ from crane_mpc.horizon import Grid, Knots, resample
 from crane_mpc.solver import (
     Ocp,
     Outcome,
-    predictor_cache,
+    export_key,
+    predictor_label,
     replay_schedule,
-    solver_cache,
-    solver_signature,
 )
 
 PLANNED = cs.K_PLANNED_DOF
@@ -38,16 +41,14 @@ def parameters():
 
 
 @pytest.fixture(scope="module")
-def ocp(parameters):
-    return Ocp(
-        problem.default_description().read_text(),
-        parameters,
-        parameters["hydraulics"],
-    )
+def ocp(parameters, export_base):
+    description = problem.default_description().read_text()
+    export_for(export_base, parameters, parameters["hydraulics"], description)
+    return Ocp(description, parameters, parameters["hydraulics"])
 
 
 @pytest.fixture(scope="module")
-def split_delay_ocp(parameters):
+def split_delay_ocp(parameters, export_base):
     """
     OCP with a step below `sensor_to_valve_delay` (shipped Ts=0.06=delay
     yields one replay segment). Four knots; nothing here solves.
@@ -55,11 +56,9 @@ def split_delay_ocp(parameters):
     values = dict(parameters)
     values["Ts"] = 0.04
     values["horizon_length"] = 4
-    return Ocp(
-        problem.default_description().read_text(),
-        values,
-        values["hydraulics"],
-    )
+    description = problem.default_description().read_text()
+    export_for(export_base, values, values["hydraulics"], description)
+    return Ocp(description, values, values["hydraulics"])
 
 
 def hold_state(ocp):
@@ -232,48 +231,71 @@ def test_a_payload_step_drops_the_warm_start_whatever_the_caller_passes(ocp, sta
     ocp.set_payload(0.0, np.zeros(3))
 
 
-def test_a_second_construction_over_a_warm_cache_compiles_nothing(
-    ocp, parameters, monkeypatch
-):
+def test_opening_a_solver_compiles_nothing(ocp, parameters, export_base, monkeypatch):
     """
-    Issue 134: integrators beside the solver passed neither `generate` nor
-    `build`; acados defaults both True, so every startup regenerated and
-    rebuilt an already-warm cache.
+    The contract the export step bought: a startup opens, it never builds.
+
+    Issue 134 was the weaker version of this -- the integrators passed neither
+    `generate` nor `build`, acados defaults both True, and every startup
+    regenerated over an already-warm cache. Now nothing may reach a compiler at
+    all: a node that can build can build the wrong thing, and this is what says
+    it cannot. `ocp` is a parameter so its export exists before this runs.
     """
 
     def refuse(*arguments, **keywords):
         raise AssertionError("a warm cache was regenerated or rebuilt")
 
+    description = problem.default_description().read_text()
+    # Already exported by the `ocp` fixture, so this only re-points the runtime
+    # at it -- another fixture may have moved the environment since.
+    export_for(export_base, parameters, parameters["hydraulics"], description)
+
     for backend in (AcadosOcpSolver, AcadosSimSolver):
         monkeypatch.setattr(backend, "generate", staticmethod(refuse))
         monkeypatch.setattr(backend, "build", staticmethod(refuse))
 
-    Ocp(
-        problem.default_description().read_text(),
-        parameters,
-        parameters["hydraulics"],
-    )
+    Ocp(description, parameters, parameters["hydraulics"])
 
 
-def test_the_predictor_is_rebuilt_for_the_model_changes_the_solver_is(parameters):
+def test_a_model_change_moves_the_export_key(parameters):
     """
-    Predictor integrates the same model; a second, weaker cache key is how a
-    stale one survives a model change the solver correctly rebuilds for.
+    A description edit must not be openable by a solver exported before it.
+
+    The integrators used to carry a second, weaker key of their own, which is
+    how a stale one survived a model change the solver correctly rebuilt for.
+    They ride in the same export now, so there is one key and that cannot
+    happen; what is left to hold is that the key sees the description at all.
     """
     hydraulics = parameters["hydraulics"]
     description = problem.default_description().read_text()
     changed = description + "<!-- a link moved -->"
-    assert solver_cache(parameters, hydraulics, description) != solver_cache(
+    assert export_key(parameters, hydraulics, description) != export_key(
         parameters, hydraulics, changed
     )
+    # Sub-step count is generated code too; the interval alone fixes it only
+    # while `T_s` is held, so the label carries both.
+    assert predictor_label(0.06, 0.04) != predictor_label(0.06, 0.02)
 
-    signature = solver_signature(parameters, hydraulics, description)
-    warm = predictor_cache(signature, 0.06, 0.04)
-    assert warm != predictor_cache(
-        solver_signature(parameters, hydraulics, changed), 0.06, 0.04
-    )
-    # Sub-step count is generated code too; the interval alone fixes it only while `T_s` is held.
-    assert warm != predictor_cache(signature, 0.06, 0.02)
+
+def test_an_unexported_problem_is_refused_and_says_what_differs(parameters, tmp_path):
+    """
+    The whole of what replaced compiling at startup.
+
+    Asking for a problem nothing exported must not start, and the refusal has
+    to name the field -- the usual cause is an export made for another machine
+    or another setting, and "differs in horizon_length" is actionable where
+    "not found" is not.
+    """
+    hydraulics = parameters["hydraulics"]
+    description = problem.default_description().read_text()
+    exported = export_key(parameters, hydraulics, description)
+    root = ox.solver_root(tmp_path, exported)
+    root.mkdir(parents=True)
+    (root / ox.MANIFEST).write_text(json.dumps({"key": exported, "sims": []}))
+
+    moved = dict(parameters, horizon_length=parameters["horizon_length"] + 1)
+    with pytest.raises(ox.StaleExport, match="horizon_length"):
+        ox.manifest(tmp_path, export_key(moved, hydraulics, description), "re-export")
 
 
 def test_a_non_finite_input_never_reaches_a_solve(ocp, state):
@@ -295,21 +317,21 @@ def test_a_non_finite_input_never_reaches_a_solve(ocp, state):
         ocp.solve(state, horizon, q_eq)
 
 
-def test_a_swept_acados_setting_moves_the_cache(parameters, monkeypatch):
+def test_a_swept_acados_setting_moves_the_export_key(parameters, monkeypatch):
     """
     The one thing `scripts/sweep_ocp.py` rests on.
 
     Every setting in `SOLVER_TUNING` is compiled into the `.so`, so a variant
-    the signature does not see opens its predecessor's solver and measures the
+    the key does not see opens its predecessor's solver and measures the
     baseline again -- a null result that reads as "no difference".
     """
     hydraulics = parameters["hydraulics"]
     description = problem.default_description().read_text()
-    before = solver_cache(parameters, hydraulics, description)
+    before = export_key(parameters, hydraulics, description)
 
     monkeypatch.setenv(problem.TUNING_ENV, '{"hpipm_mode": "SPEED"}')
     assert problem.solver_tuning()["hpipm_mode"] == "SPEED"
-    assert solver_cache(parameters, hydraulics, description) != before
+    assert export_key(parameters, hydraulics, description) != before
 
 
 def test_a_misspelt_knob_is_refused_rather_than_ignored(monkeypatch):

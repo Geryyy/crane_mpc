@@ -6,7 +6,7 @@ Drive `bench_ocp.py` once per acados variant and table what each one cost.
 subprocess, because the setting is compiled into the solver and a process holds
 exactly one of them; the variant reaches the child as `CRANE_MPC_OCP_OPTIONS`,
 which `crane_mpc.problem.solver_tuning` layers over `SOLVER_TUNING` and
-`solver_signature` hashes -- so each variant compiles its own `.so` instead of
+`export_key` records -- so each variant compiles its own `.so` instead of
 opening its predecessor's and reading as a null result.
 
     ./scripts/sweep_ocp.py --moves 25
