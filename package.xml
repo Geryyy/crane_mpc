@@ -34,12 +34,12 @@
   <test_depend>python3-pytest</test_depend>
   <!-- `test_launch_contract.py` parses the shipped config yaml. -->
   <test_depend>python3-yaml</test_depend>
-  <!-- Test only, and by path: `scripts/export_ocp.py` imports
-       `crane_ocp/scripts/crane_ocp_export.py` out of the source tree, and the
-       `generated/` check that used to be a CMake `ALL` target is now
-       `test/test_generated_is_current.py` (issue 133). Nothing links the C++
-       capsule any more: issue 132 deleted the one target that did. -->
-  <test_depend>crane_ocp</test_depend>
+  <!-- `crane_mpc/solver.py` opens the exported solver through
+       `crane_ocp_export`, so this is a runtime dependency now, not the
+       test-only source-tree import it was: the module moved out of
+       `crane_ocp/scripts/` and is installed. Nothing links the C++ capsule any
+       more; issue 132 deleted the one target that did. -->
+  <exec_depend>crane_ocp</exec_depend>
 
   <export>
     <build_type>ament_python</build_type>

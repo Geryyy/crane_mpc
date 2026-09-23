@@ -20,7 +20,6 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 
 import casadi as ca
-import crane_ocp_export as ox
 import numpy as np
 import yaml
 from acados_template import AcadosOcpSolver
@@ -28,6 +27,18 @@ from scipy.optimize import root
 
 PACKAGE = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PACKAGE / "scripts"))
+
+# `crane_ocp_export` is installed (crane_ocp declares it), but these scripts are
+# meant to run from a source checkout without the overlay sourced, the same way
+# they fall back to the source tree for `crane_mpc` and `crane_model`. The
+# runtime imports it too -- `crane_mpc.solver` does -- so this has to go on the
+# path *before* that module, not just before the exporter.
+try:
+    import crane_ocp_export  # noqa: F401
+except ImportError:
+    sys.path.insert(0, str(PACKAGE.parent / "crane_ocp"))
+
+import crane_ocp_export as ox  # noqa: E402
 
 # pinocchio's bool-converter warning is harmless but clutters CLI help/summaries
 warnings.filterwarnings(
