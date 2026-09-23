@@ -281,11 +281,6 @@ class Cycle:
         if self.mode == "shadow":
             self.last_input = follower_input(follower, u_max)
 
-    def payload_changed(self) -> None:
-        """Drop what a payload step made stale: the warm plan, the force state seeded for it."""
-        self.forget_plan()
-        self.seed_force = True
-
     # -- the gates ---------------------------------------------------------------
 
     def gates(self, now_ns: int, max_clock_skew: float, max_reference_age: float):
@@ -782,6 +777,14 @@ class Cycle:
         # Carry goes with them: a break in output (gate, escalation, payload
         # step, mode change) is reactivation, so next cycle re-seeds from the
         # measurement, not a state that kept integrating unmanned.
+        #
+        # `seed_force` is what makes that true of `carried` itself: `read_state`
+        # rebuilds the force row from `static_hold_force` at the measured pose
+        # and takes `carried` from it. Without it the first cycle back seeded the
+        # force that held the machine up from before the break -- and after §6's
+        # escalation the arm claim is released precisely so something else can
+        # move the boom, so that pose is the one least likely to still hold.
+        self.seed_force = True
         self.dq_a_carried = None
         self.velocity_carry = VelocityCarry()
         self.last_horizon = None

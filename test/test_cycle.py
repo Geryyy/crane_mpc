@@ -418,15 +418,20 @@ def test_a_new_reference_drops_the_preparation():
         lambda one: one.forget_plan(),
         lambda one: one.stay_silent("a gate"),
         lambda one: one.stay_silent_after_failure("a failure"),
-        lambda one: one.payload_changed(),
         lambda one: one.adopt_mode("shadow"),
     ],
 )
-def test_every_break_in_the_output_stream_drops_the_preparation(break_it):
+def test_every_break_in_the_output_stream_is_a_reactivation(break_it):
     one = prepared_cycle()
+    # A cycle that has already seeded, so re-arming below means something.
+    one.seed_force = False
     break_it(one)
     assert not one.prepared
     assert one.prepared_horizon is None
+    # The force row comes back from the measurement, not from before the break:
+    # after the escalation the arm claim is released, so the pose it held may
+    # not be the pose it comes back to.
+    assert one.seed_force
 
 
 class StubOcp:

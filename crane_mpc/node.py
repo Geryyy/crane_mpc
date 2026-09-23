@@ -739,7 +739,9 @@ class MpcNode(Node):
             )
             return response
 
-        self._cycle.payload_changed()
+        # A payload step makes the warm plan and the force state seeded for it
+        # stale, which is the same reactivation every other break in output is.
+        self._cycle.forget_plan()
         com = payload.center_of_mass_k8_m
         response.message = (
             f"the payload is now {payload.mass_kg} kg at ({com[0]}, {com[1]}, "
