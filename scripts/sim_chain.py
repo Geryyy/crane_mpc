@@ -13,6 +13,11 @@ Every block here is the one the machine runs:
     ./scripts/sim_chain.py --goal out --viewer
     ./scripts/sim_chain.py --random --viewer    space starts the next move
 
+With the viewer open the chain keeps running once the plan is spent -- MPC,
+inner loop and plant, all of it -- so the sway after arrival is something you
+can watch. Space ends that and starts the next move; those cycles are printed
+but not scored, or the score would depend on how long the key was held.
+
 `--random` chains moves, each starting where the last one ended. Unknown flags
 are passed on to `mpc_a2b`.
 
@@ -40,7 +45,6 @@ PACKAGE = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PACKAGE / "scripts"))
 
 import mpc_a2b  # noqa: E402
-import tune_mpc  # noqa: E402
 
 cs = mpc_a2b.cs
 
@@ -75,6 +79,7 @@ PLANNED = list(PLANNED_INDICES)
 POSITION = slice(cs.X_PLANNED_POSITION, cs.X_PLANNED_POSITION + cs.NU)
 VELOCITY = slice(cs.X_PLANNED_VELOCITY, cs.X_PLANNED_VELOCITY + cs.NU)
 PASSIVE = slice(cs.X_PASSIVE_POSITION, cs.X_PASSIVE_POSITION + cs.K_PASSIVE_DOF)
+PASSIVE_RATE = slice(cs.X_PASSIVE_VELOCITY, cs.X_PASSIVE_VELOCITY + cs.K_PASSIVE_DOF)
 LAG = slice(cs.X_COMMAND_LAG, cs.X_COMMAND_LAG + cs.K_COMMAND_LAG_DOF)
 FORCE = slice(cs.X_ACTUATED_FORCE, cs.X_ACTUATED_FORCE + cs.K_PLANNED_DOF)
 
@@ -184,12 +189,17 @@ class Chain:
         self.actuator.reset(tau=self.plant.holding_force)
         self._seeded = True
 
-    def advance(self, state, control, parameter, dt):
+    def advance(self, state, control, parameter, dt, knots=None):
         """
         One MPC cycle: hold `control` while the inner loop runs underneath it.
 
-        The reference the loop tracks is the horizon's first interval, integrated
-        with the exported model from the measured state.
+        `knots` is the position reference the node publishes for this interval --
+        the plan, not a roll of the measurement, since `Cycle.adopt_solution`
+        stopped overwriting those rows. The loop's `p e_pos` is its integral
+        action, so this is the error it gets to integrate. Velocity and the
+        feedforward branches stay the solver's, integrated with the exported
+        model as before, which is what keeps `effort = u - dq_a_ref` summing to
+        the OCP's own `u`.
         """
         if not self._seeded:
             self._seed(state)
@@ -205,10 +215,14 @@ class Chain:
 
         u_mpc = np.asarray(control[: cs.NU], dtype=float)
         reference = np.asarray(state, dtype=float).copy()
-        for _ in range(int(round(exact))):
+        ticks = int(round(exact))
+        for tick in range(ticks):
             # the JTC samples the trajectory twice per tick: the PI error against
             # the control instant, both feedforward branches one period later.
             q_ref, dq_ref = reference[POSITION].copy(), reference[VELOCITY].copy()
+            if knots is not None:
+                # between the two published knots, as the JTC interpolates.
+                q_ref = knots[0] + (knots[1] - knots[0]) * (tick / ticks)
             reference = mpc_a2b.rk4_step(
                 self.dynamics, reference, control, parameter, self.step_s
             )
@@ -245,9 +259,15 @@ class Chain:
             # under the command already in flight. On the shipped grid
             # Ts == sensor_to_valve_delay, so that is exactly one command. The
             # exported model carries no delay, so this does not double-count.
+            #
+            # The progress pair sits it out: `reference` above already rolled it
+            # the full T_s and nothing about it travels to a valve.
+            # `Ocp.propagate` holds the same rows back for the node.
+            progress = following[ocp_runtime.PROGRESS_ROWS].copy()
             following = mpc_a2b.rk4_step(
                 self.dynamics, following, control, parameter, self.dead_time_s
             )
+            following[ocp_runtime.PROGRESS_ROWS] = progress
         return following
 
     def show_horizon(self, states) -> None:
@@ -399,6 +419,29 @@ def planned_path(plan):
     )
 
 
+def coast_gate(plant, gate, message: str):
+    """
+    Build a `simulate` settle gate: cycle on while the window is open and unpressed.
+
+    Headless there is nobody to press anything, so there is no coast and the run
+    ends where it was asked to. A closed window leaves `pressed` false, which is
+    how the caller tells "next goal" from "that is enough".
+    """
+    said = False
+
+    def keep_going() -> bool:
+        nonlocal said
+        viewer = plant.viewer
+        if viewer is None or not viewer.is_running() or gate.pressed:
+            return False
+        if not said:
+            said = True
+            print(message)
+        return True
+
+    return keep_going
+
+
 #: How finely the path is sampled when measuring distance to it. The metric is a
 #: minimum over `theta`, so this sets its resolution, not the path's.
 PATH_SAMPLES = 400
@@ -416,7 +459,49 @@ def tool_positions(planner, rows: np.ndarray) -> np.ndarray:
     )
 
 
-def tracking_report(planner, data, path, chain, goal) -> dict:
+def path_tool_positions(planner, path, q_tool: float) -> np.ndarray:
+    """
+    TCP position along the whole path, the passive pair at rest.
+
+    The curve every off-path number is measured against, the score's and the
+    progress line's alike -- computed once per plan because it is `PATH_SAMPLES`
+    forward-kinematics calls and neither caller wants its own answer.
+    """
+    places = np.linspace(0.0, 1.0, PATH_SAMPLES)
+    on_path = ocp_runtime.bspline.value(
+        places, path.control, ocp_runtime.problem.PATH_KNOTS
+    )
+    # `passive_equilibrium` wants all six actuated rows, tool included, so the
+    # path's five go through a canonical frame first.
+    framed = viewing.canonical_rows(
+        on_path, np.zeros((len(on_path), len(PASSIVE_INDICES))), q_tool
+    )
+    resting = np.array(
+        [
+            planner.model.passive_equilibrium(row[list(ACTUATED_INDICES)])
+            for row in framed
+        ]
+    )
+    return tool_positions(planner, viewing.canonical_rows(on_path, resting, q_tool))
+
+
+def off_path_now(planner, plant, curve):
+    """
+    Build a `simulate` progress readout: how far off the path the tool is, in m.
+
+    Reads the plant rather than the state handed round the loop -- with the
+    predictor on, that state is the one the solver gets, a dead time ahead of
+    the machine, and this is the number you watch the machine by.
+    """
+
+    def gap() -> float:
+        here = tool_positions(planner, plant.q[None, :])[0]
+        return float(np.linalg.norm(curve - here, axis=1).min())
+
+    return gap
+
+
+def tracking_report(planner, data, chain, curve) -> dict:
     """
     Score this move the way the brief does: millimetres at the tool.
 
@@ -427,11 +512,19 @@ def tracking_report(planner, data, path, chain, goal) -> dict:
       scores zero here, which is the whole point of following a path rather than
       a resample of one.
     * **off the goal** -- where the tool stopped against where the move was for.
-      Spending time is free on the first metric and not on this one.
+      Spending time is free on the first metric and not on this one. The goal is
+      the path's own end embedded at rest, not `plan.q[-1]`: that row carries the
+      solve's terminal sway, which the planner lets run to `terminal_q_sway_max`
+      (0.02 rad, ~18 mm at the tool), so scoring against it charged a machine
+      that arrived and let the load hang.
 
     The path is joint-space, so its tool positions are taken with the passive
     pair at rest; the machine's are taken with the sway it actually had, because
     that is where the tool actually was.
+
+    Scored on `data.scored` cycles, never on the coast the viewer added: the
+    coast is however long a key was held and a number that moves with that is
+    not a number. The coast is reported on its own line underneath.
     """
     measured = tool_positions(
         planner,
@@ -439,44 +532,47 @@ def tracking_report(planner, data, path, chain, goal) -> dict:
             data.state[:, POSITION], data.state[:, PASSIVE], chain.q_tool
         ),
     )
-    places = np.linspace(0.0, 1.0, PATH_SAMPLES)
-    on_path = ocp_runtime.bspline.value(
-        places, path.control, ocp_runtime.problem.PATH_KNOTS
-    )
-    # `passive_equilibrium` wants all six actuated rows, tool included, so the
-    # path's five go through a canonical frame first.
-    framed = viewing.canonical_rows(
-        on_path, np.zeros((len(on_path), len(PASSIVE_INDICES))), chain.q_tool
-    )
-    resting = np.array(
-        [
-            planner.model.passive_equilibrium(row[list(ACTUATED_INDICES)])
-            for row in framed
-        ]
-    )
-    curve = tool_positions(
-        planner, viewing.canonical_rows(on_path, resting, chain.q_tool)
-    )
+    end = data.scored + 1
     # (samples, path samples) -- small enough to take whole, and a nearest-point
     # search that starts from the wrong end is worse than no metric at all.
     gap = np.linalg.norm(measured[:, None, :] - curve[None, :, :], axis=2).min(axis=1)
+    # Sway, the two numbers that say different things: how far the load was
+    # thrown, and how much of that was still swinging when the move ended. The
+    # second is the damping one -- a move can stay inside the box all the way
+    # and still hand the next one a pendulum.
+    offset = data.state[:end, PASSIVE] - data.q_eq[:end]
+    rate = data.state[:end, PASSIVE_RATE]
+    last_second = max(1, int(round(1.0 / float(data.time[1] - data.time[0]))))
     score = {
-        "path_worst": 1000 * float(gap.max()),
-        "path_rms": 1000 * float(np.sqrt((gap**2).mean())),
-        "goal_final": 1000 * float(np.linalg.norm(measured[-1] - goal)),
-        "cycles": int(data.fallback.size),
-        "refused": int(np.count_nonzero(data.status)),
+        "path_worst": 1000 * float(gap[:end].max()),
+        "path_rms": 1000 * float(np.sqrt((gap[:end] ** 2).mean())),
+        "goal_final": 1000 * float(np.linalg.norm(measured[data.scored] - curve[-1])),
+        "sway_peak": float(np.abs(offset).max()),
+        "sway_end": float(np.abs(rate[-last_second:]).max()),
+        "cycles": int(data.scored),
+        "refused": int(np.count_nonzero(data.status[: data.scored])),
     }
     print(
         f"  TCP off the path:     worst {score['path_worst']:7.1f} mm   "
         f"rms {score['path_rms']:7.1f} mm"
     )
     print(f"  TCP off the goal:     final {score['goal_final']:7.1f} mm")
+    print(
+        f"  sway:                 peak {score['sway_peak']:7.3f} rad   "
+        f"still moving {score['sway_end']:6.3f} rad/s"
+    )
+    coasted = data.fallback.size - data.scored
+    if coasted > 0:
+        print(
+            f"  after {coasted * (data.time[1] - data.time[0]):5.1f} s of coast:"
+            f"   goal {1000 * float(np.linalg.norm(measured[-1] - curve[-1])):7.1f} mm   "
+            f"still moving {float(np.abs(data.state[-last_second:, PASSIVE_RATE]).max()):6.3f} rad/s"
+        )
     return score
 
 
 def summarise(
-    mpc, data, parameters, hydraulics, plan, chain, planner, path, figures: bool
+    mpc, data, parameters, hydraulics, plan, chain, planner, curve, figures: bool
 ) -> dict:
     """Print what the move did, and write the figure and CSV where they are wanted."""
     if figures and not mpc.no_plot:
@@ -486,10 +582,7 @@ def summarise(
         mpc_a2b.write_csv(csv_path, data)
         print(f"Wrote data: {csv_path}")
     mpc_a2b.print_summary(data, parameters)
-    # The plan's own last configuration, not the CLI pose: a random goal has no
-    # pose to quote and the planner's endpoint is what the move was actually for.
-    goal = tool_positions(planner, plan.q[-1:])[0]
-    score = tracking_report(planner, data, path, chain, goal)
+    score = tracking_report(planner, data, chain, curve)
     print(f"reference: {plan.duration:.2f} s plan, {plan.time.size} samples")
     chain.report()
     return score
@@ -517,6 +610,14 @@ def benchmark(scores: list[dict]) -> None:
     print(
         f"  TCP off the goal:     worst {worst('goal_final'):7.1f} mm   "
         f"median     {median('goal_final'):7.1f} mm"
+    )
+    print(
+        f"  sway:                 worst {worst('sway_peak'):7.3f} rad   "
+        f"median     {median('sway_peak'):7.3f} rad"
+    )
+    print(
+        f"  sway still moving:    worst {worst('sway_end'):7.3f} rad/s "
+        f"median     {median('sway_end'):7.3f} rad/s"
     )
     print(
         f"  cycles:               {cycles} of which {refused} refused "
@@ -583,6 +684,10 @@ def main(argv: list[str] | None = None) -> int:
         mpc.a, mpc.b = plan.q[0, rows], plan.q[-1, rows]
         mpc.move_duration = plan.duration
         mpc.tool_position = start.q_tool
+        curve = path_tool_positions(planner, path, mpc.tool_position)
+        # The coast consumes the press, so it starts from unpressed: a press
+        # left over from the last move would end this one before it began.
+        gate.pressed = False
         try:
             a, b = mpc_a2b.validate_movement(mpc, parameters)
             chain = Chain(plant, model, mpc.tool_position, options, markers)
@@ -595,11 +700,14 @@ def main(argv: list[str] | None = None) -> int:
                 scale,
                 a,
                 b,
-                reference=tune_mpc.plan_reference(plan),
                 plant=chain.advance,
                 passive_guess=plan.q[0, list(PASSIVE_INDICES)],
                 path=path,
                 horizon=None if markers is None else chain.show_horizon,
+                off_path=off_path_now(planner, plant, curve),
+                settle_gate=coast_gate(
+                    plant, gate, "\nsettling -- space in the viewer for the next goal"
+                ),
             )
         except (CraneModelError, KeyError, ValueError, RuntimeError) as error:
             print(f"error: {error}", file=sys.stderr)
@@ -618,7 +726,7 @@ def main(argv: list[str] | None = None) -> int:
                 plan,
                 chain,
                 planner,
-                path,
+                curve,
                 figures=rng is None,
             )
         )
@@ -628,9 +736,10 @@ def main(argv: list[str] | None = None) -> int:
             break
         if markers is not None:
             markers.drop("horizon")
-        if plant.viewer is not None:
-            print("\nspace in the viewer for the next goal")
-        if not gate.wait(plant):
+        # The coast did the waiting. With a window open, only a press ends it
+        # with more to come -- unpressed means it closed. Headless there was no
+        # coast and nobody to press, so the chain goes on.
+        if plant.viewer is not None and not gate.pressed:
             break
         # only the pose carries over: `simulate` builds its own initial state, so
         # the next move opens at rest with the load hanging at equilibrium.

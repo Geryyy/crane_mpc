@@ -108,6 +108,11 @@ class Solution:
         return self.inputs[0]
 
 
+#: The optimizer's own bookkeeping rows: no sensor reads them, no valve sees
+#: them, and no transport delay applies to them.
+PROGRESS_ROWS = [cs.X_PROGRESS, cs.X_PROGRESS_RATE]
+
+
 @dataclass
 class PathCycle:
     """
@@ -784,12 +789,23 @@ class Ocp:
         """
         `x` carried forward through the transport dead time under `u`.
 
-        Whole state, actuator rows included: under C3, `u` reaches `ddq` only via lag/force rows.
+        Whole state, actuator rows included: under C3, `u` reaches `ddq` only via
+        lag/force rows, so dropping them would return one state for every command
+        (issue 125).
+
+        Except the progress pair. Nothing about `s`/`v_s` travels to a valve --
+        they are the optimizer's own bookkeeping, and `Cycle` carries them from
+        the last solution's stage 1, which already stands at the instant the next
+        plan takes effect. Rolling them over the delay as well advanced them
+        twice per cycle, which walked `v_s` out of its own box and made
+        `_origined_x0`'s clamp load-bearing rather than a backstop.
         """
         x, u = _finite(x, u)
         if self._predictor is None:
             return x.copy()
-        return self._integrate(self._predictor, x, u)
+        moved = self._integrate(self._predictor, x, u)
+        moved[PROGRESS_ROWS] = x[PROGRESS_ROWS]
+        return moved
 
     def propagate_applied(self, x: np.ndarray, applied) -> np.ndarray:
         """
@@ -807,12 +823,15 @@ class Ocp:
         if not self.replay:
             # Nothing to cut up: zero delay, or the single-input path complains.
             return self.propagate(state, history[0])
+        # Held back across the whole replay, same reason as `propagate`.
+        progress = state[PROGRESS_ROWS].copy()
         for segment in self.replay:
             state = self._integrate(
                 self._segment_predictor[segment.seconds],
                 state,
                 history[min(segment.age, len(history) - 1)],
             )
+        state[PROGRESS_ROWS] = progress
         return state
 
     # -- one cycle ---------------------------------------------------------------
@@ -1011,10 +1030,8 @@ class Ocp:
             upper[cs.X_PROGRESS] = self.progress_ceiling(stage, path)
             return lower, upper
 
-        # Kept, because it is what `cost_terms` has to score against: by the time
-        # the node reports, `Cycle.adopt_solution` has overwritten
-        # `horizon.q_a_ref` in place with the solved states, so refitting from
-        # the horizon there scores the solution against itself.
+        # Kept because `cost_terms` has to score against the path this cycle was
+        # written to, not a refit of it.
         parameter = self._path_parameters(path)
         self._last_parameter = parameter
         self._last_path = path

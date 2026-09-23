@@ -100,6 +100,10 @@ class RunData:
     fallback: np.ndarray
     #: One array per `TIMING_FIELDS` key, same length as `solve_time`.
     timing: dict[str, np.ndarray]
+    #: Cycles the run was asked for. A `settle_gate` may have kept the loop going
+    #: past it; everything after is coast, and scoring it would make the number
+    #: depend on how long somebody held a key.
+    scored: int = 0
 
 
 def parse_arguments(argv: list[str] | None = None) -> argparse.Namespace:
@@ -345,38 +349,6 @@ def solver_stat(solver: AcadosOcpSolver, field: str) -> float:
     return float(np.sum(np.asarray(solver.get_stats(field), dtype=float)))
 
 
-def minimum_jerk(time: float, duration: float) -> tuple[float, float, float]:
-    """Return quintic progress and its first two rates, zero at both endpoints."""
-    if time <= 0.0:
-        return 0.0, 0.0, 0.0
-    if time >= duration:
-        return 1.0, 0.0, 0.0
-    s = time / duration
-    position = 10.0 * s**3 - 15.0 * s**4 + 6.0 * s**5
-    rate = (30.0 * s**2 - 60.0 * s**3 + 30.0 * s**4) / duration
-    accel = (60.0 * s - 180.0 * s**2 + 120.0 * s**3) / (duration * duration)
-    return position, rate, accel
-
-
-def reference_at(
-    time: float, a: np.ndarray, b: np.ndarray, duration: float
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """
-    Evaluate the reference and its first two derivatives at a **virtual** time.
-
-    MPC needs a local second-order model per stage, not a sample -- quintic is
-    analytic so both derivatives are exact; node takes them off its own cubic
-    Hermite resample instead.
-    """
-    progress, rate, accel = minimum_jerk(time, duration)
-    displacement = b - a
-    return (
-        a + progress * displacement,
-        rate * displacement,
-        accel * displacement,
-    )
-
-
 def make_numeric_functions(
     model: object,
 ) -> tuple[ca.Function, ca.Function, ca.Function, ca.Function]:
@@ -509,6 +481,11 @@ def hydraulic_utilisation(
     return np.concatenate([force_use, [flow / flow_limit]])
 
 
+def _grown(array: np.ndarray, extra: int) -> np.ndarray:
+    """Append `extra` zero rows to a log, keeping every axis past the first."""
+    return np.concatenate([array, np.zeros((extra, *array.shape[1:]), array.dtype)])
+
+
 def simulate(
     arguments: argparse.Namespace,
     parameters: dict,
@@ -518,38 +495,45 @@ def simulate(
     scale: np.ndarray,
     a: np.ndarray,
     b: np.ndarray,
-    reference=None,
     plant=None,
     passive_guess=None,
     horizon=None,
     path=None,
+    off_path=None,
+    settle_gate=None,
 ) -> RunData:
     """
     Run the receding-horizon controller against a plant.
 
-    `reference`/`plant` default to this script's own quintic and model-matched
-    ERK4 rollout; passing either replaces that half, leaves the controller alone.
-
-    `plant` is `(state, control, parameter, dt) -> state` over the full `cs.NX`
-    -- must carry C3's lag/progress/force rows since the controller reads them
-    back. `passive_guess` picks the equilibrium branch, i.e. where the run starts.
+    `plant` defaults to a model-matched ERK4 rollout; passing one replaces that
+    half and leaves the controller alone. It is
+    `(state, control, parameter, dt, knots) -> state` over the full `cs.NX` --
+    must carry C3's lag/progress/force rows since the controller reads them back.
+    `knots` is the pair of planned positions the node would publish for this
+    interval, which a plant running an inner loop tracks and the default ignores.
+    `passive_guess` picks the equilibrium branch, i.e. where the run starts.
 
     `horizon`, if given, is handed the (N+1, NX) states in force each cycle --
     the accepted solution, or the shifted previous one where a solve was refused.
+
+    `off_path`, if given, is asked for the tool's distance off the path in
+    metres whenever the progress line prints. It is the caller's metric, not
+    this function's: everything here is joint space, and the number worth
+    watching is millimetres at the tool.
+
+    `settle_gate`, if given, is asked at the end of the run whether to keep
+    cycling; while it says yes the whole chain keeps running with the path
+    already spent, which is how the sway after arrival gets to be watched. Those
+    cycles are logged but sit past `RunData.scored`.
     """
     dt = float(parameters["Ts"])
     intervals = export_ocp.shooting_intervals(parameters)
     steps = int(math.ceil((arguments.move_duration + arguments.settle_duration) / dt))
     base_parameter = parameter_vector(arguments)
     dynamics, bias_u, outputs, static_force = make_numeric_functions(model)
-    if reference is None:
-        # (q, dq, ddq) at a virtual time is the whole contract for a driver to swap curves
-        def reference(time):
-            return reference_at(time, a, b, arguments.move_duration)
-
     if plant is None:
 
-        def plant(state, control, parameter, step_s):
+        def plant(state, control, parameter, step_s, knots=None):
             return rk4_step(dynamics, state, control, parameter, step_s)
 
     # The cost reads a path, not samples of one. Absent a planned curve this is
@@ -617,7 +601,12 @@ def simulate(
     # as when it was virtual time, in the parameter the cost now reads.
     origin = 0.0
 
-    for step in range(steps):
+    #: what the run was asked for; `settle_gate` may push `steps` past it.
+    scored = steps
+    settle_chunk = max(1, int(round(1.0 / dt)))
+
+    step = 0
+    while step < steps:
         virtual_time[step] = origin
         q_ref_log[step] = on_path(origin)
         dq_ref_log[step] = state[
@@ -686,7 +675,14 @@ def simulate(
         )
         if horizon is not None and previous is not None:
             horizon(previous.states)
-        state = plant(state, control, base_parameter, dt)
+        # What the node publishes as this interval's position reference: the
+        # plan, one interval on. `Cycle.adopt_solution` leaves those knots alone,
+        # so the loop underneath tracks the plan rather than a roll of the
+        # measurement -- which is what gives its `p e_pos` an error to integrate.
+        knots = np.array(
+            [on_path(origin), on_path(min(1.0, origin + dt * nominal_rate))]
+        )
+        state = plant(state, control, base_parameter, dt, knots)
         states[step + 1] = state
         origin = min(
             1.0,
@@ -700,11 +696,36 @@ def simulate(
         ):
             reached = on_path(origin)
             error = np.linalg.norm(state[: cs.K_PLANNED_DOF] - reached)
+            # `|q-qref|` is joint space against the path point at this `theta`;
+            # `off path` is millimetres at the tool against the path as a set,
+            # which is what the move is finally scored on.
+            gap = "" if off_path is None else f"  off path={1e3 * off_path():6.1f} mm"
             print(
                 f"t={(step + 1) * dt:6.2f} s  theta={origin:5.3f}  "
                 f"v_s={state[cs.X_PROGRESS_RATE]:5.3f}  status={status:2d}  "
-                f"solve={1e3 * solve_time:7.2f} ms  |q-qref|={error:.4f}"
+                f"solve={1e3 * solve_time:7.2f} ms  |q-qref|={error:.4f}{gap}"
             )
+
+        step += 1
+        if step == steps and settle_gate is not None and settle_gate():
+            # Asked for is over and somebody is still watching: keep the whole
+            # chain turning with the path spent, so the sway after arrival is
+            # something you can look at. Grown a chunk at a time -- a coast has
+            # no length to preallocate for.
+            steps += settle_chunk
+            states = _grown(states, settle_chunk)
+            q_ref_log = _grown(q_ref_log, settle_chunk)
+            dq_ref_log = _grown(dq_ref_log, settle_chunk)
+            q_eq_log = _grown(q_eq_log, settle_chunk)
+            virtual_time = _grown(virtual_time, settle_chunk)
+            controls = _grown(controls, settle_chunk)
+            hydraulics_used = _grown(hydraulics_used, settle_chunk)
+            solve_times = _grown(solve_times, settle_chunk)
+            statuses = _grown(statuses, settle_chunk)
+            fallback = _grown(fallback, settle_chunk)
+            timings = {
+                key: _grown(value, settle_chunk) for key, value in timings.items()
+            }
 
     virtual_time[steps] = origin
     q_ref_log[steps] = on_path(origin)
@@ -740,6 +761,7 @@ def simulate(
         status=statuses,
         fallback=fallback,
         timing=timings,
+        scored=scored,
     )
 
 
@@ -1082,48 +1104,50 @@ def plot(
 
 def print_summary(data: RunData, parameters: dict) -> None:
     """Print compact terminal, constraint, and timing metrics."""
-    q = data.state[-1, : cs.K_PLANNED_DOF]
-    final_error = q - data.q_ref[-1]
+    # The coast a `settle_gate` added is however many cycles somebody watched
+    # for; reading it here would put that into every number below.
+    end = data.scored or data.status.size
+    q = data.state[end, : cs.K_PLANNED_DOF]
+    final_error = q - data.q_ref[end]
     sway = (
-        data.state[:, cs.X_PASSIVE_POSITION : cs.X_PASSIVE_POSITION + cs.K_PASSIVE_DOF]
-        - data.q_eq
+        data.state[
+            : end + 1, cs.X_PASSIVE_POSITION : cs.X_PASSIVE_POSITION + cs.K_PASSIVE_DOF
+        ]
+        - data.q_eq[: end + 1]
     )
-    over_budget = data.solve_time > float(parameters["solve_budget"])
+    over_budget = data.solve_time[:end] > float(parameters["solve_budget"])
     print("\nSummary")
     print(f"  final per-axis error: {np.array2string(final_error, precision=5)}")
     print(f"  final error norm:     {np.linalg.norm(final_error):.6f}")
     print(f"  peak sway offset:     {np.max(np.abs(sway), axis=0)} rad")
-    print(f"  peak hydraulic use:   {np.max(data.hydraulic_use, axis=0)}")
+    print(f"  peak hydraulic use:   {np.max(data.hydraulic_use[:end], axis=0)}")
     print(
-        f"  solve time median/max:{1e3 * np.median(data.solve_time):.2f}/{1e3 * np.max(data.solve_time):.2f} ms"
+        f"  solve time median/max:{1e3 * np.median(data.solve_time[:end]):.2f}/"
+        f"{1e3 * np.max(data.solve_time[:end]):.2f} ms"
     )
     split = "  ".join(
-        f"{field[5:]}={1e3 * np.nanmedian(data.timing[field]):.2f}"
+        f"{field[5:]}={1e3 * np.nanmedian(data.timing[field][:end]):.2f}"
         for field in TIMING_FIELDS
         if field.startswith("time_")
     )
     print(f"  acados median ms:     {split}")
-    print(f"  qp iterations median: {np.nanmedian(data.timing['qp_iter']):.0f}")
+    print(f"  qp iterations median: {np.nanmedian(data.timing['qp_iter'][:end]):.0f}")
     # box is shared; same solver measured 12.6ms idle vs 73ms at load 7.9 -- load matters
     print(
         f"  load average 1/5 min: {os.getloadavg()[0]:.2f} / {os.getloadavg()[1]:.2f}"
     )
-    print(
-        f"  nonzero statuses:     {np.count_nonzero(data.status)} / {data.status.size}"
-    )
+    print(f"  nonzero statuses:     {np.count_nonzero(data.status[:end])} / {end}")
     print(
         f"  over budget:          {np.count_nonzero(over_budget)} / {over_budget.size}"
     )
-    print(
-        f"  fallback cycles:      {np.count_nonzero(data.fallback)} / {data.fallback.size}"
-    )
-    rate = data.state[:, cs.X_PROGRESS_RATE]
+    print(f"  fallback cycles:      {np.count_nonzero(data.fallback[:end])} / {end}")
+    rate = data.state[: end + 1, cs.X_PROGRESS_RATE]
     print(
         f"  progress rate min/mean/max: {rate.min():.4f} / {rate.mean():.4f} / {rate.max():.4f}"
     )
     print(
-        f"  virtual time spent:   {data.virtual_time[-1]:.3f} s of plan in "
-        f"{data.time[-1]:.3f} s of wall clock"
+        f"  virtual time spent:   {data.virtual_time[end]:.3f} s of plan in "
+        f"{data.time[end]:.3f} s of wall clock"
     )
 
 

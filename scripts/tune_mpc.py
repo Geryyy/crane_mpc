@@ -61,25 +61,6 @@ def arguments(argv: list[str]) -> tuple[argparse.Namespace, list[str]]:
     return parser.parse_known_args(argv)
 
 
-def plan_reference(plan):
-    """
-    Wrap a `crane_planning` plan as the callable `mpc_a2b.simulate` asks for.
-
-    Interpolates linearly between the plan's 40ms samples (the node itself uses
-    cubic Hermite; a third curve here would be a third answer). Past the end
-    `np.interp` clamps onto the last sample, pinned to rest.
-    """
-    rows = list(cs.K_PLANNED_ROWS)
-
-    def sample(time: float) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        return tuple(
-            np.array([np.interp(time, plan.time, field[:, row]) for row in rows])
-            for field in (plan.q, plan.dq, plan.ddq)
-        )
-
-    return sample
-
-
 def mujoco_plant(description: str, model, q_tool: float, options):
     """
     Build the plant: MuJoCo for the rigid fourteen, the model for the rest.
@@ -96,7 +77,7 @@ def mujoco_plant(description: str, model, q_tool: float, options):
     force = slice(cs.X_ACTUATED_FORCE, cs.X_ACTUATED_FORCE + cs.K_PLANNED_DOF)
     seeded = False
 
-    def advance(state, control, parameter, dt):
+    def advance(state, control, parameter, dt, knots=None):
         nonlocal seeded
         if not seeded:
             plant.set_rigid_state(state[:NX_RIGID], q_tool)
@@ -145,7 +126,6 @@ def main(argv: list[str] | None = None) -> int:
             scale,
             a,
             b,
-            reference=plan_reference(plan),
             plant=plant,
             passive_guess=plan.q[0, list(PASSIVE_INDICES)],
         )

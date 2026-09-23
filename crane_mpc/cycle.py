@@ -15,7 +15,7 @@ import numpy as np
 from crane_model import symbolic as cs
 
 from . import horizon as hz
-from .solver import Outcome
+from .solver import PROGRESS_ROWS, Outcome
 
 REFERENCE_TOPIC = "/crane/reference"
 JOINT_STATE_TOPIC = "/joint_states"
@@ -601,11 +601,23 @@ class Cycle:
         return Verdict(text, published=False, severity="warn")
 
     def adopt_solution(self, solution) -> None:
-        """Write the solved horizon as the canonical eight the wire carries."""
+        """
+        Write the solved horizon as the canonical eight the wire carries.
+
+        The planned positions are **not** written. `gates` put the plan itself in
+        `horizon.q_a_ref` (`hz.resample` of the reference at `reference_progress`)
+        and it stays there: that is the reference the JTC is meant to chase.
+        Overwriting it with the solved states re-anchored it on the measurement
+        every cycle -- stage 0 is `x0` pinned -- so `p e_pos`, which on a velocity
+        command interface *is* the integral action, saw no error to integrate and
+        the machine parked on the solver's steady-state offset (11 mrad, measured,
+        not decaying over 30 s).
+
+        `dq_a_ref` stays the solver's, so `effort = u - dq_a_ref` still makes the
+        two open-loop branches sum to `u`; what changes is only what the position
+        error is measured against.
+        """
         states = solution.states
-        self.horizon.q_a_ref[:, :PLANNED_DOF] = states[
-            :, cs.X_PLANNED_POSITION : cs.X_PLANNED_POSITION + PLANNED_DOF
-        ]
         self.horizon.dq_a_ref[:, :PLANNED_DOF] = states[
             :, cs.X_PLANNED_VELOCITY : cs.X_PLANNED_VELOCITY + PLANNED_DOF
         ]
@@ -672,8 +684,25 @@ class Cycle:
             self.last_input = np.zeros(cs.NU_PROGRESS)
             self.last_input[:PLANNED_DOF] = self.horizon.dq_a_ref[1, :PLANNED_DOF]
         if solution.outcome is not Outcome.FAILED:
-            # C3's own rows carried: command in flight, actuator force -- unmeasured.
-            self.carried = solution.states[1].copy()
+            # Two kinds of unmeasured row, and they want different stages.
+            #
+            # C3's command lag and force are physical. `read_state` puts them
+            # beside a `/joint_states` sample stamped at `now`, and `propagate`
+            # then rolls the lot over the dead time -- so they have to enter that
+            # roll at `now`, which is `states[0]`: this cycle's own `x0`, one
+            # `sensor_to_valve_delay` after this cycle began, i.e. `now` for the
+            # next one. (That identity is `Ts == sensor_to_valve_delay`, the same
+            # grid condition `replay_schedule` already stands on.) Taking them
+            # from `states[1]` handed the roll a state one interval *past* the
+            # measurement and then advanced it again, so the solver believed
+            # hydraulic force a full delay before it was built -- one-signed and
+            # optimistic, worst on the short-lag axes.
+            #
+            # The progress pair is not physical and no sensor overwrites it, so
+            # it wants the stage that stands where the next `x0` does -- that is
+            # `states[1]` -- and `Ocp.propagate` holds it out of the roll.
+            self.carried = solution.states[0].copy()
+            self.carried[PROGRESS_ROWS] = solution.states[1][PROGRESS_ROWS]
 
         self.next_first_knot_ns += int(self.Ts * NANOSECONDS)
         # `s` is a path parameter over the horizon's own window, not seconds:

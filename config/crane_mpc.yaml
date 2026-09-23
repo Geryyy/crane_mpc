@@ -70,7 +70,23 @@ crane_mpc:
       # so this prices boom+arm travel, not swing. Node's own centre 20.0 is
       # worse than 0.0 on tracking and sway (issue 137); centre is issue 049's.
       q_u: [0.0, 0.0]
-      dq_u: [4.0, 4.0]
+      # 16x from 4.0, which had never moved since this file was written -- while
+      # `q_a` went 4 -> 40, `tool` 0 -> 1000, `progress` 160 -> 20480 and
+      # `terminal_scale` 20 -> 60 around it. Sway was not repriced, so its share
+      # of the cost collapsed and the load was still swinging at the end of the
+      # move. `sim_chain --random 4`, seeds 1 and 2, sway rate over the last
+      # second of the move against the 0.04 rad/s `dq_u_settled` verdict:
+      #
+      #   dq_u   still moving (med)   path rms (med)   goal (med)
+      #    4.0     0.169 | 0.147       41.1 | 37.4     32.9 | 31.0
+      #   64.0     0.041 | 0.037       32.8 | 31.7     13.2 | 31.6
+      #
+      # 4x less residual swing and the path improves with it on both seeds --
+      # the swing was costing the path, not buying anything. Arrival is much
+      # better on seed 1 and a wash on seed 2. No refused cycle either way.
+      # Sway *peak* barely moves (0.18 vs 0.16, 0.20 vs 0.19): this prices the
+      # swinging, not the throw, which is q_u's job and issue 049's.
+      dq_u: [64.0, 64.0]
       # Priced against h_eff, not zero -- a zero reference prices holding the
       # machine's own weight.
       tau_a: [1.0e-8, 1.0e-8, 1.0e-8, 1.0e-8, 1.0e-8, 1.0e-8]
