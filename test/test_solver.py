@@ -430,3 +430,52 @@ def test_the_feedback_phase_refuses_to_run_on_nothing(ocp, state):
     """A cycle whose preparation was invalidated has to take `solve`, not guess."""
     with pytest.raises(RuntimeError, match="without a preparation"):
         ocp.feedback(state)
+
+
+def resting_state(ocp, parameters):
+    """
+    A state the machine can actually sit in: the passive pair at *its own*
+    equilibrium for the pose, not at zero.
+
+    `hold_state` seeds the passive rows at zero, which for this tool is 1.57 rad
+    from where the load hangs, so a solve on it is the optimizer fighting a
+    pendulum held sideways. That is a legitimate fixture for the box tests and a
+    trap for anything reading `u`.
+    """
+    from crane_model.conventions import Tool
+    from crane_model.model import CraneModel
+
+    description = problem.default_description().read_text()
+    q_a = np.array([0.785, 0.5236, 0.5236, 0.25, 0.0, 0.21])
+    q_eq = np.asarray(CraneModel(description, Tool.PZS100).passive_equilibrium(q_a))
+    x = np.zeros(cs.NX)
+    x[cs.X_PLANNED_POSITION : cs.X_PLANNED_POSITION + PLANNED] = q_a[:PLANNED]
+    x[cs.X_PASSIVE_POSITION : cs.X_PASSIVE_POSITION + cs.K_PASSIVE_DOF] = q_eq
+    x[cs.X_PROGRESS_RATE] = float(
+        parameters["limits"]["progress_rate_headroom"]
+    ) * problem.nominal_progress_rate(parameters)
+    ocp.pin_tool(0.21)
+    x[cs.X_ACTUATED_FORCE : cs.X_ACTUATED_FORCE + PLANNED] = ocp.static_hold_force(x)
+    return x, q_eq
+
+
+def test_a_machine_at_rest_asked_to_stay_there_is_commanded_nothing(ocp, parameters):
+    """
+    The null test. `|u| <= u_max` is not enough on its own: a bang-bang solution
+    sitting exactly on the bound satisfies it, which is what the live chain was
+    doing while every box assertion passed.
+
+    Both halves matter. Zero command has to hold the state, and the solve on a
+    reference that asks for no motion has to return zero -- otherwise the plan
+    the machine executes is full-scale velocity on a stationary crane.
+    """
+    x, q_eq = resting_state(ocp, parameters)
+    still = ocp.propagate(x, np.zeros(cs.NU_PROGRESS))
+    rows = slice(cs.X_PLANNED_POSITION, cs.X_PLANNED_POSITION + PLANNED)
+    assert np.allclose(still[rows], x[rows], atol=1e-6)
+
+    horizon = horizon_holding(ocp, x[rows])
+    u_max = np.asarray(parameters["limits"]["u_max"][:PLANNED])
+    solution = ocp.solve(x, horizon, q_eq)
+    assert solution.outcome is not Outcome.FAILED
+    assert np.max(np.abs(solution.inputs[0, :PLANNED]) / u_max) < 0.05
