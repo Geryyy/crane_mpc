@@ -769,8 +769,14 @@ class Cycle:
         if solution.outcome is Outcome.CONVERGED:
             self.last_input = solution.u0.copy()
         else:
+            # `ladder` shifted the previous horizon into `self.horizon` and
+            # published it, so `u[0]` is what the machine got -- the same row
+            # `adopt_solution` fills from `solution.u0` on the converged rung.
+            # Not `dq_a_ref`: `u != dq_ref`, and `propagate_applied` replays
+            # this to build C3's force, so the reference understates the
+            # build-up once per missed budget and compounds over a run of them.
             self.last_input = np.zeros(cs.NU_PROGRESS)
-            self.last_input[:PLANNED_DOF] = self.horizon.dq_a_ref[1, :PLANNED_DOF]
+            self.last_input[:PLANNED_DOF] = self.horizon.u[0, :PLANNED_DOF]
         if solution.outcome is not Outcome.FAILED:
             # Two kinds of unmeasured row, and they want different stages.
             #

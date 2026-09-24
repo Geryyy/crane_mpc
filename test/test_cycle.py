@@ -647,3 +647,30 @@ def test_a_spent_path_charges_time_so_the_plan_can_still_expire():
     one.advance(solution(Outcome.CONVERGED, progress_advance=0.0), 0, 0.5, 1.0)
     assert one.reference_progress == pytest.approx(Ts)
     assert not one.progress_stalled
+
+
+def test_a_shifted_horizon_records_the_command_it_published():
+    """
+    `last_input` is what `propagate_applied` replays, so it must be what went out.
+
+    On the shift rung the machine gets the previous horizon's `u`, not the
+    reference velocity: `u != dq_ref` (CLAUDE.md), and force builds on
+    `tau_dot = k*(u_f - dq)`, so recording `dq_a_ref` understates the build-up
+    once per missed budget and compounds over consecutive misses.
+    """
+    one = cycle()
+    one.last_horizon = hz.Knots.zeros(KNOTS)
+    # Distinct per knot and distinct between the two fields, so which one was
+    # taken -- and at which index -- is visible in the failure.
+    one.last_horizon.u[:, :DOF] = 10.0 + np.arange(KNOTS)[:, None]
+    one.last_horizon.dq_a_ref[:, :DOF] = 100.0 + np.arange(KNOTS)[:, None]
+    one.last_tcp_states = np.arange(KNOTS * cs.NX, dtype=float).reshape(KNOTS, cs.NX)
+    one.consecutive_failures = 1
+
+    verdict = one.ladder(solution(Outcome.BUDGET_EXCEEDED), 3, 0.02)
+    assert verdict.published and one.applied_previous
+    published = one.horizon.u[0, :DOF].copy()
+
+    one.advance(solution(Outcome.BUDGET_EXCEEDED), 10**9, 0.1, 2.0)
+
+    assert one.last_input[:DOF] == pytest.approx(published)
