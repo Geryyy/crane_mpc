@@ -17,9 +17,11 @@ The node is Python and the solver is generated C:
 | `crane_mpc/solver.py` | the solver wrapper: what is written before a solve and read after, the dead-time predictor and the static hold force |
 | `crane_mpc/horizon.py` | the reference read off the wire, resampled, and written back |
 | `crane_mpc/problem.py` | the OCP itself, as an `AcadosOcp` |
+| `crane_mpc/hunting.py` | is the chain off, or oscillating? The two scores, kept apart |
 | `scripts/export_ocp.py` | **run this first**: the same problem generated, compiled and recorded |
 | `scripts/bench_ocp.py` | a corpus of sampled moves, and what the solver did on each cycle |
 | `scripts/sweep_ocp.py` | `bench_ocp.py` once per acados variant, tabled |
+| `scripts/sweep_mismatch.py` | `sim_chain.py` once per application delay, PI rung and plant sample, one CSV row each |
 
 `problem.py` is imported by both the node and the exporter, so the solver a
 deployment runs and the tree that is checked in are one definition of the

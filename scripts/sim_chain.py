@@ -28,15 +28,25 @@ Four ways this is not the real machine -- read them before trusting a number:
 * the tool axis is not driven here; on the machine a separate PID holds it.
 * the MPC reads the true actuator forces out of the simulation. The real node
   has no force sensor and estimates them instead.
-* the MPC result is used the instant it exists. On the machine solve time and
-  network delay sit in between.
+* the MPC result is used the instant it exists **unless `--apply-delay` says
+  otherwise**. On the machine solve time, DDS and the async JTC sit in between,
+  on top of the modelled 60 ms.
+
+Three of those four are still open. The fourth, and the plant mismatch the
+chain was otherwise blind to, are what `--psi-gain-*`, `--k-scale`/`--d-scale`,
+`--lag-shift`, `--apply-delay` and `--pi-rung` are for: the *plant* deviates
+from the fit while the solver keeps the shipped one. Nothing is set by default,
+and with nothing set this is the run it was before those flags existed.
+`scripts/sweep_mismatch.py` drives the grid; `crane_model/mismatch.py` holds
+what a sample may and may not be.
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import sys
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import numpy as np
@@ -61,6 +71,12 @@ from crane_model.conventions import (  # noqa: E402
     canonical_joints,
 )
 from crane_model.errors import CraneModelError  # noqa: E402
+from crane_model.mismatch import (  # noqa: E402
+    PI_RUNGS,
+    PsiGain,
+    perturb_fit,
+    pi_rung,
+)
 from crane_model.mujoco_plant import (  # noqa: E402
     GROUND_Z,
     NX_RIGID,
@@ -72,6 +88,7 @@ from crane_model.mujoco_plant import (  # noqa: E402
 from crane_model.symbolic import K_ACTUATOR_FIT  # noqa: E402
 from crane_model.velocity_loop import VelocityLoop, load_velocity_loop  # noqa: E402
 from crane_mpc import solver as ocp_runtime  # noqa: E402
+from crane_mpc.hunting import hunting_report  # noqa: E402
 from crane_mpc.problem import PATH_POINTS  # noqa: E402
 from crane_planning.ocp import evaluate  # noqa: E402
 
@@ -134,6 +151,66 @@ def arguments(argv: list[str]) -> tuple[argparse.Namespace, list[str]]:
         "viewer releases the next one. Plot and CSV are off",
     )
     parser.add_argument("--seed", type=int, default=None, help="--random's stream")
+    # --- the plant mismatch, all identity by default -------------------------
+    for side in ("positive", "negative"):
+        parser.add_argument(
+            f"--psi-gain-{side}",
+            type=float,
+            nargs=len(AXIS_NAMES),
+            default=None,
+            metavar="G",
+            help=f"Psi's static gain error on a {side} command, per axis "
+            f"({' '.join(AXIS_NAMES)}); 1 1 1 1 1 is Psi exact",
+        )
+    parser.add_argument(
+        "--k-scale",
+        type=float,
+        nargs=len(AXIS_NAMES),
+        default=None,
+        metavar="S",
+        help="multiply C3's k per axis, plant side only. Needs --d-scale: k and "
+        "d are one identification",
+    )
+    parser.add_argument(
+        "--d-scale",
+        type=float,
+        nargs=len(AXIS_NAMES),
+        default=None,
+        metavar="S",
+        help="multiply the joint damping per axis, plant side only",
+    )
+    parser.add_argument(
+        "--lag-shift",
+        type=float,
+        default=0.0,
+        help="move C3's lag/dead-time split by this many seconds at constant "
+        "sum: tau_v += shift, dead time -= shift, on the plant only. Only the "
+        "sum is identified. On the shipped fit every non-zero shift is refused "
+        "-- the dead time is common and the arm sits at tau_v = 0",
+    )
+    parser.add_argument(
+        "--apply-delay",
+        type=float,
+        default=0.0,
+        help="s between a cycle's result existing and the JTC running it: solve "
+        "time, DDS and the async JTC, on top of the modelled dead time. The "
+        "plant holds the previous result meanwhile. Rounded up to a whole "
+        "control period, so at 100 Hz anything in (0, 0.01] is one tick",
+    )
+    parser.add_argument(
+        "--pi-rung",
+        choices=PI_RUNGS,
+        default="full",
+        help="which of the inner loop's two branches is live: full, "
+        "no-integral (p = 0, d kept) or feedforward (p = d = 0)",
+    )
+    parser.add_argument(
+        "--score-json",
+        type=Path,
+        default=None,
+        help="write one machine-readable score per move here; what "
+        "sweep_mismatch.py reads back",
+    )
     parser.add_argument("--viewer", action="store_true")
     parser.add_argument(
         "--realtime",
@@ -144,10 +221,33 @@ def arguments(argv: list[str]) -> tuple[argparse.Namespace, list[str]]:
     return parser.parse_known_args(argv)
 
 
+@dataclass
+class Published:
+    """
+    One cycle's published result, and the reference it goes on rolling.
+
+    The node publishes a trajectory and a command together, in one message, and
+    the JTC keeps interpolating the last one it received until the next arrives.
+    So a cycle's result is one object with one availability time, and there is
+    more than one of them in flight whenever `--apply-delay` exceeds nothing.
+    """
+
+    available_at: float
+    control: np.ndarray
+    u_mpc: np.ndarray
+    knots: np.ndarray | None
+    reference: np.ndarray
+    #: ticks spent *live*, which is what the knot fraction is read off -- not
+    #: ticks since the solve, which would include the wait and pin the fraction.
+    live_tick: int = 0
+
+
 class Chain:
     """The three blocks under the MPC, plus what they did, per controller tick."""
 
-    def __init__(self, plant, model, q_tool: float, options, markers=None) -> None:
+    def __init__(
+        self, plant, model, q_tool: float, options, markers=None, fit=None
+    ) -> None:
         self.options = options
         self.q_tool = float(q_tool)
         self.dynamics, _, _, _ = mpc_a2b.make_numeric_functions(model)
@@ -155,16 +255,24 @@ class Chain:
         #: open a second window.
         self.plant = plant
         self.markers = markers
+        #: the plant's C3 fit; the solver keeps the shipped one either way.
+        self.fit = K_ACTUATOR_FIT if fit is None else fit
 
         gains_by_joint, rate_hz = load_velocity_loop()
         gains = [gains_by_joint[canonical_joints()[index]] for index in PLANNED]
         self.step_s = 1.0 / (options.control_rate or rate_hz)
         self.wrap = plant.continuous_axes
-        self.loop = VelocityLoop(gains, self.step_s, continuous=self.wrap)
+        self.loop = VelocityLoop(
+            pi_rung(gains, options.pi_rung), self.step_s, continuous=self.wrap
+        )
         self.ff_scale = np.array([axis.ff_velocity_scale for axis in gains])
         self.low = np.array([axis.u_clamp_min for axis in gains])
         self.high = np.array([axis.u_clamp_max for axis in gains])
+        self.psi = PsiGain(options.psi_gain_positive, options.psi_gain_negative)
 
+        # The *predictor's* dead time is the node's, so it stays the shipped
+        # fit's: the node cannot know the plant moved. `--lag-shift` moves only
+        # the plant's, which is the whole point of the split being a knob.
         self.dead_time_s = (
             K_ACTUATOR_FIT.dead_time_s
             if options.dead_time is None
@@ -172,16 +280,33 @@ class Chain:
         )
         self.predict = not options.no_predict and self.dead_time_s > 0.0
         self.tau_max = None if options.no_clamp else plant.effort_limits
+        #: what C3 actually delays by, which `--dead-time` overrides and
+        #: `--lag-shift` moves. Recorded rather than re-derived: a score whose
+        #: dead time cannot be read back off the run is not a score.
+        self.plant_dead_time_s = (
+            self.fit.dead_time_s
+            if options.dead_time is None
+            else float(options.dead_time)
+        )
         self.actuator = C3Actuator(
             timestep=plant.model.opt.timestep,
-            dead_time_s=options.dead_time,
+            fit=self.fit,
+            dead_time_s=self.plant_dead_time_s,
             tau_max=self.tau_max,
         )
+        self.apply_delay_s = float(options.apply_delay)
         self.log: dict[str, list] = {key: [] for key in ("u", "e_pos", "pi", "tau")}
         #: true plant state per cycle; `advance` hands the solver a prediction, so
         #: `simulate`'s own log is not the machine.
         self.measured: list[np.ndarray] = []
+        #: which branch of `Cycle.adopt_solution` the reference came from --
+        #: `hz.resample` on the window fit, or `c(origin + s)` on the planner's
+        #: curve. It decides what the integral action works against.
+        self.reference_branch = "none"
         self._seeded = False
+        self._clock = 0.0
+        self._flight: list[Published] = []
+        self._live: Published | None = None
 
     def _seed(self, state: np.ndarray) -> None:
         self.plant.set_rigid_state(state[:NX_RIGID], self.q_tool)
@@ -201,6 +326,11 @@ class Chain:
         feedforward branches stay the solver's, integrated with the exported
         model as before, which is what keeps `effort = u - dq_a_ref` summing to
         the OCP's own `u`.
+
+        Under `--apply-delay` this cycle's result is not what drives: it goes
+        into flight and the loop keeps running the one that arrived a delay ago.
+        At zero delay the queue holds exactly this cycle and the tick loop is
+        the one that was here before.
         """
         if not self._seeded:
             self._seed(state)
@@ -214,24 +344,71 @@ class Chain:
                 f"T_s = {dt} s; pick a rate that does"
             )
 
-        u_mpc = np.asarray(control[: cs.NU], dtype=float)
-        reference = np.asarray(state, dtype=float).copy()
+        self.reference_branch = "curve" if knots is not None else "velocity"
         ticks = int(round(exact))
-        for tick in range(ticks):
+        fresh = Published(
+            available_at=self._clock + self.apply_delay_s,
+            control=np.asarray(control, dtype=float).copy(),
+            u_mpc=np.asarray(control[: cs.NU], dtype=float).copy(),
+            knots=None if knots is None else np.asarray(knots, dtype=float).copy(),
+            reference=np.asarray(state, dtype=float).copy(),
+        )
+        self._flight.append(fresh)
+        if self._live is None:
+            # Nothing has been published yet, so the JTC holds where it stands:
+            # the start pose, no feedforward. That is the trajectory it has.
+            self._live = replace(
+                fresh,
+                control=np.zeros_like(fresh.control),
+                u_mpc=np.zeros(cs.NU),
+                knots=None,
+                reference=fresh.reference.copy(),
+            )
+        for _ in range(ticks):
+            # Selected at the *start* of the tick, because the result chosen here
+            # then drives the whole tick. Advancing the clock first made the
+            # effective delay one control period short -- `--apply-delay 0.01` at
+            # a 100 Hz loop came out as no delay at all.
+            while self._flight and self._flight[0].available_at <= self._clock + 1e-12:
+                self._live = self._flight.pop(0)
+            live = self._live
             # the JTC samples the trajectory twice per tick: the PI error against
             # the control instant, both feedforward branches one period later.
-            q_ref, dq_ref = reference[POSITION].copy(), reference[VELOCITY].copy()
-            if knots is not None:
-                # between the two published knots, as the JTC interpolates.
-                q_ref = knots[0] + (knots[1] - knots[0]) * (tick / ticks)
-            reference = mpc_a2b.rk4_step(
-                self.dynamics, reference, control, parameter, self.step_s
-            )
+            q_ref = live.reference[POSITION].copy()
+            dq_ref = live.reference[VELOCITY].copy()
+            if live.knots is not None:
+                # Between the two published knots, as the JTC interpolates --
+                # counted from when this result went live, never from when it was
+                # solved. Counting from the solve pins the fraction at 1 for
+                # every delay of a whole T_s or more, and the position reference
+                # then steps once a cycle instead of ramping: a 60 ms sawtooth
+                # straight into `p e_pos`, which is the branch being measured.
+                # The node publishes a whole horizon and its JTC never runs off
+                # the end of one; `simulate` hands this two knots per interval.
+                #
+                # One result is published per cycle and each stays live for
+                # exactly `ticks` ticks, so the clamp is unreachable; it is here
+                # because a frozen reference is the failure to avoid, not to hide.
+                q_ref = live.knots[0] + (live.knots[1] - live.knots[0]) * min(
+                    1.0, live.live_tick / ticks
+                )
+            # Every result in flight keeps rolling, live or not: it is the state
+            # the node already committed to, and it has to be where it would be
+            # by the time the JTC gets to run it.
+            for held in (live, *self._flight):
+                held.reference = mpc_a2b.rk4_step(
+                    self.dynamics,
+                    held.reference,
+                    held.control,
+                    parameter,
+                    self.step_s,
+                )
+            live.live_tick += 1
             # effort = u - dq_a_ref per knot, as crane_planning writes it. The
             # loop adds ff_scale*dq_ref itself, so the two open-loop branches sum
             # to the OCP's own `u` -- the command C3's force state needs.
-            dq_next = reference[VELOCITY]
-            forward = self.ff_scale * (dq_next - dq_ref) + (u_mpc - dq_next)
+            dq_next = live.reference[VELOCITY]
+            forward = self.ff_scale * (dq_next - dq_ref) + (live.u_mpc - dq_next)
             command = self.loop.step(
                 q_ref,
                 dq_ref,
@@ -240,16 +417,20 @@ class Chain:
                 feedforward=forward,
             )
             self._record(command, q_ref, dq_ref, forward)
-            self.plant.drive(self.actuator, command, self.step_s)
+            # Psi sits between the loop and the Paltronic; `psi.apply` is what it
+            # gets wrong. Identity unless asked, and exactly so.
+            self.plant.drive(self.actuator, self.psi.apply(command), self.step_s)
             # sampled once per tick while C3 runs at 0.5 ms, so the clamp duty is
             # a lower bound.
             self.log["tau"].append(self.actuator.tau.copy())
+            self._clock += self.step_s
 
-        # the progress pair is virtual -- no plant holds it, and `reference`
-        # already rolled it the full T_s under the same constant input.
+        # the progress pair is virtual -- no plant holds it, and the fresh
+        # result's own reference rolled it the full T_s under this cycle's input,
+        # whether or not that input ever reached a valve.
         following = np.asarray(state, dtype=float).copy()
-        following[cs.X_PROGRESS] = reference[cs.X_PROGRESS]
-        following[cs.X_PROGRESS_RATE] = reference[cs.X_PROGRESS_RATE]
+        following[cs.X_PROGRESS] = fresh.reference[cs.X_PROGRESS]
+        following[cs.X_PROGRESS_RATE] = fresh.reference[cs.X_PROGRESS_RATE]
         following[:NX_RIGID] = self.plant.state
         following[LAG] = self.actuator.u_f[list(cs.K_LAG_AXES)]
         following[FORCE] = self.actuator.tau
@@ -290,8 +471,14 @@ class Chain:
         self.log["e_pos"].append(error)
         self.log["pi"].append(command - open_loop)
 
-    def report(self) -> None:
-        """Per axis: how hard the inner loop worked, and what it ran out of."""
+    def report(self) -> dict:
+        """
+        Per axis: how hard the inner loop worked, and what it ran out of.
+
+        Returns `max|e_pos|` per axis, which is the column the `1/p` ordering is
+        read off: the chattering feedforward is common to every axis and each
+        axis' PI resists it in proportion to `p`.
+        """
         pi = np.array(self.log["pi"])
         error = np.array(self.log["e_pos"])
         tau = np.array(self.log["tau"])
@@ -302,6 +489,17 @@ class Chain:
             f"dead time {self.dead_time_s * 1e3:.0f} ms "
             f"({'predicted' if self.predict else 'uncompensated'}), "
             f"block 4 {'off' if self.tau_max is None else 'on'}"
+        )
+        # The plant's fit against the shipped one the solver kept: that ratio is
+        # the mismatch, and a run whose own log does not carry it is not evidence.
+        print(
+            f"mismatch: PI rung {self.options.pi_rung}, apply delay "
+            f"{self.apply_delay_s * 1e3:.0f} ms, plant lag "
+            f"{np.array(self.fit.tau_v)} s over "
+            f"{self.plant_dead_time_s * 1e3:.0f} ms, "
+            f"plant k / solver k {np.array(self.fit.k) / np.array(K_ACTUATOR_FIT.k)}, "
+            f"Psi gain {self.psi.positive}/{self.psi.negative}, "
+            f"reference from the {self.reference_branch}"
         )
         # e_pos is against the MPC's horizon, which restarts at the measured state
         # every cycle: what the inner loop is left to fix, not the plan error.
@@ -319,6 +517,7 @@ class Chain:
                 f"{np.abs(command[:, axis]).max():8.4f} "
                 f"{np.mean(saturated[:, axis]):9.1%} {clamped}"
             )
+        return {"e_pos_worst": [float(value) for value in np.abs(error).max(axis=0)]}
 
 
 #: draws before a goal, or `plan_move`, gives up. 62% of joint draws clear both
@@ -579,6 +778,31 @@ def tracking_report(planner, data, chain, curve) -> dict:
     return score
 
 
+def hunting_score(data, chain) -> dict:
+    """
+    Score hunting on the cycle grid, beside the tracking numbers and never in them.
+
+    The command judged is `data.control`, the `u` the node publishes -- the same
+    signal issue 155 watched flip sign every cycle on the live graph. The rate
+    comes off the machine's own state over the run's last second, the window
+    `tracking_report` judges `sway_end` in, and for the same reason.
+    """
+    dt = float(data.time[1] - data.time[0])
+    last_second = max(1, int(round(1.0 / dt)))
+    score = hunting_report(
+        data.control[: data.scored, : cs.NU],
+        data.state[: data.scored + 1, VELOCITY],
+        max(0, data.scored + 1 - last_second),
+        names=AXIS_NAMES,
+    )
+    print(
+        f"  hunting:              reversals {score['reversals_worst']:6.1%}   "
+        f"dq still running {score['dq_sustained_worst']:6.3f} rad/s   "
+        + (f"HUNTING {score['hunting_axes']}" if score["hunting"] else "quiet")
+    )
+    return score
+
+
 def summarise(
     mpc, data, parameters, hydraulics, plan, chain, planner, curve, figures: bool
 ) -> dict:
@@ -591,8 +815,13 @@ def summarise(
         print(f"Wrote data: {csv_path}")
     mpc_a2b.print_summary(data, parameters)
     score = tracking_report(planner, data, chain, curve)
+    score.update(hunting_score(data, chain))
     print(f"reference: {plan.duration:.2f} s plan, {plan.time.size} samples")
-    chain.report()
+    score.update(chain.report())
+    score["reference_branch"] = chain.reference_branch
+    score["apply_delay_s"] = chain.apply_delay_s
+    score["pi_rung"] = chain.options.pi_rung
+    score["plant_dead_time_s"] = chain.plant_dead_time_s
     return score
 
 
@@ -646,8 +875,23 @@ def main(argv: list[str] | None = None) -> int:
             description, tune_planner.plan_example.configure(options)
         )
         parameters, hydraulics = mpc_a2b.load_settings(mpc)
+        # Two ways to set one number: `--dead-time` overrides C3 block 1 outright
+        # while `--lag-shift` moves it against `tau_v`. Together only the `tau_v`
+        # half of the shift would survive, so the sum would move by the whole
+        # shift -- the opposite of what the knob says it does.
+        if options.dead_time is not None and options.lag_shift != 0.0:
+            raise ValueError(
+                "--dead-time and --lag-shift both set C3's dead time; a shift at "
+                "constant sum cannot hold against an override. Pick one"
+            )
+        # In memory and plant side only. `config/c3_full_model.json` is what the
+        # export key digests, so a perturbation written there would move the
+        # solver along with the plant and measure nothing.
+        plant_fit, damping_scale = perturb_fit(
+            k=options.k_scale, d=options.d_scale, lag_shift_s=options.lag_shift
+        )
         solver, model, scale = mpc_a2b.create_solver(mpc, parameters, hydraulics)
-    except (KeyError, ValueError, RuntimeError) as error:
+    except (CraneModelError, KeyError, ValueError, RuntimeError) as error:
         print(f"error: {error}", file=sys.stderr)
         return 2
 
@@ -658,6 +902,9 @@ def main(argv: list[str] | None = None) -> int:
     # the solver carries no A and B -- set per cycle -- so one compile serves
     # every move, and one plant keeps one window.
     plant = MujocoPlant(description, timestep=options.timestep)
+    # Once per process, not per move: `Chain` is rebuilt for every goal and a
+    # multiplier applied there would compound down a `--random` chain.
+    plant.scale_planned_damping(damping_scale)
     start = anchor = tune_planner.start_of(planner, options.resettle_start)
     offset = start.q[list(PASSIVE_INDICES)] - planner.model.passive_equilibrium(
         start.q[list(ACTUATED_INDICES)]
@@ -698,7 +945,9 @@ def main(argv: list[str] | None = None) -> int:
         gate.pressed = False
         try:
             a, b = mpc_a2b.validate_movement(mpc, parameters)
-            chain = Chain(plant, model, mpc.tool_position, options, markers)
+            chain = Chain(
+                plant, model, mpc.tool_position, options, markers, fit=plant_fit
+            )
             data = mpc_a2b.simulate(
                 mpc,
                 parameters,
@@ -754,6 +1003,30 @@ def main(argv: list[str] | None = None) -> int:
         start = next_start(plant, planner)
 
     benchmark(scores)
+    if options.score_json is not None:
+        # What the sweep reads back. The sample is in here too: a row whose
+        # scores cannot be traced to the plant that produced them is not a row.
+        options.score_json.parent.mkdir(parents=True, exist_ok=True)
+        options.score_json.write_text(
+            json.dumps(
+                {
+                    "sample": {
+                        "psi_gain_positive": options.psi_gain_positive,
+                        "psi_gain_negative": options.psi_gain_negative,
+                        "k_scale": options.k_scale,
+                        "d_scale": options.d_scale,
+                        "lag_shift_s": options.lag_shift,
+                        "apply_delay_s": options.apply_delay,
+                        "pi_rung": options.pi_rung,
+                        "seed": options.seed,
+                        "plant_tau_v": list(plant_fit.tau_v),
+                    },
+                    "moves": scores,
+                },
+                indent=2,
+            )
+        )
+        print(f"Wrote scores: {options.score_json}")
     if plant.viewer is not None:
         print("close the viewer window to finish")
     plant.hold_viewer()
