@@ -36,6 +36,22 @@ crane_mpc:
     max_state_age: 0.2
     levenberg_marquardt: 1.0e-6
 
+    # Which axes take x_0's velocity row from /joint_states; the rest keep the
+    # model's own propagation. Positions and both passive rows are always
+    # measured. Order is the actuated six: slew, boom, arm, telescope, rotator,
+    # tool (the tool row is inert -- pinned, no velocity row in the OCP state).
+    #
+    # Marc's node deploys `velocity_feedback_joints: [0]` -- slewing alone on
+    # measurement, the rest open-loop -- because hydraulic velocity is noisy and
+    # the lag/force states integrate that noise. C3 gives every axis those
+    # states here, not just slewing, so all-true generalizes his design and
+    # carries the noise exposure to every axis with it.
+    #
+    # read_only: flipping mid-move steps that row of x_0 by whatever the two
+    # sources disagree on, and the step propagates into the force and lag
+    # states, the warm start and the command. Set it here, at launch.
+    dq_a_feedback: [true, true, true, true, true, true]
+
     # Health threshold, not a period: above Ts on purpose. Idle, 0.06/40:
     # 12.8/25 ms, but 2-4x that under sim load -- an idle-sized budget made
     # escalation fire on a merely busy box. Overrun costs cadence not
