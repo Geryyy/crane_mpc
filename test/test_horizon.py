@@ -221,3 +221,48 @@ def test_a_path_this_node_cannot_use_is_refused_whole(spoil, clause):
     samples, _, why = path_from_message(message, PLANNED)
     assert samples is None
     assert clause in why
+
+
+def test_nothing_on_the_wire_is_still_in_the_future_when_it_arrives():
+    """
+    Issue 161. `Ts == sensor_to_valve_delay`, so a horizon stamped at the
+    instant knot 0 falls due is replaced by the next one exactly as it becomes
+    current: the JTC spends every cycle in `Trajectory::sample`'s
+    before-the-first-point branch, interpolating from the *measured* state with
+    `effort` forced to zero. The command then carries the machine's own
+    velocity back at cycle rate and only a ramped fraction of `u`.
+
+    The dead time belongs in `time_from_start`, with the command already in
+    flight standing at zero.
+    """
+    from builtin_interfaces.msg import Time
+
+    lead = 0.06
+    in_flight = ramp([0.0, 0.06], slope=0.2)
+    in_flight.u[:, 0] = 0.5
+    horizon = ramp([0.0, 0.06], slope=0.3)
+    horizon.u[:, 0] = 0.9
+
+    message = horizon_to_message(
+        horizon, CANONICAL, Time(sec=10, nanosec=0), lead=lead, in_flight=in_flight
+    )
+
+    # Every point is valid at or before the stamp's own instant.
+    assert message.points[0].time_from_start == Duration(sec=0, nanosec=0)
+    assert len(message.points) == len(horizon) + 1
+    # Knot 0 still takes effect one dead time after the stamp, as it did before.
+    assert message.points[1].time_from_start == Duration(sec=0, nanosec=60000000)
+    # Point zero is the command the machine is already running, not a zero-effort
+    # blend of its own measurement: `u - dq_a_ref` off the previous horizon.
+    assert message.points[0].effort[0] == pytest.approx(0.5 - 0.2)
+    assert message.points[1].effort[0] == pytest.approx(0.9 - 0.3)
+
+
+def test_without_a_lead_the_wire_form_is_unchanged():
+    """No dead time, no prepended knot -- the shadow and offline paths."""
+    from builtin_interfaces.msg import Time
+
+    horizon = ramp([0.0, 0.06])
+    message = horizon_to_message(horizon, CANONICAL, Time(sec=1, nanosec=0))
+    assert len(message.points) == len(horizon)
+    assert message.points[0].time_from_start == Duration(sec=0, nanosec=0)

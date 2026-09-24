@@ -6,6 +6,7 @@ import sys
 import time
 
 import rclpy
+from control_msgs.msg import JointTrajectoryControllerState
 from crane_msgs.msg import SolverHealth
 from rclpy.node import Node
 from sensor_msgs.msg import JointState
@@ -27,12 +28,27 @@ class Cap(Node):
         self.health, self.js, self.hz = [], [], []
         self.ref_stamps, self.path_stamps = [], []
         self.ref = {}
+        self.ctrl = []
         self.create_subscription(
             SolverHealth, "/crane/mpc/solver_health", self.on_h, 50
         )
         self.create_subscription(JointState, "/joint_states", self.on_js, 50)
         self.create_subscription(JointTrajectory, "/crane/mpc/horizon", self.on_hz, 50)
         self.create_subscription(JointTrajectory, "/crane/reference", self.on_ref, 10)
+        # What the JTC actually put on the command interface. Without this the
+        # MPC's `u` and the machine's response are two ends of an unobserved
+        # link, and a gain or sign error in between reads as a plant mismatch.
+        for topic in (
+            "/trajectory_controllers/controller_state",
+            "/crane/controller_state",
+            "/trajectory_controller_a2b/controller_state",
+        ):
+            self.create_subscription(
+                JointTrajectoryControllerState,
+                topic,
+                lambda m, s=topic: self.on_ctrl(m, s),
+                50,
+            )
         if JointPath is not None:
             self.create_subscription(JointPath, "/crane/joint_path", self.on_path, 10)
 
@@ -82,6 +98,22 @@ class Cap(Node):
             )
         )
 
+    def on_ctrl(self, m, source):
+        if not m.joint_names:
+            return
+        self.ctrl.append(
+            dict(
+                t=time.time(),
+                src=source,
+                names=list(m.joint_names),
+                out=list(m.output.velocities),
+                ref_vel=list(m.reference.velocities),
+                ref_pos=list(m.reference.positions),
+                fb_vel=list(m.feedback.velocities),
+                err_pos=list(m.error.positions),
+            )
+        )
+
     def on_ref(self, m):
         self.ref_stamps.append(stamp_ns(m.header))
         self.ref = dict(
@@ -115,12 +147,13 @@ def main():
             hz=n.hz,
             ref=n.ref_stamps,
             path=n.path_stamps,
+            ctrl=n.ctrl,
             refmsg=n.ref,
         ),
         open(out, "w"),
     )
     print(
-        f"health={len(n.health)} js={len(n.js)} hz={len(n.hz)} "
+        f"health={len(n.health)} js={len(n.js)} hz={len(n.hz)} ctrl={len(n.ctrl)} "
         f"ref={n.ref_stamps} path={n.path_stamps}"
     )
     rclpy.shutdown()

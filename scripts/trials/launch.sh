@@ -1,4 +1,8 @@
 #!/bin/bash
+# The sim wants concrete_block_behavior_tree's cyclonedds_sim.xml, and its
+# env hook only sets the var if unset. A shell carrying the machine-local
+# hardware file silently keeps it, multicast off.
+unset CYCLONEDDS_URI
 source /opt/ros/${ROS_DISTRO}/setup.bash
 WS="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
 source "$WS/install/setup.bash"

@@ -278,7 +278,9 @@ def path_from_message(message, joints):
     return flat.reshape(rows, width)[:, columns], duration, ""
 
 
-def horizon_to_message(horizon: Knots, joints, first_knot_valid_at):
+def horizon_to_message(
+    horizon: Knots, joints, first_knot_valid_at, lead: float = 0.0, in_flight=None
+):
     """
     Write the horizon as a `JointTrajectory`.
 
@@ -288,6 +290,23 @@ def horizon_to_message(horizon: Knots, joints, first_knot_valid_at):
     computation.
 
     No accelerations: `ddq_a_ref` is the OCP's stage residual, not a command.
+
+    `lead` is the dead time between now and the instant knot 0 takes effect,
+    and `in_flight` is the horizon published last cycle -- whose knot 0 is the
+    command the machine is running right now. Given both, the message is
+    stamped one `lead` *earlier* and that in-flight knot is prepended at
+    `time_from_start` zero, so knot 0 lands at `lead` and every point of the
+    message is already valid when it arrives.
+
+    Stamping knot 0 itself in the future is what issue 161 was: `Ts` equals
+    `sensor_to_valve_delay`, so the next horizon replaces this one exactly as
+    knot 0 falls due and the JTC never leaves `Trajectory::sample`'s
+    before-the-first-point branch. That branch interpolates from
+    `state_before_traj_msg_` -- the *measured* state, with `effort` forced to
+    zero by `deduce_from_derivatives` -- to knot 0. The machine is therefore
+    commanded a blend of its own measured velocity and only a ramped fraction
+    of `u`, while `Ocp.propagate_applied` replays `u` whole. Feeding measured
+    velocity back into the command at cycle rate is the divergent mode.
 
     `effort` carries a feed-forward *velocity*, not a torque, read under the
     JTC's `effort_field_is_feedforward`. `u - dq_a_ref` is the same identity
@@ -314,8 +333,32 @@ def horizon_to_message(horizon: Knots, joints, first_knot_valid_at):
             positions=position[index].tolist(),
             velocities=velocity[index].tolist(),
             effort=effort[index].tolist(),
-            time_from_start=seconds_duration(float(horizon.t[index])),
+            time_from_start=seconds_duration(lead + float(horizon.t[index])),
         )
         for index in range(len(horizon))
     ]
+    if lead > 0.0:
+        # The first cycle has nothing in flight; knot 0 held back to zero is the
+        # same plan one dead time early, which beats handing the JTC a gap.
+        standing = horizon if in_flight is None else in_flight
+        message.points.insert(0, _knot_message(standing, joints, 0, 0.0))
     return message
+
+
+def _knot_message(horizon: Knots, joints, index: int, at: float):
+    """One knot of `horizon` as a trajectory point, canonical eight wide."""
+    position = np.zeros(cs.K_GENERALIZED_DOF)
+    velocity = np.zeros_like(position)
+    effort = np.zeros_like(position)
+    actuated, passive = list(cs.K_ACTUATED_ROWS), list(cs.K_PASSIVE_ROWS)
+    position[actuated] = horizon.q_a_ref[index]
+    velocity[actuated] = horizon.dq_a_ref[index]
+    position[passive] = horizon.q_u_ref[index]
+    velocity[passive] = horizon.dq_u_ref[index]
+    effort[actuated] = horizon.u[index] - horizon.dq_a_ref[index]
+    return JointTrajectoryPoint(
+        positions=position.tolist(),
+        velocities=velocity.tolist(),
+        effort=effort.tolist(),
+        time_from_start=seconds_duration(at),
+    )

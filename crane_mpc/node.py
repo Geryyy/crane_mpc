@@ -33,6 +33,7 @@ from .cycle import (
     HORIZON_TOPIC,
     JOINT_PATH_TOPIC,
     JOINT_STATE_TOPIC,
+    NANOSECONDS,
     PASSIVE_DOF,
     PASSIVE_INDICES,
     PAYLOAD_ESTIMATE_TOPIC,
@@ -664,10 +665,18 @@ class MpcNode(Node):
 
     def publish_horizon(self) -> None:
         cycle = self._cycle
+        # Stamped where the machine is *now*, not where knot 0 falls due: the
+        # dead time rides in `time_from_start` with the command already in
+        # flight prepended at zero. See `hz.horizon_to_message` -- a horizon
+        # stamped a whole `Ts` ahead never leaves the JTC's
+        # before-the-first-point branch (issue 161).
+        lead_ns = int(cycle.delay * NANOSECONDS)
         message = hz.horizon_to_message(
             cycle.horizon,
             self._canonical_joints,
-            Time(nanoseconds=cycle.next_first_knot_ns).to_msg(),
+            Time(nanoseconds=cycle.next_first_knot_ns - lead_ns).to_msg(),
+            lead=cycle.delay,
+            in_flight=cycle.last_horizon,
         )
         self.publish_tcp_horizon()
         if self.mode == "active":

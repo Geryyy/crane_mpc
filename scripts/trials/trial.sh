@@ -15,6 +15,10 @@ sleep 5
 for p in $(ps -eo pid,cmd | grep -E "gz sim" | grep -v grep | awk '{print $1}'); do kill -9 "$p" 2>/dev/null; done
 sleep 2
 
+# The sim wants concrete_block_behavior_tree's cyclonedds_sim.xml, and its
+# env hook only sets the var if unset. A shell carrying the machine-local
+# hardware file silently keeps it, multicast off.
+unset CYCLONEDDS_URI
 source /opt/ros/${ROS_DISTRO}/setup.bash
 source "$WS/install/setup.bash"
 ros2 daemon stop >/dev/null 2>&1; ros2 daemon start >/dev/null 2>&1
