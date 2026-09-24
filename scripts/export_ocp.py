@@ -6,7 +6,7 @@ Export the crane MPC optimal control problem: generate, compile, record.
 defined in Python over `crane_model/scripts/crane_symbolic.py` and shipped as a
 compiled acados solver.
 
-    ./scripts/export_ocp.py          # or: ros2 run crane_mpc export_ocp
+    ./scripts/export_ocp.py          # from the source checkout; not a `ros2 run` executable
 
 **Run this before the node or either harness.** Nothing compiles a solver at
 startup any more: `crane_mpc.solver.Ocp` opens what this wrote and refuses

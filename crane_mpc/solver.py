@@ -400,7 +400,10 @@ def configure_fixed_data(
 EXPORT_ENV = "CRANE_MPC_OCP_EXPORT"
 
 #: What a caller is told to run when the export is missing or is another problem.
-EXPORT_COMMAND = "ros2 run crane_mpc export_ocp"
+#: The script path, not `ros2 run`: `setup.py` declares one console script and it
+#: is the node. An exporter needs the source checkout anyway -- it reads
+#: `config/`, the description and the C3 fit out of it.
+EXPORT_COMMAND = "crane_mpc/scripts/export_ocp.py"
 
 
 def export_base() -> Path:

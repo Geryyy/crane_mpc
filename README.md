@@ -111,7 +111,7 @@ and 5 remain hard.
 
 ### One solver ships: the PZS100
 
-    ./scripts/export_ocp.py          # or: ros2 run crane_mpc export_ocp
+    ./scripts/export_ocp.py          # from the source checkout; not a `ros2 run` executable
 
 The description is baked into a generated solver, so an artifact is one
 machine's, and the PZS100 is the machine that has to run; there is no tool
