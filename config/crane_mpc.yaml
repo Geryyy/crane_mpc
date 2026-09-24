@@ -10,10 +10,11 @@ crane_mpc:
     # error, 17% more sway, QP iteration cap cold.
     # Nothing downstream samples the grid (JTC interpolates via PID). But
     # 80*0.06=4.74s must cover the ~2s sway period and 2s fault-tolerance
-    # budget (old 1.96s missed both), and Ts must not exceed
-    # sensor_to_valve_delay below or replay_schedule breaks two-command
-    # prediction -- so lookahead can only be bought in knots, not in a
-    # coarser grid.
+    # budget (old 1.96s missed both), and Ts must equal sensor_to_valve_delay
+    # below (or the delay must be zero) -- `configure` refuses anything else,
+    # because the state carried into the next cycle has to stand at that
+    # cycle's measurement instant and only a whole stage can be picked. So
+    # lookahead can only be bought in knots, not in a coarser grid.
     #
     # 40 -> 80 once the tool row was in, 20 moves on two seeds:
     #

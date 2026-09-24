@@ -431,6 +431,11 @@ def export_key(parameters: dict, hydraulics: dict, description_xml: str) -> dict
     """
     return {
         "Ts": parameters["Ts"],
+        # The delay decides which integrators `predictor_label` names into the
+        # export, so it is compiled in exactly as the acados settings are. It was
+        # missing here, and a changed delay therefore opened its predecessor's
+        # `.so` and read as a null result.
+        "sensor_to_valve_delay": parameters["sensor_to_valve_delay"],
         "horizon_length": parameters["horizon_length"],
         "levenberg_marquardt": parameters["levenberg_marquardt"],
         "qp_solver_cond_N": parameters.get("qp_solver_cond_N"),

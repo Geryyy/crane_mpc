@@ -27,11 +27,17 @@ crane_mpc:
 
   Ts:
     type: double
-    default_value: 0.04
+    default_value: 0.06
     read_only: true
     description: "T_s, s -- control cycle, horizon knot spacing and publication period. The interface fixes
       /crane/mpc/horizon at 25 Hz, so the node warns at startup when 1/Ts is not 25 Hz rather than quietly
-      running at another rate."
+      running at another rate.
+      0.06 and not the contract's 0.04 because `sensor_to_valve_delay` is pinned to the fit's measured
+      0.06 dead time and `carry_stage` needs the delay to be 0 or T_s. At 0.04 the declared defaults were
+      an unrunnable pair -- 60 ms of delay on a 40 ms grid -- rescued only by config/crane_mpc.yaml, so a
+      node started on its defaults carried a state half an interval wrong and said nothing. The 25 Hz
+      contract and the measured 60 ms cannot both hold under a stage-pick carry; the startup warning is
+      the record of that, and resolving it is its own issue."
     validation:
       gt<>: [0.0]
 
@@ -49,7 +55,14 @@ crane_mpc:
       rows propagate 10 ms short) and the solve's own duration. Zero is legal and means no delay measured on
       this deployment -- different from one step. Propagation replays the commands actually in flight (issue
       125): 60 ms over a 40 ms step is 1.5 intervals, the older command owning the far 20 ms; each segment
-      integrated under its own command, nothing interpolated."
+      integrated under its own command, nothing interpolated.
+      Constrained to 0 or T_s, and `Cycle` refuses anything between by name. Not because the replay cannot
+      cut a partial interval -- it can -- but because the state carried into the next cycle has to stand at
+      that cycle's measurement instant, and only a whole stage can be picked: `carry_stage` is
+      `1 - delay/T_s`. A fractional delay would need an integration over the remainder, and carrying the
+      nearest stage instead is the one-signed force error `adopt_solution` already records. The shipped
+      0.06/0.06 is unaffected; a 60 ms delay on a 40 ms grid now refuses loudly where it was silently wrong.
+      In `export_key`, because it names which integrators the export carries."
     validation:
       gt_eq<>: [0.0]
 

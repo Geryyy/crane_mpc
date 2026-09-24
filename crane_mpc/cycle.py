@@ -16,7 +16,7 @@ from crane_model import symbolic as cs
 
 from . import bspline, problem
 from . import horizon as hz
-from .solver import PROGRESS_ROWS, Outcome, PathCycle
+from .solver import GRID_TOLERANCE, PROGRESS_ROWS, Outcome, PathCycle
 
 REFERENCE_TOPIC = "/crane/reference"
 JOINT_PATH_TOPIC = "/crane/joint_path"
@@ -42,6 +42,37 @@ PASSIVE_DOF = cs.K_PASSIVE_DOF
 TOOL_AXIS = cs.K_TOOL_AXIS
 
 NANOSECONDS = 1_000_000_000
+
+
+def carry_stage(delay: float, Ts: float) -> int:
+    """
+    Which stage stands where the next cycle takes its measurement.
+
+    `states[k]` is `x_0 + k*Ts` and `x_0` is one `delay` after this cycle began,
+    so the next cycle's measurement instant is `k = 1 - delay/Ts`. A stage index
+    is a whole number, which leaves two deployments: `delay == Ts` gives 0, the
+    machine's, and `delay == 0` gives 1, a graph with no measured transport.
+
+    Between them the carry would have to integrate over `Ts - delay` rather than
+    pick a stage. Picking the nearest one instead is a one-signed error in the
+    force rows -- the defect `adopt_solution`'s comment records, and the reason
+    this is a refusal and not a round.
+    """
+    if Ts <= 0.0 or not np.isfinite(Ts) or not np.isfinite(delay) or delay < 0.0:
+        raise ValueError(
+            f"carry stage needs a positive finite Ts and a non-negative finite "
+            f"delay; got Ts={Ts}, sensor_to_valve_delay={delay}"
+        )
+    stage = 1.0 - delay / Ts
+    nearest = round(stage)
+    if abs(stage - nearest) > GRID_TOLERANCE or nearest not in (0, 1):
+        raise ValueError(
+            f"sensor_to_valve_delay {delay} s is neither 0 nor Ts {Ts} s, so the "
+            "state carried into the next cycle is not any stage of this one. "
+            "Carrying the nearest stage puts a one-signed error in C3's force "
+            "rows, so it is refused rather than rounded."
+        )
+    return int(nearest)
 
 
 @dataclass(frozen=True)
@@ -174,6 +205,16 @@ class Cycle:
         self.grid = grid
         self.mode = mode
         self.delay = delay
+        #: Which stage carries C3's physical rows into the next cycle.
+        try:
+            self.carry_stage = carry_stage(delay, Ts)
+        except ValueError:
+            # `config.check_settings` refuses this pair from `configure`, where a
+            # refusal is reported on `solver_health`. Raising here instead would
+            # kill the process in `MpcNode.__init__`, which is outside `main`'s
+            # `try` and reads downstream exactly like a crashed MPC. Nothing
+            # solves before `configure` succeeds, so this stage is never read.
+            self.carry_stage = 0
         #: Per axis, whether x_0's velocity is measured or model-carried.
         self.dq_a_feedback = (
             [True] * ACTUATED_DOF if dq_a_feedback is None else list(dq_a_feedback)
@@ -223,9 +264,11 @@ class Cycle:
         self.dq_a_carried: np.ndarray | None = None
         self.velocity_carry = VelocityCarry()
         self.last_input = np.zeros(cs.NU_PROGRESS)
-        # What this node put in flight, newest first. Dead time is 1.5 intervals
-        # on the shipped 40 ms / 60 ms, so two commands span the propagation
-        # window. Kept as deep as `Ocp.replay` needs.
+        # What this node put in flight, newest first. One command spans the
+        # window on the shipped 60 ms / 60 ms; `Ocp.replay` still cuts a partial
+        # interval for the fractional pairs the benches build, which `configure`
+        # refuses for the node because `carry_stage` cannot express them.
+        # Kept as deep as `Ocp.replay` needs.
         self.applied_inputs: list = []
         self.guess = None
         #: A preparation standing for this cycle, and the resampled reference it
@@ -783,19 +826,21 @@ class Cycle:
             # C3's command lag and force are physical. `read_state` puts them
             # beside a `/joint_states` sample stamped at `now`, and `propagate`
             # then rolls the lot over the dead time -- so they have to enter that
-            # roll at `now`, which is `states[0]`: this cycle's own `x0`, one
-            # `sensor_to_valve_delay` after this cycle began, i.e. `now` for the
-            # next one. (That identity is `Ts == sensor_to_valve_delay`, the same
-            # grid condition `replay_schedule` already stands on.) Taking them
-            # from `states[1]` handed the roll a state one interval *past* the
-            # measurement and then advanced it again, so the solver believed
-            # hydraulic force a full delay before it was built -- one-signed and
-            # optimistic, worst on the short-lag axes.
+            # roll at the next cycle's *measurement* instant, not at its `x0`.
+            # That is `carry_stage`: 0 when the delay is one `Ts` (the machine,
+            # where `states[0]` is already `now` for the next cycle) and 1 when
+            # there is no measured transport, where the roll is the identity and
+            # the measurement instant is `states[1]`. Taking the wrong one hands
+            # the roll a state an interval past the measurement and then advances
+            # it again, so the solver believes hydraulic force a full delay
+            # before it was built -- one-signed and optimistic, worst on the
+            # short-lag axes.
             #
             # The progress pair is not physical and no sensor overwrites it, so
-            # it wants the stage that stands where the next `x0` does -- that is
-            # `states[1]` -- and `Ocp.propagate` holds it out of the roll.
-            self.carried = solution.states[0].copy()
+            # it wants the stage that stands where the next `x0` does. That is
+            # `states[1]` for *any* delay -- the next `x0` is this one plus `Ts`
+            # -- and `Ocp.propagate` holds it out of the roll.
+            self.carried = solution.states[self.carry_stage].copy()
             self.carried[PROGRESS_ROWS] = solution.states[1][PROGRESS_ROWS]
 
         self.next_first_knot_ns += int(self.Ts * NANOSECONDS)

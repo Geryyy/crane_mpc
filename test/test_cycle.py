@@ -15,6 +15,7 @@ from crane_mpc.cycle import (
     HORIZON_TOPIC,
     Cycle,
     carry_actuated_velocity,
+    carry_stage,
     watch_progress,
 )
 from crane_mpc.solver import Outcome, Solution, Violation
@@ -674,3 +675,70 @@ def test_a_shifted_horizon_records_the_command_it_published():
     one.advance(solution(Outcome.BUDGET_EXCEEDED), 10**9, 0.1, 2.0)
 
     assert one.last_input[:DOF] == pytest.approx(published)
+
+
+def test_the_carry_stage_follows_the_delay():
+    """
+    `states[k]` stands at `x_0 + k*Ts`, so the next cycle's measurement instant
+    is `1 - delay/Ts`. Both deployable values, pinned: the machine carries one
+    delay of a step, a graph with no measured transport carries none.
+    """
+    assert carry_stage(0.06, 0.06) == 0
+    assert carry_stage(0.0, 0.06) == 1
+
+
+def test_a_delay_between_zero_and_a_step_is_refused_not_rounded():
+    """
+    Neither stage stands at the measurement instant, and taking the nearer one
+    is the one-signed force error `adopt_solution` records. `replay_schedule`
+    cuts a partial interval happily -- the carry is what cannot.
+    """
+    with pytest.raises(ValueError, match="neither 0 nor Ts"):
+        carry_stage(0.06, 0.04)
+
+
+def test_no_measured_transport_carries_the_stage_the_next_cycle_measures_at():
+    """
+    At zero delay `propagate` is the identity, so the carried state has to be
+    the one a step ahead. Carrying `states[0]` leaves it a whole `Ts` stale --
+    the same defect as the machine's case, with the sign reversed.
+    """
+    made = cycle("active")
+    solved = solution(Outcome.CONVERGED, 1.0)
+    made.advance(solved, NOMINAL_NS, MIN_RATE, MAX_STALL)
+    assert made.carry_stage == 1
+    assert made.carried[0] == pytest.approx(solved.states[1][0])
+
+
+def test_the_machine_carries_force_from_x0_and_progress_from_the_next_one():
+    """
+    The deployed pair is `delay == Ts`, which no other test here constructs --
+    every `cycle()` helper runs at zero delay. The two row groups come from
+    different stages and only this configuration can tell them apart: physical
+    rows from `states[0]`, because `propagate` rolls them over a whole `Ts`,
+    and the progress pair from `states[1]`, which stands where the next `x_0`
+    will for any delay.
+    """
+    made = Cycle(Ts, hz.Grid(Ts, KNOTS), "active", Ts)
+    made.horizon = hz.Knots.zeros(KNOTS)
+    assert made.carry_stage == 0
+    solved = solution(Outcome.CONVERGED, 1.0)
+    made.advance(solved, NOMINAL_NS, MIN_RATE, MAX_STALL)
+    assert made.carried[cs.X_ACTUATED_FORCE] == pytest.approx(
+        solved.states[0][cs.X_ACTUATED_FORCE]
+    )
+    assert made.carried[cs.X_PROGRESS_RATE] == pytest.approx(
+        solved.states[1][cs.X_PROGRESS_RATE]
+    )
+
+
+def test_a_refused_delay_does_not_raise_out_of_the_constructor():
+    """
+    `Cycle` is built in `MpcNode.__init__`, outside `main`'s `try`, so a raise
+    there is a dead process and downstream cannot tell that from a crashed MPC.
+    `check_settings` owns the refusal (test_config) and `configure` reports it;
+    this only pins that the constructor stays quiet and nothing solves on the
+    stage it falls back to.
+    """
+    made = Cycle(0.04, hz.Grid(0.04, KNOTS), "active", 0.06)
+    assert made.carry_stage == 0
