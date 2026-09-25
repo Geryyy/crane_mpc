@@ -137,6 +137,8 @@ class MpcNode(Node):
         self._controller_state: JointTrajectoryControllerState | None = None
         self._last_health: SolverHealth | None = None
         self._last_settled: SwaySettled | None = None
+        #: Last `Cycle.path_source` said out loud; said again only when it changes.
+        self._last_path_source: str | None = None
         #: One instant per cycle, shared by every report that cycle writes.
         self._stamp = self.get_clock().now().to_msg()
 
@@ -193,6 +195,23 @@ class MpcNode(Node):
             f"dq_a_divergence_max is what watches for that; it is reported on "
             f"{SHADOW_COMPARISON_TOPIC} and warned about, and never corrected."
         )
+
+    def say_path_source(self) -> None:
+        """
+        Say what this cycle is solved against, whenever that changes.
+
+        Whether the curve is followed was only knowable by reading source: a curve
+        that does not pair by stamp is dropped without a word, and reads from
+        outside exactly like one that drove. Info and not warn: every re-plan has a
+        window where the new reference is in hand and its curve is not, so a warn
+        there would fire on every healthy move. What is solved against, not what
+        went out -- the shift rung publishes the previous horizon.
+        """
+        source = self._cycle.path_source()
+        if source == self._last_path_source:
+            return
+        self._last_path_source = source
+        self.get_logger().info(f"crane_mpc is solving against {source}.")
 
     def warn_divergence(self) -> None:
         """Report a carried velocity that has walked away from the measured one."""
@@ -496,6 +515,7 @@ class MpcNode(Node):
         if silence is not None:
             self.fall_silent(silence)
             return
+        self.say_path_source()
         self.warn_divergence()
 
         solution, refusal = cycle.solve()

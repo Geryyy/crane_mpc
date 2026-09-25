@@ -13,6 +13,7 @@ from crane_mpc import horizon as hz
 from crane_mpc import reports
 from crane_mpc.cycle import (
     HORIZON_TOPIC,
+    JOINT_PATH_TOPIC,
     Cycle,
     carry_actuated_velocity,
     carry_stage,
@@ -555,6 +556,21 @@ def test_a_curve_drives_only_the_plan_it_was_published_with():
     # aim the cost at a path the machine is not on.
     one.reference_stamp_ns = 2000
     assert one.resolved_path() is None
+
+
+def test_the_fallback_names_the_two_stamps_that_did_not_pair():
+    """The mismatch is the silent case, and the one a real run hits."""
+    one = curve_cycle(stamp_ns=1000)
+    assert one.path_source() == f"the planner's curve on {JOINT_PATH_TOPIC}"
+
+    one.reference_stamp_ns = 2000
+    said = one.path_source()
+    assert "the horizon's own knots" in said
+    # Both numbers, so the pairing can be checked without reading source.
+    assert "1000 ns" in said and "2000 ns" in said
+
+    one.path_control = None
+    assert "no usable curve has arrived" in one.path_source()
 
 
 def test_the_advance_moves_both_readings_of_where_the_plan_is():

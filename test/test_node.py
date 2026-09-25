@@ -352,3 +352,47 @@ def test_the_planners_curve_replaces_the_window_fit(node):
     assert path.nominal_rate == pytest.approx(0.25)
     node.update()
     assert node.published["_shadow_horizon_publisher"]
+
+
+class Logs:
+    """What the node said, by level. Any level, so nothing else has to be stubbed."""
+
+    def __init__(self):
+        self.lines = []
+
+    def __getattr__(self, level):
+        def say(text, **_):
+            self.lines.append((level, text))
+
+        return say
+
+
+def test_which_branch_drives_the_position_reference_is_said_out_loud(node):
+    """
+    A curve that does not pair by stamp was dropped without a word (issue 162).
+
+    From outside the node that read exactly like a followed curve, which is the
+    mode a run is meant to be under test in.
+    """
+    logs = Logs()
+    node.get_logger = lambda: logs
+    node.on_robot_description(String(data=problem.default_description().read_text()))
+    plan = reference(node)
+    node.on_reference(plan)
+    node.on_joint_state(joint_state(node))
+
+    paired = Time.from_msg(plan.header.stamp).nanoseconds
+    node.on_path(joint_path(Time(nanoseconds=paired + 1).to_msg()))
+    node.update()
+    assert any(
+        f"{paired + 1} ns" in text and f"{paired} ns" in text for _, text in logs.lines
+    )
+
+    logs.lines.clear()
+    node.on_path(joint_path(plan.header.stamp))
+    node.update()
+    assert any("the planner's curve" in text for _, text in logs.lines)
+    # Once per change and not once per cycle: it is said in the 25 Hz callback.
+    logs.lines.clear()
+    node.update()
+    assert not any("solving against" in text for _, text in logs.lines)

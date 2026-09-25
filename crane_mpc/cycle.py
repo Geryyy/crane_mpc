@@ -448,6 +448,28 @@ class Cycle:
             nominal_rate=1.0 / self.path_duration,
         )
 
+    def path_source(self) -> str:
+        """
+        Name the branch `q_a_ref` comes from, and say why it is not the other one.
+
+        Said out loud because falling back is silent: a stamp mismatch reads
+        exactly like a followed curve from outside the node, and that is the
+        mode a run is meant to be under test in.
+        """
+        if self.resolved_path() is not None:
+            return f"the planner's curve on {JOINT_PATH_TOPIC}"
+        if self.path_control is None or self.path_duration <= 0.0:
+            return (
+                "the horizon's own knots, because no usable curve has arrived on "
+                f"{JOINT_PATH_TOPIC}"
+            )
+        # Only the pairing is left: `resolved_path` refused above and a curve is stored.
+        return (
+            f"the horizon's own knots, because the curve on {JOINT_PATH_TOPIC} is "
+            f"stamped {self.path_stamp_ns} ns against the reference's "
+            f"{self.reference_stamp_ns} ns, so it is another plan's geometry"
+        )
+
     def path_span(self) -> float:
         """Seconds one whole unit of path parameter stands for, on this cycle's path."""
         if self.path is not None:
