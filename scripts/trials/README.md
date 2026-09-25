@@ -18,5 +18,11 @@ then withdrawn on that metric. Score on the growth rate instead.
   `/crane/mpc/solver_health`. Joints by `name[]`, never by index.
 - `growth.py <cap.json> <label> ...` — the score: fit `log|q_u - q_eq|` against
   sim time over the first rise. `<= 0` is stable. Two runs per arm, worst reported.
+- `steptest.py <out.json>` — one open-loop velocity step per axis on a live
+  sim, MPC killed, recording position, velocity and applied torque.
+- `plant_step.py <out.json> [joint]` — the same step on every plant we have,
+  side by side: Gazebo (from that capture), MuJoCo through `C3Actuator`, and the
+  OCP's own integrator. They agreed to 0.01 through 500 ms once issue 161's
+  three actuator faults were fixed; before that Gazebo was alone.
 - `score.py` — cadence, command chatter, travel, arrival. Context, not the score.
 - `pid_move.py` — the same plan with the MPC off: the stable reference arm.
