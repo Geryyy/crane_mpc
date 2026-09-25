@@ -223,39 +223,65 @@ def test_a_path_this_node_cannot_use_is_refused_whole(spoil, clause):
     assert clause in why
 
 
-def test_nothing_on_the_wire_is_still_in_the_future_when_it_arrives():
-    """
-    Issue 161. `Ts == sensor_to_valve_delay`, so a horizon stamped at the
-    instant knot 0 falls due is replaced by the next one exactly as it becomes
-    current: the JTC spends every cycle in `Trajectory::sample`'s
-    before-the-first-point branch, interpolating from the *measured* state with
-    `effort` forced to zero. The command then carries the machine's own
-    velocity back at cycle rate and only a ramped fraction of `u`.
+def _jtc_sample(message, at):
+    """What the JTC plays at `at` s after the stamp: cubic pos/vel, linear effort."""
+    t = np.array(
+        [
+            p.time_from_start.sec + p.time_from_start.nanosec * 1e-9
+            for p in message.points
+        ]
+    )
+    i = min(int(np.searchsorted(t, at, side="right")) - 1, len(t) - 2)
+    a, b = message.points[i], message.points[i + 1]
+    T, x = t[i + 1] - t[i], at - t[i]
+    p0, v0, p1, v1 = (
+        np.asarray(f) for f in (a.positions, a.velocities, b.positions, b.velocities)
+    )
+    a2 = (3 * (p1 - p0) - (2 * v0 + v1) * T) / T**2
+    a3 = (2 * (p0 - p1) + (v0 + v1) * T) / T**3
+    effort = (
+        np.asarray(a.effort) + (np.asarray(b.effort) - np.asarray(a.effort)) * x / T
+    )
+    return p0 + v0 * x + a2 * x**2 + a3 * x**3, v0 + 2 * a2 * x + 3 * a3 * x**2, effort
 
-    The dead time belongs in `time_from_start`, with the command already in
-    flight standing at zero.
+
+def test_the_jtc_plays_the_command_the_ocp_assumes():
+    """
+    The Gazebo divergence: `u` reached the plant 18-60 ms late.
+
+    The plant has its own dead time and the solve its own latency, so [0, Ts)
+    replays last cycle's command and `u_i` leaves the JTC as a hold over
+    [(i+1)Ts, (i+2)Ts), while the position reference already stands on knot i.
+    Played back the JTC's way -- PI at the tick, both feedforward branches one
+    tick later, effort linear, pos/vel cubic -- every tick must command exactly
+    that.
     """
     from builtin_interfaces.msg import Time
 
-    lead = 0.06
-    in_flight = ramp([0.0, 0.06], slope=0.2)
-    in_flight.u[:, 0] = 0.5
-    horizon = ramp([0.0, 0.06], slope=0.3)
-    horizon.u[:, 0] = 0.9
-
+    Ts, tick = 0.06, 0.01
+    horizon = ramp([0.0, Ts, 2 * Ts, 3 * Ts], slope=0.3)
+    # A smooth curve, as the planner's is -- not what dq_a_ref integrates to.
+    horizon.q_a_ref[:, 0] = 0.1 * (horizon.t + Ts) + 1.5 * (horizon.t + Ts) ** 2
+    horizon.u[:, 0] = [0.9, -0.4, 1.1, 1.1]
+    in_flight = ramp([0.0, Ts], slope=0.3)
+    in_flight.q_a_ref[:, 0] = 0.1 * in_flight.t + 1.5 * in_flight.t**2
     message = horizon_to_message(
-        horizon, CANONICAL, Time(sec=10, nanosec=0), lead=lead, in_flight=in_flight
+        horizon,
+        CANONICAL,
+        Time(),
+        lead=Ts,
+        period=tick,
+        in_flight=in_flight,
+        in_flight_u=[0.3, 0, 0, 0, 0],
     )
 
-    # Every point is valid at or before the stamp's own instant.
-    assert message.points[0].time_from_start == Duration(sec=0, nanosec=0)
-    assert len(message.points) == len(horizon) + 1
-    # Knot 0 still takes effect one dead time after the stamp, as it did before.
-    assert message.points[1].time_from_start == Duration(sec=0, nanosec=60000000)
-    # Point zero is the command the machine is already running, not a zero-effort
-    # blend of its own measurement: `u - dq_a_ref` off the previous horizon.
-    assert message.points[0].effort[0] == pytest.approx(0.5 - 0.2)
-    assert message.points[1].effort[0] == pytest.approx(0.9 - 0.3)
+    for i, u in enumerate([0.3, 0.9, -0.4, 1.1]):
+        for k in range(6):
+            _, dq_next, effort_next = _jtc_sample(message, i * Ts + (k + 1) * tick)
+            assert dq_next[0] + effort_next[0] == pytest.approx(u, abs=1e-6)
+    for i in range(3):
+        position, _, _ = _jtc_sample(message, (i + 1) * Ts)
+        assert position[0] == pytest.approx(horizon.q_a_ref[i, 0])
 
 
 def test_without_a_lead_the_wire_form_is_unchanged():

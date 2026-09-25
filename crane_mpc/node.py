@@ -13,6 +13,7 @@ import rclpy
 from action_msgs.msg import GoalStatus, GoalStatusArray
 from control_msgs.msg import JointTrajectoryControllerState
 from crane_model import CraneModel, Payload, Tool, canonical_joints
+from crane_model.velocity_loop import load_velocity_loop
 from crane_msgs.msg import JointPath, PayloadEstimate, SolverHealth, SwaySettled
 from crane_msgs.srv import SetPayload
 from diagnostic_msgs.msg import DiagnosticArray
@@ -129,6 +130,9 @@ class MpcNode(Node):
         self._passive_stamp: Time | None = None
         #: When a passive *velocity* (not pose) was last written; settled verdict ages against this.
         self._passive_velocity_stamp: Time | None = None
+
+        #: The JTC's tick; it samples feedforward one tick ahead (`hz._command_message`).
+        self._jtc_period = 1.0 / load_velocity_loop()[1]
 
         self._reference_message: JointTrajectory | None = None
         self._path_message: JointPath | None = None
@@ -375,6 +379,13 @@ class MpcNode(Node):
             # partial interval happily -- so this is the cycle's refusal, raised
             # where the node reports.
             self._cycle.carry_stage = carry_stage(self.delay, self.Ts)
+            if self._cycle.carry_stage != 0:
+                # `Cycle.command_delay` rolls the dead time with the `Ts`-long
+                # replay integrator; at zero delay x0 would stand a `Ts` short.
+                raise ValueError(
+                    f"sensor_to_valve_delay {self.delay} s must equal Ts {self.Ts} s: "
+                    "the command schedule rolls the dead time as one interval"
+                )
             self._ocp = Ocp(
                 problem.default_description().read_text(),
                 config.parameter_dict(self._values),
@@ -685,18 +696,17 @@ class MpcNode(Node):
 
     def publish_horizon(self) -> None:
         cycle = self._cycle
-        # Stamped where the machine is *now*, not where knot 0 falls due: the
-        # dead time rides in `time_from_start` with the command already in
-        # flight prepended at zero. See `hz.horizon_to_message` -- a horizon
-        # stamped a whole `Ts` ahead never leaves the JTC's
-        # before-the-first-point branch (issue 161).
-        lead_ns = int(cycle.delay * NANOSECONDS)
+        # Stamped at the measurement instant; knot 0 is due `command_delay` later.
+        # See `hz.horizon_to_message`.
+        lead_ns = int(cycle.command_delay * NANOSECONDS)
         message = hz.horizon_to_message(
             cycle.horizon,
             self._canonical_joints,
             Time(nanoseconds=cycle.next_first_knot_ns - lead_ns).to_msg(),
             lead=cycle.delay,
+            period=self._jtc_period,
             in_flight=cycle.last_horizon,
+            in_flight_u=cycle.applied_inputs[0],
         )
         self.publish_tcp_horizon()
         if self.mode == "active":

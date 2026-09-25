@@ -205,6 +205,14 @@ class Cycle:
         self.grid = grid
         self.mode = mode
         self.delay = delay
+        #: A solve started at `now` drives from the next cycle on, so its result may
+        #: arrive any time inside `Ts`: until then the JTC plays the command
+        #: published last cycle, and the predictor replays exactly that. Without it
+        #: the first `solve latency` of every interval ran a command nobody
+        #: predicted -- 10 ms of it diverges the loop.
+        self.command_delay = delay + Ts
+        #: `x` rolled to the next measurement instant; the next cycle's C3 rows.
+        self.x_next = None
         #: Which stage carries C3's physical rows into the next cycle.
         try:
             self.carry_stage = carry_stage(delay, Ts)
@@ -247,7 +255,6 @@ class Cycle:
         self.progress_mark_ns = 0
         self.progress_marked = False
         self.next_first_knot_ns = 0
-        self.cadence_anchored = False
 
         self.horizon: hz.Knots | None = None
         self.last_horizon: hz.Knots | None = None
@@ -350,7 +357,6 @@ class Cycle:
         self.forget_stall()
         self.consecutive_failures = 0
         self.escalated = False
-        self.cadence_anchored = False
         self.last_input = np.zeros(cs.NU_PROGRESS)
         # Rest of what was in flight: replaying it would carry `x_0` under another commander's plan.
         self.applied_inputs.clear()
@@ -479,16 +485,15 @@ class Cycle:
         return self.grid.duration()
 
     def anchor_cadence(self, now_ns: int) -> None:
-        """Decide when the first knot takes effect: `now` plus transport delay."""
-        anchor = now_ns + int(self.delay * NANOSECONDS)
-        ceiling = now_ns + int((self.delay + self.grid.duration()) * NANOSECONDS)
-        if (
-            not self.cadence_anchored
-            or self.next_first_knot_ns < now_ns
-            or self.next_first_knot_ns > ceiling
-        ):
-            self.next_first_knot_ns = anchor
-            self.cadence_anchored = True
+        """
+        Knot 0 takes effect `command_delay` after *this* tick, every cycle.
+
+        A grid anchored once and advanced by `Ts` keeps the first tick's phase:
+        the timer ticks on its own grid, so every stamp then sat a fixed 0-60 ms
+        off the real measurement instant -- random per run, against a loop with
+        ~10 ms of timing margin. That was which runs diverged.
+        """
+        self.next_first_knot_ns = now_ns + int(self.command_delay * NANOSECONDS)
 
     def read_state(self, measurement: Measurement, max_state_age: float):
         """
@@ -545,11 +550,25 @@ class Cycle:
         self.ocp.pin_tool(self.tool_position)
         # Recorded here, not beside `last_input` writes: shadow mode writes it
         # twice per cycle but only one command applies here.
+        if self.mode == "active" and not self.applied_inputs:
+            # Nothing of ours in flight (first cycle, after a silence or a mode
+            # change): the machine's own velocity is the best reading of what the
+            # JTC runs -- zero at rest, and neither a stale `u0` nor a hard stop
+            # when it moves.
+            self.last_input = np.zeros(cs.NU_PROGRESS)
+            self.last_input[:PLANNED_DOF] = self.measured[
+                cs.X_PLANNED_VELOCITY : cs.X_PLANNED_VELOCITY + PLANNED_DOF
+            ]
         self.applied_inputs.insert(0, self.last_input.copy())
         depth = self.ocp.replay[0].age + 1 if self.ocp.replay else 1
-        del self.applied_inputs[depth:]
+        del self.applied_inputs[depth + 1 :]
         try:
-            x0 = self.ocp.propagate_applied(self.measured, self.applied_inputs)
+            # Over the dead time the plant runs what left the JTC one cycle ago;
+            # then one `Ts` of the command already published (`command_delay`).
+            self.x_next = self.ocp.propagate_applied(
+                self.measured, self.applied_inputs[1:] or self.applied_inputs
+            )
+            x0 = self.ocp.propagate_applied(self.x_next, self.applied_inputs[:1])
         except Exception as error:
             return Silence(
                 "the measured state could not be propagated to the instant the plan "
@@ -862,10 +881,15 @@ class Cycle:
             # it wants the stage that stands where the next `x0` does. That is
             # `states[1]` for *any* delay -- the next `x0` is this one plus `Ts`
             # -- and `Ocp.propagate` holds it out of the roll.
-            self.carried = solution.states[self.carry_stage].copy()
+            # With `command_delay` the next measurement instant is `x_next`, not a
+            # stage of this solution.
+            self.carried = (
+                self.x_next
+                if self.x_next is not None
+                else solution.states[self.carry_stage]
+            ).copy()
             self.carried[PROGRESS_ROWS] = solution.states[1][PROGRESS_ROWS]
 
-        self.next_first_knot_ns += int(self.Ts * NANOSECONDS)
         # `s` is a path parameter, not seconds, so `path_span` converts -- one
         # window for the window fit, the whole plan for the planner's curve. It
         # was virtual time until the progress state became the path parameter
@@ -933,6 +957,8 @@ class Cycle:
         """Nothing goes out, so nothing may be shifted next cycle either."""
         self.last_silence = why
         self.forget_plan()
+        # What the JTC runs through a silence is not ours; `propagate` reseeds.
+        self.applied_inputs.clear()
         if self.reference_anchored:
             # One nominal interval spent while nobody was driving, charged to both
             # readings of where the plan is, as `advance` charges them -- and to the

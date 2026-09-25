@@ -6,6 +6,8 @@ that hands control back, and the shift that keeps driving on a solve that
 did not converge.
 """
 
+from types import SimpleNamespace
+
 import numpy as np
 import pytest
 from crane_model import symbolic as cs
@@ -627,7 +629,8 @@ def test_a_curve_anchors_at_the_plans_start_and_not_the_planning_latency():
     without.reference_anchored = False
     without.path_control = None
     assert without.gates(now, 1.0, 0.5) is None
-    assert without.reference_progress == pytest.approx(1.0)
+    # Knot 0 is due `command_delay` after now: one `Ts` on, zero delay here.
+    assert without.reference_progress == pytest.approx(1.0 + without.command_delay)
 
 
 def test_a_late_curve_puts_both_readings_back_at_the_plans_start():
@@ -726,23 +729,19 @@ def test_no_measured_transport_carries_the_stage_the_next_cycle_measures_at():
     assert made.carried[0] == pytest.approx(solved.states[1][0])
 
 
-def test_the_machine_carries_force_from_x0_and_progress_from_the_next_one():
+def test_the_machine_carries_force_from_the_next_measurement_and_progress_from_x0_on():
     """
-    The deployed pair is `delay == Ts`, which no other test here constructs --
-    every `cycle()` helper runs at zero delay. The two row groups come from
-    different stages and only this configuration can tell them apart: physical
-    rows from `states[0]`, because `propagate` rolls them over a whole `Ts`,
-    and the progress pair from `states[1]`, which stands where the next `x_0`
-    will for any delay.
+    `propagate` rolls the measurement one `Ts` under the command the plant runs
+    now (`x_next`, the next measurement instant) and then under the one already
+    published. C3's physical rows enter the next cycle from `x_next`; the
+    progress pair from `states[1]`, where the next `x_0` stands.
     """
     made = Cycle(Ts, hz.Grid(Ts, KNOTS), "active", Ts)
     made.horizon = hz.Knots.zeros(KNOTS)
-    assert made.carry_stage == 0
+    made.x_next = np.full(cs.NX, 7.0)
     solved = solution(Outcome.CONVERGED, 1.0)
     made.advance(solved, NOMINAL_NS, MIN_RATE, MAX_STALL)
-    assert made.carried[cs.X_ACTUATED_FORCE] == pytest.approx(
-        solved.states[0][cs.X_ACTUATED_FORCE]
-    )
+    assert made.carried[cs.X_ACTUATED_FORCE] == pytest.approx(7.0)
     assert made.carried[cs.X_PROGRESS_RATE] == pytest.approx(
         solved.states[1][cs.X_PROGRESS_RATE]
     )
@@ -758,3 +757,39 @@ def test_a_refused_delay_does_not_raise_out_of_the_constructor():
     """
     made = Cycle(0.04, hz.Grid(0.04, KNOTS), "active", 0.06)
     assert made.carry_stage == 0
+
+
+class ReplayOcp:
+    """Records the commands `propagate` replays; the roll itself is the identity."""
+
+    replay = [SimpleNamespace(age=0, seconds=Ts)]
+
+    def __init__(self):
+        self.replayed = []
+
+    def pin_tool(self, _):
+        pass
+
+    def propagate_applied(self, x, applied):
+        self.replayed.append([np.asarray(u).copy() for u in applied])
+        return np.asarray(x).copy()
+
+
+def test_after_a_silence_the_command_in_flight_is_the_machines_own_velocity():
+    """
+    A silence mid-motion (cancelled goal, stale `/joint_states`, escalation)
+    must not resume by replaying the `u0` from before it -- up to full speed on
+    an axis that has since stopped -- nor by assuming a hard stop.
+    """
+    one = cycle()
+    one.ocp = ReplayOcp()
+    one.last_input = np.full(cs.NU_PROGRESS, 0.7)
+    one.applied_inputs = [one.last_input.copy()]
+    one.stay_silent("the gate closed")
+
+    one.measured = np.zeros(cs.NX)
+    one.measured[cs.X_PLANNED_VELOCITY] = 0.2
+    assert one.propagate() is None
+    replayed = one.ocp.replayed[-1][0]
+    assert replayed[0] == pytest.approx(0.2)
+    assert np.allclose(replayed[1 : cs.K_PLANNED_DOF], 0.0)

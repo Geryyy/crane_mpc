@@ -130,10 +130,9 @@ def test_in_shadow_the_horizon_goes_to_the_private_topic(node):
     # Canonical eight, not actuated six: JTC rejects a six-name trajectory
     # under `allow_partial_joints_goal: false`.
     assert list(horizon.joint_names) == list(NAMES)
-    # One more than the grid: the command already in flight stands at
-    # `time_from_start` zero so nothing on the wire is still in the future
-    # when it arrives (issue 161).
-    assert len(horizon.points) == node.grid.horizon_length + 1
+    # Knot 0 at the stamp, every knot after it, plus the hold edges between.
+    assert len(horizon.points) > node.grid.horizon_length
+    assert horizon.points[0].time_from_start == Duration(sec=0, nanosec=0)
     # The plan starts where the machine is, not where the last cycle left off.
     assert horizon.points[0].positions[1] == pytest.approx(POSE[1], abs=0.05)
     # The two passive rows carry the solved sway, not a pair of zeros.
