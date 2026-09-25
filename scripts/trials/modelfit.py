@@ -19,6 +19,26 @@ Two sources, one number:
     modelfit.py bag '<glob of HydraulicCalib bags>' [count]
     modelfit.py capture <cap.json from trial.sh>
 
+Positions, velocities and both passive rows are re-seeded from the measurement
+every cycle, so they cannot compound. Only C3's force and command-lag rows carry
+forward, because nothing measures them -- exactly what `Cycle` does.
+
+**That carry is not a source of drift; it is the only thing holding the force
+state up.** Measured on `good1`: carrying it scores sw 0.62 / ha 0.76 / ka 0.36,
+re-seeding it from `static_hold_force` every cycle scores 0.03 / 0.20 / 0.14,
+and every fifth cycle 0.42 / 0.25 / 0.31. During motion the real C3 force is
+nowhere near the holding force, so throwing the estimate away each step is much
+worse than keeping it. Skill also *rises* through a run (sw 0.54 -> 0.64 over
+the second half) rather than decaying: what the carry costs is a startup
+transient while the force row converges, not accumulation.
+
+The way to remove that last error is to **measure** the force, not to re-seed it
+-- on hardware `/cranedata` carries chamber pressures A and B per axis, and
+pressure times effective area is the force row. In sim the gz actuator's
+`effort_state_` is the right quantity but is not exposed; the `effort` state
+interface is the transmitted wrench, which includes the gravity and constraint
+reaction and is a different thing.
+
 **Which command you score against decides the answer.** On a capture, use what
 the JTC put on the interface (`controller_state.output`), not the MPC's `u`: the
 JTC ramps between knots and adds its PI, and scoring `u` held flat instead reads
