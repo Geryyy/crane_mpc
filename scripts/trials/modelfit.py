@@ -16,7 +16,7 @@ go to zero and the ratio means nothing.
 
 Two sources, one number:
 
-    modelfit.py bag '<glob of HydraulicCalib bags>' [count]
+    modelfit.py bag '<glob of HydraulicCalib bags>' [count]   two tables
     modelfit.py capture <cap.json from trial.sh>
 
 Positions, velocities and both passive rows are re-seeded from the measurement
@@ -32,12 +32,37 @@ worse than keeping it. Skill also *rises* through a run (sw 0.54 -> 0.64 over
 the second half) rather than decaying: what the carry costs is a startup
 transient while the force row converges, not accumulation.
 
-The way to remove that last error is to **measure** the force, not to re-seed it
--- on hardware `/cranedata` carries chamber pressures A and B per axis, and
-pressure times effective area is the force row. In sim the gz actuator's
-`effort_state_` is the right quantity but is not exposed; the `effort` state
-interface is the transmitted wrench, which includes the gravity and constraint
-reaction and is a different thing.
+The way to remove that last error is to **measure** the force, not to re-seed
+it, and the `bag` arm now scores both: `/cranedata`'s chamber pressures through
+`crane_model.pressure.actuated_force_from_pressure`. On the axis a campaign bag
+actually excites the measurement wins by a wide margin (169) -- one-cycle rms,
+five bags each:
+
+    axis  campaign    carried  measured
+    sw    M01v10-14    0.1046    0.0293
+    ha    M02v11-15    0.0985    0.0124
+    ka    M03v*        0.6824    0.0818
+    sa    M04v20-24    0.0237    0.0295   <- the one loss
+    ro    M05v*        1.5688    0.0861
+
+Both columns score the same cycles -- `report`'s `n` is identical arm to arm on
+every campaign above, so no bag and no cycle was dropped from one and not the
+other.
+
+On an axis standing still it loses, because the measured force also carries
+reactions the rigid-body model has no room for -- an end stop, and a payload
+these timber bags do not share with the PZS100. The telescope is the one axis
+that loses while excited, and **the reason is not established**: the formula is
+circuit-independent when *both* pressures are measured, and `M04v20-24` shows
+the transducers do see the regeneration (`p_a` 66 / `p_b` 80 bar extending
+against 34 / 78 retracting). What is left is that the carry is already close to
+the trivial predictor there (skill -0.88, against -14 to -38 elsewhere), so the
+seed has almost nothing to win and its own bias -- wear-pad friction on the
+smallest net area on the machine -- costs more.
+
+In sim none of this is available: the gz actuator's `effort_state_` is the right
+quantity but is not exposed, and the `effort` state interface is the transmitted
+wrench, gravity and constraint reaction included, which is a different thing.
 
 **Which command you score against decides the answer.** On a capture, use what
 the JTC put on the interface (`controller_state.output`), not the MPC's `u`: the
@@ -53,6 +78,7 @@ import sys
 import numpy as np
 from crane_model import symbolic as cs
 from crane_model.conventions import canonical_joints
+from crane_model.pressure import BAR_TO_PA, actuated_force_from_pressure
 from crane_mpc import problem
 from crane_mpc.solver import Ocp
 
@@ -66,6 +92,7 @@ CANON = list(canonical_joints())
 PLANNED_ROWS = [0, 1, 2, 3, 6]
 PASSIVE_ROWS = [4, 5]
 MOVING = 5.0e-3
+CONSTANTS = cs.load_constants()
 
 
 def shipped():
@@ -84,13 +111,16 @@ def shipped():
     return copy.deepcopy(parameters)
 
 
-def score(ocp, t, q, dq, command, cycle=None):
+def score(ocp, t, q, dq, command, cycle=None, force=None):
     """
     Walk one run; return (model error, actual change) per scored cycle.
 
     `cycle` is one `Ts` expressed in whatever clock `t` is on -- a capture's
     controller stream is wall-stamped while `Ts` is simulated seconds, and at
     an RTF near 0.5 taking them for the same thing steps half a cycle.
+
+    `force(k)` overwrites the force row from a measurement instead of carrying
+    it. The command-lag row carries either way -- nothing measures that.
     """
     stride = max(1, int(round((cycle or ocp.Ts) / float(np.median(np.diff(t))))))
     x = np.zeros(cs.NX)
@@ -111,6 +141,8 @@ def score(ocp, t, q, dq, command, cycle=None):
         x[VEL] = dq[k, :PL]
         x[PAS] = q[k, PL : PL + 2]
         x[PAV] = dq[k, PL : PL + 2]
+        if force is not None:
+            x[cs.X_ACTUATED_FORCE : cs.X_ACTUATED_FORCE + PL] = force(k)
         x[cs.X_PROGRESS] = 0.0
         step = np.zeros(cs.NU_PROGRESS)
         step[:PL] = u
@@ -143,7 +175,25 @@ def report(label, model, actual):
     print(f"the axis changed speed by more than {MOVING} rad/s.")
 
 
-def from_bags(ocp, pattern, count):
+def measured_force(q, data):
+    """
+    `k -> tau_a` from `/cranedata`'s chamber pressures; None if the bag has none.
+
+    The boom and arm columns are looked up, not written as 1 and 2: `q` is
+    `PLANNED_ROWS + PASSIVE_ROWS + [7]`, and reordering `PLANNED_ROWS` would
+    otherwise evaluate the transmission at the wrong joints in silence.
+    """
+    boom, arm = PLANNED_ROWS.index(1), PLANNED_ROWS.index(2)
+    p_a = np.asarray(data["pressures_a"], float) * BAR_TO_PA
+    p_b = np.asarray(data["pressures_b"], float) * BAR_TO_PA
+    if not (np.isfinite(p_a).all() and np.isfinite(p_b).all()):
+        return None
+    return lambda k: actuated_force_from_pressure(
+        CONSTANTS, q[k, boom], q[k, arm], p_a[k], p_b[k]
+    )
+
+
+def from_bags(ocp, pattern, count, pressure=False):
     sys.path.insert(0, "/workspaces/ros2_baustelle_ws/timber_crane_mujoco_py")
     from timber_crane_mujoco_py.utils.rosbag_utils import read_bag_full
 
@@ -158,7 +208,11 @@ def from_bags(ocp, pattern, count):
         q = np.asarray(data["positions_js"])[:, PLANNED_ROWS + PASSIVE_ROWS + [7]]
         dq = np.asarray(data["velocities_js"])[:, PLANNED_ROWS + PASSIVE_ROWS + [7]]
         u = np.asarray(data["velocities_sp"])
-        one, two = score(ocp, t, q, dq, lambda k, _: u[k, :PL])
+        force = measured_force(q, data) if pressure else None
+        if pressure and force is None:
+            print(f"{path.split('/')[-1]:>10} skipped: no chamber pressures")
+            continue
+        one, two = score(ocp, t, q, dq, lambda k, _: u[k, :PL], force=force)
         model.append(one)
         actual.append(two)
     return np.vstack(model), np.vstack(actual)
@@ -211,8 +265,12 @@ def main():
     )
     if sys.argv[1] == "bag":
         count = int(sys.argv[3]) if len(sys.argv) > 3 else 3
-        model, actual = from_bags(ocp, sys.argv[2], count)
-        report(f"{sys.argv[2]} ({count} bags)", model, actual)
+        for pressure in (False, True):
+            arm = (
+                "force row from measured pressure" if pressure else "force row carried"
+            )
+            model, actual = from_bags(ocp, sys.argv[2], count, pressure)
+            report(f"{sys.argv[2]} ({count} bags) -- {arm}", model, actual)
     else:
         model, actual = from_capture(ocp, sys.argv[2])
         report(sys.argv[2], model, actual)
