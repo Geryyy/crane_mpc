@@ -24,5 +24,11 @@ then withdrawn on that metric. Score on the growth rate instead.
   side by side: Gazebo (from that capture), MuJoCo through `C3Actuator`, and the
   OCP's own integrator. They agreed to 0.01 through 500 ms once issue 161's
   three actuator faults were fixed; before that Gazebo was alone.
+- `modelfit.py bag '<glob>' | capture <cap.json>` — one-cycle prediction error of
+  the MPC's own model against what the crane actually did, per axis, with a
+  skill score against "nothing changes". Works on the HydraulicCalib bags (real
+  machine) and on a live capture. Score against the command the machine
+  *received* (`controller_state.output`), not the one the MPC asked for — on the
+  same run the latter reads 20x worse.
 - `score.py` — cadence, command chatter, travel, arrival. Context, not the score.
 - `pid_move.py` — the same plan with the MPC off: the stable reference arm.
