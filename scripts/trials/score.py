@@ -54,7 +54,12 @@ def main(path, label):
         f"paired={'YES' if d['ref'] and d['ref'] == d['path'] else 'NO'}"
     )
 
-    cmd = by_name(hz, "vel")
+    # `u`, not the reference velocity: the wire carries `effort = u - dq_a_ref`,
+    # so the command the issue's criterion is about is the sum of the two. Reading
+    # `vel` alone scores `dq_a_ref`, which is far smoother and reads as a pass.
+    ref_vel = by_name(hz, "vel")
+    eff = by_name(hz, "eff")
+    cmd = {j: ref_vel[j] + eff[j] for j in ACT}
     mea = by_name(js, "vel")
     pos = by_name(js, "pos")
     print(
