@@ -23,6 +23,7 @@ the JTC's tolerance checks, goal handling and angle wraparound are skipped.
 """
 
 import argparse
+import dataclasses
 import sys
 from pathlib import Path
 
@@ -140,6 +141,9 @@ def main(argv=None) -> int:
         help="s; stamp every horizon this far off the measurement, as the "
         "once-anchored grid did",
     )
+    parser.add_argument(
+        "--pi-scale", type=float, default=1.0, help="multiply the JTC's p, i, d"
+    )
     mine, rest = parser.parse_known_args(sys.argv[1:] if argv is None else argv)
     options, forwarded = sim_chain.arguments(rest)
     mpc = mpc_a2b.parse_arguments(forwarded)
@@ -158,11 +162,22 @@ def main(argv=None) -> int:
     plant = sim_chain.MujocoPlant(description, timestep=options.timestep)
     plant.scale_planned_damping(damping_scale)
     start = tune_planner.start_of(planner, options.resettle_start)
-    plan = sim_chain.plan_move(planner, start, options, None)
+    rng = None if options.random is None else np.random.default_rng(options.seed)
+    plan = sim_chain.plan_move(planner, start, options, rng)
     if plan is None:
         return 2
     path = sim_chain.planned_path(plan)
     chain = sim_chain.Chain(plant, model, start.q_tool, options, fit=plant_fit)
+    chain.loop = type(chain.loop)(
+        [
+            dataclasses.replace(
+                a, p=a.p * mine.pi_scale, i=a.i * mine.pi_scale, d=a.d * mine.pi_scale
+            )
+            for a in chain.loop.gains
+        ],
+        chain.step_s,
+        continuous=chain.wrap,
+    )
 
     Ts, N = float(parameters["Ts"]), int(parameters["horizon_length"])
     delay = float(parameters["sensor_to_valve_delay"])
@@ -338,7 +353,12 @@ def main(argv=None) -> int:
         names += [f"dq{i}" for i in range(nq)] + ["dq_u0", "dq_u1", "status"]
         names += [f"u0_{i}" for i in range(nq)]
         np.savetxt(mine.csv, log, delimiter=",", header=",".join(names), comments="")
-    return 1 if diverged or reversal_fraction(u0).max() >= REVERSAL_FRACTION else 0
+    # A joint past its command clamp is out of Psi's domain: a hunting run at 1/3
+    # reversals (PI x4, issue 173) passed the reversal gate alone.
+    dq = log[:, 2 + nq + 2 : 2 + 2 * nq + 2]
+    past_clamp = bool(np.any(dq > chain.high + 1e-3) or np.any(dq < chain.low - 1e-3))
+    hunting = reversal_fraction(u0).max() >= REVERSAL_FRACTION
+    return 1 if diverged or hunting or past_clamp else 0
 
 
 if __name__ == "__main__":
