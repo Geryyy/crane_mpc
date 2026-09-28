@@ -17,6 +17,13 @@ actuator and MuJoCo plant. Nothing is published.
 Unknown flags go to sim_chain / mpc_a2b (plant mismatch included). Exit 1 on
 divergence or hunting (`crane_mpc.hunting`: u0 reversing on half the cycles).
 
+Levers: `--set weights.du=30 --set dq_a_feedback=false` overrides crane_mpc.yaml
+(yaml value; a scalar on a list key fills every axis). A key in
+`solver.export_key` (Ts, horizon_length, sensor_to_valve_delay, ...) re-exports
+the solver: minutes, and unlocked, so run that setting once before a parallel
+sweep. Payload: `--payload-mass` is what the OCP believes, `--plant-payload`
+what MuJoCo carries (default: the same), both at `--payload-com` in K8.
+
 Not the machine: measurement is exact at the cycle instant, the solve takes no
 time (latency is delivery only; budget off), the tool axis is not driven, and
 the JTC's tolerance checks, goal handling and angle wraparound are skipped.
@@ -24,17 +31,22 @@ the JTC's tolerance checks, goal handling and angle wraparound are skipped.
 
 import argparse
 import dataclasses
+import json
 import sys
 from pathlib import Path
 
 import numpy as np
+import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import sim_chain  # noqa: E402
 from builtin_interfaces.msg import Time  # noqa: E402
+from crane_model.model import Payload  # noqa: E402
+from crane_model.symbolic import PAYLOAD_MOUNT_LINK  # noqa: E402
 from crane_mpc import cycle as cy  # noqa: E402
 from crane_mpc import horizon as hz  # noqa: E402
 from crane_mpc.hunting import REVERSAL_FRACTION, reversal_fraction  # noqa: E402
+from growth import growth  # noqa: E402
 from sim_chain import (  # noqa: E402
     ACTUATED_INDICES,
     PASSIVE_INDICES,
@@ -111,6 +123,37 @@ def stamp_of(seconds):
     return Time(sec=ns // 1_000_000_000, nanosec=ns % 1_000_000_000)
 
 
+def override(parameters, assignment):
+    """Apply one `--set key.path=value` to the loaded parameters."""
+    key, _, text = assignment.partition("=")
+    *path, leaf = key.split(".")
+    node = parameters
+    for part in path:
+        node = node[part]
+    if leaf not in node:
+        raise SystemExit(f"--set {key}: no such parameter")
+    value = yaml.safe_load(text)
+    if isinstance(node[leaf], list) and not isinstance(value, list):
+        value = [value] * len(node[leaf])
+    node[leaf] = value
+
+
+def carry_payload(plant, mass, com):
+    """Put a point mass on MuJoCo's payload mount, where the OCP's sits."""
+    if not mass:
+        return
+    mj, model = plant._mj, plant.model
+    body = mj.mj_name2id(model, mj.mjtObj.mjOBJ_BODY, PAYLOAD_MOUNT_LINK)
+    if model.body_mass[body] != 0.0:
+        raise SystemExit(f"{PAYLOAD_MOUNT_LINK} has mass already; merge not done")
+    model.body_mass[body] = mass
+    model.body_ipos[body] = com
+    model.body_iquat[body] = (1.0, 0.0, 0.0, 0.0)
+    model.body_inertia[body] = 1e-4 * mass  # near-point; MuJoCo wants > 0
+    mj.mj_setConst(model, plant.data)
+    plant.forward()
+
+
 def wire_161(horizon, joints, stamp, lead, in_flight):
     """Issue 161's encoding: knot i at lead + t_i, the in-flight knot at 0, u - dq per knot."""
     message = hz.horizon_to_message(horizon, joints, stamp)
@@ -144,6 +187,13 @@ def main(argv=None) -> int:
     parser.add_argument(
         "--pi-scale", type=float, default=1.0, help="multiply the JTC's p, i, d"
     )
+    parser.add_argument(
+        "--set", action="append", default=[], metavar="KEY=VALUE", help="yaml lever"
+    )
+    parser.add_argument(
+        "--plant-payload", type=float, default=None, help="kg; default --payload-mass"
+    )
+    parser.add_argument("--json", type=Path, default=None, help="scores")
     mine, rest = parser.parse_known_args(sys.argv[1:] if argv is None else argv)
     options, forwarded = sim_chain.arguments(rest)
     mpc = mpc_a2b.parse_arguments(forwarded)
@@ -153,13 +203,31 @@ def main(argv=None) -> int:
         description, tune_planner.plan_example.configure(options)
     )
     parameters, hydraulics = mpc_a2b.load_settings(mpc)
+    xml = (
+        mpc_a2b.export_ocp.DEFAULT_DESCRIPTIONS / mpc_a2b.export_ocp.DESCRIPTION
+    ).read_text()
+    shipped = sim_chain.ocp_runtime.export_key(parameters, hydraulics, xml)
+    for assignment in mine.set:
+        override(parameters, assignment)
+    moved = sim_chain.ocp_runtime.export_key(parameters, hydraulics, xml)
+    moved = [key for key in shipped if moved[key] != shipped[key]]
+    if moved:
+        print(f"warning: --set moves compiled {moved}; re-exports", file=sys.stderr)
     plant_fit, damping_scale = sim_chain.perturb_fit(
         k=options.k_scale, d=options.d_scale, lag_shift_s=options.lag_shift
     )
     ocp, model, _ = mpc_a2b.create_solver(mpc, parameters, hydraulics)
     # Offline wall time is not the machine's; `--latency` stands for it.
     ocp.solve_budget_s = 10.0
+    ocp.set_payload(mpc.payload_mass, mpc.payload_com)
     plant = sim_chain.MujocoPlant(description, timestep=options.timestep)
+    carried = mpc.payload_mass if mine.plant_payload is None else mine.plant_payload
+    carry_payload(plant, carried, mpc.payload_com)
+    payload = Payload(carried, np.asarray(mpc.payload_com, float), valid=True)
+
+    def equilibrium(q_a):
+        return planner.model.passive_equilibrium(q_a, payload)
+
     plant.scale_planned_damping(damping_scale)
     start = tune_planner.start_of(planner, options.resettle_start)
     rng = None if options.random is None else np.random.default_rng(options.seed)
@@ -198,7 +266,7 @@ def main(argv=None) -> int:
         cycle.anchor_cadence = lambda ns: anchor(ns + phase_ns)
 
     q0 = plan.q[0].copy()
-    q0[PASSIVE] = planner.model.passive_equilibrium(q0[list(ACTUATED_INDICES)])
+    q0[PASSIVE] = equilibrium(q0[list(ACTUATED_INDICES)])
     x_init = np.zeros(cs.NX)
     x_init[: cs.K_PLANNED_DOF] = q0[PLANNED]
     x_init[cs.X_PASSIVE_POSITION : cs.X_PASSIVE_POSITION + 2] = q0[PASSIVE]
@@ -311,7 +379,7 @@ def main(argv=None) -> int:
             clock += h
 
         q, dq = plant.q, plant.dq
-        sway = q[PASSIVE] - planner.model.passive_equilibrium(q[list(ACTUATED_INDICES)])
+        sway = q[PASSIVE] - equilibrium(q[list(ACTUATED_INDICES)])
         status = -1 if solution is None else solution.status
         log.append(
             [
@@ -358,7 +426,36 @@ def main(argv=None) -> int:
     dq = log[:, 2 + nq + 2 : 2 + 2 * nq + 2]
     past_clamp = bool(np.any(dq > chain.high + 1e-3) or np.any(dq < chain.low - 1e-3))
     hunting = reversal_fraction(u0).max() >= REVERSAL_FRACTION
-    return 1 if diverged or hunting or past_clamp else 0
+    reason = [
+        n
+        for n, bad in (
+            ("diverged", diverged),
+            ("hunting", hunting),
+            ("past_clamp", past_clamp),
+        )
+        if bad
+    ]
+    if mine.json:
+        rate, _ = growth(log[:, 0], np.abs(sway).max(axis=1))
+        scores = {
+            "exit": reason[0] if reason else "ok",
+            "cycles": len(log),
+            "final_error": float(
+                np.abs(log[-1, 2 : 2 + nq] - plan.q[-1, PLANNED]).max()
+            ),
+            "sway_peak": np.abs(sway).max(axis=0).tolist(),
+            "sway_late": np.abs(late).max(axis=0).tolist(),
+            # |dq| over the clamp on its side, per axis: > 1 is outside Psi's domain
+            "dq_clamp_ratio": np.maximum(
+                dq.max(0) / chain.high, dq.min(0) / chain.low
+            ).tolist(),
+            "reversals": reversal_fraction(u0).tolist(),
+            "nonzero_status": int(np.sum(log[:, -nq - 1] > 0)),
+            **events,
+            "growth_per_s": rate,
+        }
+        mine.json.write_text(json.dumps(scores, indent=1))
+    return 1 if reason else 0
 
 
 if __name__ == "__main__":

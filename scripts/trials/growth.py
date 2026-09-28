@@ -72,4 +72,5 @@ def main():
         print(f"{label:>12} {rate:10.3f} {doubling:9.1f} {n:5d} {dev.max():8.4f}")
 
 
-main()
+if __name__ == "__main__":
+    main()
