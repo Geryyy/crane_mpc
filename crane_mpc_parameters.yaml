@@ -160,6 +160,14 @@ crane_mpc:
     validation:
       gt_eq<>: [0.0]
 
+  command_state:
+    type: bool
+    default_value: false
+    read_only: true
+    description: "C4: the joint-velocity command c becomes 5 states appended to x and u[:5] becomes its rate
+      dc, bounded by limits.du_max and priced by weights.du on every stage. c stays hard-boxed in +-u_max
+      (Psi's domain). False is C3 exactly. Compiled in: a different export."
+
   sway:
     dq_u_settled:
       type: double_array
@@ -259,7 +267,8 @@ crane_mpc:
       read_only: true
       description: "w_du -- move suppression, stage 0 only: w_du*(u_0 - u_f)^2, u_f the command in flight
         over [t, t+Ts). Folded into the u row (W = w_u + w_du, yref = w_du*u_f/W), so no re-export. Damps
-        the cycle-to-cycle flip of u_0 (issue 121). Zero is today's cost exactly."
+        the cycle-to-cycle flip of u_0 (issue 121). Zero is today's cost exactly.
+        Under command_state (C4) it prices the rate dc instead, in (rad/s^2)^-2, on every stage."
       validation:
         fixed_size<>: [6]
         lower_element_bounds<>: [0.0]
@@ -383,6 +392,16 @@ crane_mpc:
         decoration. Not tuned."
       validation:
         gt<>: [0.0]
+    du_max:
+      type: double_array
+      default_value: [5.2, 1.7, 1.8, 3.5, 14.0]
+      read_only: true
+      description: "C4 only: |dc| <= this per planned axis, rad/s^2 (m/s^2 telescope). The valve-current
+        slew limit, 0.058 per 10 ms sample normalised (wiki hydraulics.md 7.2), through each axis'
+        end-to-end gain (sw 0.9, ha 0.29, ka 0.31, sa 0.61, ro 2.4 per unit). Unread under C3."
+      validation:
+        fixed_size<>: [5]
+        lower_element_bounds<>: [0.0]
 
   hydraulics:
     pump_flow_max:

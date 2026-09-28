@@ -220,6 +220,28 @@ NY_TERMINAL = Y_PROGRESS_RATE + 1
 Y_ACTUATED_FORCE = NY_TERMINAL
 Y_INPUT = Y_ACTUATED_FORCE + cs.K_PLANNED_DOF
 NY = Y_INPUT + cs.NU_PROGRESS
+# C4 only: the command state `c`, after the input rows (which then carry `dc`).
+Y_COMMAND = NY
+NY_COMMAND = Y_COMMAND + cs.K_PLANNED_DOF
+
+
+def command_state(parameters: dict) -> bool:
+    """Whether this configuration is C4 (command a state) rather than C3."""
+    return bool(parameters.get("command_state", False))
+
+
+def residual_rows(parameters: dict) -> int:
+    """Stage residual width of this variant; the terminal is `NY_TERMINAL` always."""
+    return NY_COMMAND if command_state(parameters) else NY
+
+
+def boxed_state_rows(parameters: dict) -> np.ndarray:
+    """`idxbx`: the rigid/lag/progress prefix, plus `c` under C4."""
+    rows = np.arange(cs.NBX)
+    if command_state(parameters):
+        rows = np.concatenate([rows, np.arange(cs.X_COMMAND, cs.NX_COMMAND)])
+    return rows
+
 
 # Axis the lag row is written on: Marc's slewing joint alone
 # (`timber_crane_cost_js_pfc_pt2.cpp:62-74`), not generalised across axes --
@@ -314,8 +336,10 @@ def build_ocp(description_xml: str, parameters: dict, hydraulics: dict) -> tuple
     # C3 on every planned axis: PT1 command lag, force state, forward
     # dynamics, with fitted `k`/`tau_v` from file. `u` is joint velocity
     # (rad/s) at Psi's input, not acceleration.
+    # Under C4 `u[:NU]` is the command's rate and the command a state.
+    c4 = command_state(parameters)
     model = cs.CraneSymbolicModel(
-        description_xml, TOOL, actuator=cs.load_actuator_fit()
+        description_xml, TOOL, actuator=cs.load_actuator_fit(), command_state=c4
     )
     scale, extend, retract = constraint_scale(model, hydraulics)
 
@@ -380,7 +404,7 @@ def build_ocp(description_xml: str, parameters: dict, hydraulics: dict) -> tuple
     acados_model.f_expl_expr = xdot
     # IRK reads `f_impl_expr` (errors if empty), ERK reads `f_expl_expr`; both
     # set so the integrator stays a solver option, not a re-model.
-    acados_model.xdot = ca.SX.sym("xdot", cs.NX)
+    acados_model.xdot = ca.SX.sym("xdot", x.shape[0])
     acados_model.f_impl_expr = acados_model.xdot - xdot
 
     # --- the cost, as a nonlinear least-squares residual -----------------------
@@ -432,6 +456,8 @@ def build_ocp(description_xml: str, parameters: dict, hydraulics: dict) -> tuple
         tau_a[: cs.K_PLANNED_DOF],
         u,
     )
+    if c4:
+        residual = ca.vertcat(residual, model.command)
     terminal_residual = residual[:NY_TERMINAL]
     acados_model.cost_y_expr_0 = residual
     acados_model.cost_y_expr = residual
@@ -473,7 +499,7 @@ def build_ocp(description_xml: str, parameters: dict, hydraulics: dict) -> tuple
     ocp.solver_options.N_horizon = horizon
     ocp.solver_options.tf = horizon * step
 
-    nx = cs.NX
+    nx = x.shape[0]
     nu = cs.NU_PROGRESS
     nh = cs.NU + 1
 
@@ -486,9 +512,10 @@ def build_ocp(description_xml: str, parameters: dict, hydraulics: dict) -> tuple
     ocp.cost.cost_type_e = "NONLINEAR_LS"
     ny = residual.shape[0]
     ny_e = terminal_residual.shape[0]
-    if ny != NY or ny_e != NY_TERMINAL:
+    if ny != residual_rows(parameters) or ny_e != NY_TERMINAL:
         raise ValueError(
-            f"the residual is {ny} rows against the offsets' {NY} and the terminal "
+            f"the residual is {ny} rows against the offsets' "
+            f"{residual_rows(parameters)} and the terminal "
             f"{ny_e} against {NY_TERMINAL}; the offsets are what the C++ reads"
         )
     ocp.cost.W_0 = np.eye(ny)
@@ -510,12 +537,14 @@ def build_ocp(description_xml: str, parameters: dict, hydraulics: dict) -> tuple
     # nonlinear row stays, reduced to `x_j / J_c,ii(q)`.
     #
     # Boxed rows: rigid-body state plus lagged command, a contiguous prefix
-    # of `x`, so `idxbx`/`idxsbx` share indices.
-    nbx = cs.NBX
-    ocp.constraints.idxbx = np.arange(nbx)
+    # of `x`, so `idxbx`/`idxsbx` share indices. C4's `c` rows go after that
+    # prefix, hard: `c` is Psi's domain.
+    boxed = boxed_state_rows(parameters)
+    nbx = boxed.size
+    ocp.constraints.idxbx = boxed
     ocp.constraints.lbx = -np.ones(nbx)
     ocp.constraints.ubx = np.ones(nbx)
-    ocp.constraints.idxbx_e = np.arange(nbx)
+    ocp.constraints.idxbx_e = boxed
     ocp.constraints.lbx_e = -np.ones(nbx)
     ocp.constraints.ubx_e = np.ones(nbx)
     ocp.constraints.idxbu = np.arange(nu)

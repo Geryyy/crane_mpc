@@ -51,6 +51,7 @@ WIDTHS = {
         "u_max": cs.K_ACTUATED_DOF,
         "q_u_max": cs.K_PASSIVE_DOF,
         "dq_u_max": cs.K_PASSIVE_DOF,
+        "du_max": cs.K_PLANNED_DOF,
     },
     "slack": {
         "q_u": cs.K_PASSIVE_DOF,
@@ -67,6 +68,8 @@ SCALARS = (
     "levenberg_marquardt",
     "solve_budget",
     "sensor_to_valve_delay",
+    # C4: the command a state, `u` its rate. Read as `bool(...)`.
+    "command_state",
 )
 WEIGHTS = (
     "q_a",
@@ -101,6 +104,7 @@ LIMITS = (
     "dq_u_max",
     "progress_rate_headroom",
     "progress_accel_max",
+    "du_max",
 )
 SLACK = ("q_u", "dq_u", "cylinder_force", "pump_flow")
 HYDRAULICS = ("pump_flow_max", "pump_flow_planning_factor", "system_pressure_pa")
@@ -312,7 +316,9 @@ def check_settings(parameters: dict, hydraulics: dict) -> None:
                 "tightening, not a replacement for the limit"
             )
     _refuse(
-        _offender(limits, ("dq_a_max", "q_u_max", "dq_u_max", "u_max"), _positive),
+        _offender(
+            limits, ("dq_a_max", "q_u_max", "dq_u_max", "u_max", "du_max"), _positive
+        ),
         "constraints 2 to 5 of `mpc` §3 each need a finite positive bound; an invented "
         "or absent one is the silent stub the model API's contract 5 exists to prevent",
     )

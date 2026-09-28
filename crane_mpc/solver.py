@@ -70,9 +70,9 @@ class Guess:
     states: np.ndarray
     inputs: np.ndarray
 
-    def warm(self, intervals: int) -> bool:
+    def warm(self, intervals: int, nx: int = cs.NX) -> bool:
         return (
-            self.states.shape == (intervals + 1, cs.NX)
+            self.states.shape == (intervals + 1, nx)
             and self.inputs.shape == (intervals, cs.NU_PROGRESS)
             and np.all(np.isfinite(self.states))
             and np.all(np.isfinite(self.inputs))
@@ -146,7 +146,10 @@ class CostTerms:
     lag: float = 0.0
     progress: float = 0.0
     tau_a: float = 0.0
+    #: The command (C3: the input rows; C4: the `c` rows) plus progress accel.
     u: float = 0.0
+    #: C4 only: the command's rate rows.
+    du: float = 0.0
     terminal: float = 0.0
     slack: float = 0.0
 
@@ -155,10 +158,17 @@ class CostTerms:
 
 
 def weight_matrices(parameters: dict) -> tuple[np.ndarray, np.ndarray]:
-    """Stage and terminal nonlinear-least-squares weights."""
+    """
+    Stage and terminal nonlinear-least-squares weights.
+
+    C4: the input rows are `dc`, priced by `du` every stage; `u` prices `c`.
+    """
     weights = parameters["weights"]
     planned = cs.K_PLANNED_DOF
     passive = cs.K_PASSIVE_DOF
+    command = np.asarray(weights["u"][:planned], dtype=float)
+    rate = np.asarray(weights["du"][:planned], dtype=float)
+    c4 = problem.command_state(parameters)
     diagonal = np.concatenate(
         [
             np.asarray(weights["q_a"][:planned], dtype=float),
@@ -174,8 +184,9 @@ def weight_matrices(parameters: dict) -> tuple[np.ndarray, np.ndarray]:
                 float(weights["progress_rate"]),
             ],
             np.asarray(weights["tau_a"][:planned], dtype=float),
-            np.asarray(weights["u"][:planned], dtype=float),
+            rate if c4 else command,
             [float(weights["progress_accel"])],
+            command if c4 else [],
         ]
     )
     terminal = float(weights["terminal_scale"]) * diagonal[: problem.NY_TERMINAL]
@@ -262,6 +273,8 @@ def state_bounds(
     u_max = np.asarray(limits["u_max"][: cs.K_PLANNED_DOF], dtype=float)
     q_lower, q_upper = position_box(parameters, measured)
     lag = u_max[list(cs.K_LAG_AXES)]
+    # C4's `c` rows, hard in Psi's domain.
+    command = u_max if problem.command_state(parameters) else []
     lower = np.concatenate(
         [
             q_lower,
@@ -270,6 +283,7 @@ def state_bounds(
             -np.asarray(limits["dq_u_max"], dtype=float),
             -lag,
             [0.0, 0.0],
+            -np.asarray(command),
         ]
     )
     upper = np.concatenate(
@@ -280,6 +294,7 @@ def state_bounds(
             np.asarray(limits["dq_u_max"], dtype=float),
             lag,
             [0.0, rate_max],
+            command,
         ]
     )
     return lower, upper
@@ -298,7 +313,11 @@ def stage_equilibrium(q_eq: np.ndarray, stage: int) -> np.ndarray:
 
 
 def stage_reference(
-    q_eq: np.ndarray, tau_ref: np.ndarray, terminal: bool, progress: float
+    q_eq: np.ndarray,
+    tau_ref: np.ndarray,
+    terminal: bool,
+    progress: float,
+    rows: int = problem.NY,
 ) -> np.ndarray:
     """
     Build a stage/terminal residual reference; tracking rows are zero (rides in `p`).
@@ -312,9 +331,10 @@ def stage_reference(
     460 mm off path against 448, and 31 of 178 solves refused. Asking for as far
     as the plan's own pace reaches by this stage is the same thing wherever the
     end is in sight, and a pace everywhere else. `Ocp.nominal_progress` is
-    that pace.
+    that pace. `rows` is the stage residual's width (C4 appends `c`, referenced
+    to zero like C3's `u`).
     """
-    reference = np.zeros(problem.NY_TERMINAL if terminal else problem.NY)
+    reference = np.zeros(problem.NY_TERMINAL if terminal else rows)
     reference[
         problem.Y_PASSIVE_POSITION : problem.Y_PASSIVE_POSITION + cs.K_PASSIVE_DOF
     ] = q_eq
@@ -387,10 +407,12 @@ def configure_fixed_data(
     intervals = problem.shooting_intervals(parameters)
     weight, terminal_weight = weight_matrices(parameters)
     lower_h, upper_h, extend, retract = constraint_data(chamber, scale, hydraulics)
-    # Input box: five joint commands plus progress acceleration (not an axis, own bound).
+    # Input box: five joint commands (C4: their rates) plus progress acceleration
+    # (not an axis, own bound).
+    joint = "du_max" if problem.command_state(parameters) else "u_max"
     u_max = np.concatenate(
         [
-            np.asarray(parameters["limits"]["u_max"][: cs.K_PLANNED_DOF], dtype=float),
+            np.asarray(parameters["limits"][joint][: cs.K_PLANNED_DOF], dtype=float),
             [float(parameters["limits"]["progress_accel_max"])],
         ]
     )
@@ -458,6 +480,7 @@ def export_key(parameters: dict, hydraulics: dict, description_xml: str) -> dict
         # missing here, and a changed delay therefore opened its predecessor's
         # `.so` and read as a null result.
         "sensor_to_valve_delay": parameters["sensor_to_valve_delay"],
+        "command_state": problem.command_state(parameters),
         "horizon_length": parameters["horizon_length"],
         "levenberg_marquardt": parameters["levenberg_marquardt"],
         "qp_solver_cond_N": parameters.get("qp_solver_cond_N"),
@@ -586,6 +609,14 @@ class Ocp:
         self._ocp, self.scale, self.model, self._chamber = problem.build_ocp(
             description_xml, parameters, hydraulics
         )
+        #: C4: `c` rides at the end of `x` and the joint inputs are its rate.
+        self.command_state = problem.command_state(parameters)
+        self.nx = int(self.model.x.shape[0])
+        self._boxed = problem.boxed_state_rows(parameters)
+        self._ny = problem.residual_rows(parameters)
+        self._command_max = np.asarray(
+            parameters["limits"]["u_max"][: cs.K_PLANNED_DOF], dtype=float
+        )
         # Opened, never built: `scripts/export_ocp.py` compiled this and wrote
         # the key beside it, and `ox.open_solver` refuses anything that is not
         # this problem rather than starting on another machine's dynamics.
@@ -615,7 +646,8 @@ class Ocp:
             parameters["weights"]["du"][: cs.K_PLANNED_DOF], dtype=float
         )
         #: Whether stage 0 carries a move cost, i.e. depends on the command in flight.
-        self.suppresses_moves = bool(self._du.any())
+        #: Never under C4, where `du` prices the rate on every stage instead.
+        self.suppresses_moves = bool(self._du.any()) and not self.command_state
         #: The in-flight command stage 0 was last written against, for `cost_terms`.
         self._in_flight: np.ndarray | None = None
         self._u_max, self.cylinder_force_max, self.cylinder_force_retract = (
@@ -672,13 +704,13 @@ class Ocp:
     def _check_dimensions(self) -> None:
         """Check dims `ocp_solver.cpp:48-71` asserts: a stale solver is one for another problem."""
         expected = {
-            "nx": cs.NX,
-            "nbx": cs.NBX,
-            "nbx_e": cs.NBX,
-            "nbx_0": cs.NX,
+            "nx": self.nx,
+            "nbx": self._boxed.size,
+            "nbx_e": self._boxed.size,
+            "nbx_0": self.nx,
             "nu": cs.NU_PROGRESS,
             "np": problem.NP,
-            "ny": problem.NY,
+            "ny": problem.residual_rows(self.parameters),
             "ny_e": problem.NY_TERMINAL,
             "nh": cs.NU + 1,
             "nh_e": 0,
@@ -788,6 +820,9 @@ class Ocp:
         Carry `x` under the commands actually applied over the delay, newest first.
 
         One hold per command (`self.replay`); a short history clamps oldest, empty is refused.
+
+        An entry is an input (ZOH), or C4's `(start, input)`: `start` is `c` at the
+        entry's first instant, written into `x` before its segment; `None` keeps `x`'s.
         """
         if len(applied) == 0:
             raise ValueError(
@@ -795,17 +830,34 @@ class Ocp:
                 "now; an empty history is not the same thing as a zero command "
                 "and is not guessed at here"
             )
-        state, *history = _finite(x, *applied)
+        pairs = [
+            entry if isinstance(entry, tuple) else (None, entry) for entry in applied
+        ]
+        starts = [None if start is None else _finite(start)[0] for start, _ in pairs]
+        state, *history = _finite(x, *[command for _, command in pairs])
+        command = slice(cs.X_COMMAND, cs.X_COMMAND + cs.K_PLANNED_DOF)
+
+        def started(state, entry):
+            if starts[entry] is None:
+                return state
+            state = state.copy()
+            state[command] = starts[entry]
+            return state
+
         if not self.replay:
             # Nothing to cut up: zero delay, or the single-input path complains.
-            return self.propagate(state, history[0])
+            return self.propagate(started(state, 0), history[0])
         # Held back across the whole replay, same reason as `propagate`.
         progress = state[PROGRESS_ROWS].copy()
+        previous = None
         for segment in self.replay:
+            entry = min(segment.age, len(history) - 1)
+            # A clamped entry replayed twice continues its ramp, not restarts it.
+            if entry != previous:
+                state = started(state, entry)
+            previous = entry
             state = self._integrate(
-                self._segment_predictor[segment.seconds],
-                state,
-                history[min(segment.age, len(history) - 1)],
+                self._segment_predictor[segment.seconds], state, history[entry]
             )
         state[PROGRESS_ROWS] = progress
         return state
@@ -814,7 +866,7 @@ class Ocp:
 
     def cold_start(self, x0: np.ndarray) -> Guess:
         """`x0` rolled forward under zero input: what a first cycle starts from."""
-        states = np.zeros((self.intervals + 1, cs.NX))
+        states = np.zeros((self.intervals + 1, self.nx))
         inputs = np.zeros((self.intervals, cs.NU_PROGRESS))
         states[0] = x0
         parameter = self._model_parameter()
@@ -885,8 +937,12 @@ class Ocp:
         next one.
         """
         x0 = np.asarray(x0, dtype=float).copy()
-        if x0.shape != (cs.NX,) or not np.all(np.isfinite(x0)):
+        if x0.shape != (self.nx,) or not np.all(np.isfinite(x0)):
             raise ValueError("x0 is not a finite state of this problem")
+        if self.command_state:
+            # `c`'s box is hard from stage 1 and `du` finite: start inside it.
+            command = slice(cs.X_COMMAND, cs.X_COMMAND + cs.K_PLANNED_DOF)
+            x0[command] = np.clip(x0[command], -self._command_max, self._command_max)
         x0[cs.X_PROGRESS] = 0.0
         x0[cs.X_PROGRESS_RATE] = min(
             max(0.0, float(x0[cs.X_PROGRESS_RATE])), self.progress_rate_max(path)
@@ -1002,7 +1058,11 @@ class Ocp:
 
         # A payload step forces the cold start, whatever the caller passed.
         # Decided here rather than below because the reset reads it.
-        warm = not self._payload_changed and guess is not None and guess.warm(intervals)
+        warm = (
+            not self._payload_changed
+            and guess is not None
+            and guess.warm(intervals, self.nx)
+        )
         self._payload_changed = False
 
         # The **iterate** is always dropped: `seed` below writes every stage, so
@@ -1055,6 +1115,7 @@ class Ocp:
                 force_reference,
                 stage == intervals,
                 self.nominal_progress(stage, path),
+                self._ny,
             )
             if stage == 0 and self.suppresses_moves:
                 weight = self._weight
@@ -1079,7 +1140,7 @@ class Ocp:
             else:
                 state = seed.states[stage].copy()
                 box(stage)
-                state[: cs.NBX] = np.clip(state[: cs.NBX], lower, upper)
+                state[self._boxed] = np.clip(state[self._boxed], lower, upper)
             self.solver.set(stage, "x", state)
             if stage < intervals:
                 self.solver.set(
@@ -1317,6 +1378,7 @@ class Ocp:
                 force_reference,
                 terminal,
                 self.nominal_progress(stage, self._last_path),
+                self._ny,
             )
             if terminal:
                 value = np.asarray(
@@ -1349,7 +1411,13 @@ class Ocp:
                 row[problem.Y_PROGRESS] + row[problem.Y_PROGRESS_RATE]
             )
             terms.tau_a += float(np.sum(row[problem.Y_ACTUATED_FORCE :][:planned]))
-            terms.u += float(np.sum(row[problem.Y_INPUT :][: cs.NU_PROGRESS]))
+            inputs = float(np.sum(row[problem.Y_INPUT :][: cs.NU_PROGRESS]))
+            if self.command_state:
+                rate = float(np.sum(row[problem.Y_INPUT :][:planned]))
+                terms.du += rate
+                terms.u += inputs - rate + float(np.sum(row[problem.Y_COMMAND :]))
+            else:
+                terms.u += inputs
         return terms
 
 

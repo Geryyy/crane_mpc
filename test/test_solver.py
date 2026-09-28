@@ -11,6 +11,7 @@ from ament_index_python.packages import get_package_share_directory
 from conftest import export_for
 from crane_model import hydraulic_limits
 from crane_model import symbolic as cs
+
 from crane_mpc import problem
 from crane_mpc.config import machine_limits
 from crane_mpc.horizon import Grid, Knots, resample
@@ -540,3 +541,61 @@ def test_stage_zero_prices_the_command_in_flight_only_when_asked(
         assert np.allclose(np.diag(weight)[rows], w_u + du)
         assert np.allclose(reference[rows], du * 0.3 / (w_u + du))
         assert np.array_equal(reference[: problem.Y_INPUT], plain[1][: problem.Y_INPUT])
+
+
+@pytest.fixture(scope="module")
+def c4_ocp(parameters, export_base):
+    """C4: the command a state, `u[:5]` its rate."""
+    values = dict(parameters, command_state=True)
+    description = problem.default_description().read_text()
+    export_for(export_base, values, values["hydraulics"], description)
+    return Ocp(description, values, values["hydraulics"])
+
+
+def c4_state(ocp, command):
+    """`hold_state` with `c` appended."""
+    x = np.zeros(cs.NX_COMMAND)
+    x[cs.X_PLANNED_POSITION + 1] = 0.5
+    x[cs.X_PROGRESS_RATE] = float(
+        ocp.parameters["limits"]["progress_rate_headroom"]
+    ) * problem.nominal_progress_rate(ocp.parameters)
+    x[cs.X_COMMAND :] = command
+    ocp.pin_tool(0.3)
+    x[cs.X_ACTUATED_FORCE : cs.X_ACTUATED_FORCE + PLANNED] = ocp.static_hold_force(x)
+    return x
+
+
+def test_c4_opens_on_its_own_dimensions(c4_ocp):
+    """Opening ran `_check_dimensions` against the export; C3 offsets hold."""
+    assert c4_ocp.nx == cs.NX_COMMAND == cs.X_COMMAND + PLANNED
+    assert problem.residual_rows(c4_ocp.parameters) == problem.NY + PLANNED
+    assert not c4_ocp.suppresses_moves
+
+
+def test_c4_replays_a_command_ramp_from_its_start(c4_ocp):
+    """An applied `(start, du)` leaves `c = start + Ts*du`, whatever `x` carried."""
+    start = np.array([0.1, -0.05, 0.02, 0.0, 0.3])
+    rate = np.zeros(cs.NU_PROGRESS)
+    rate[:PLANNED] = [0.5, -0.2, 0.1, 0.3, -1.0]
+    x = c4_state(c4_ocp, np.zeros(PLANNED))
+    moved = c4_ocp.propagate_applied(x, [(start, rate)])
+    assert np.allclose(moved[cs.X_COMMAND :], start + c4_ocp.Ts * rate[:PLANNED])
+    # ZOH form: `x`'s own `c` is the start. Not to the bit: acados warm-starts
+    # IRK Newton from the last solve (see the split-delay replay test).
+    held = c4_ocp.propagate_applied(c4_state(c4_ocp, start), [rate])
+    assert np.allclose(held, moved, rtol=1e-5, atol=1e-5)
+
+
+def test_c4_solves_at_rest_inside_its_boxes(c4_ocp):
+    x = c4_state(c4_ocp, np.zeros(PLANNED))
+    position = x[cs.X_PLANNED_POSITION : cs.X_PLANNED_POSITION + PLANNED]
+    q_eq = x[cs.X_PASSIVE_POSITION : cs.X_PASSIVE_POSITION + cs.K_PASSIVE_DOF]
+    solution = c4_ocp.solve(x, horizon_holding(c4_ocp, position), q_eq)
+    assert solution.status == 0
+    limits = c4_ocp.parameters["limits"]
+    assert np.all(
+        np.abs(solution.inputs[:, :PLANNED]) <= np.asarray(limits["du_max"]) + 1e-9
+    )
+    u_max = np.asarray(limits["u_max"][:PLANNED])
+    assert np.all(np.abs(solution.states[:, cs.X_COMMAND :]) <= u_max + 1e-6)
+    assert c4_ocp.cost_terms(solution, q_eq).du >= 0.0

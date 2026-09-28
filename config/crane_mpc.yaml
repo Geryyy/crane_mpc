@@ -36,6 +36,8 @@ crane_mpc:
     sensor_to_valve_delay: 0.06
     max_state_age: 0.2
     levenberg_marquardt: 1.0e-6
+    # C4: command as a state, `u` its rate. Off until pass 3 decides.
+    command_state: false
 
     # Which axes take x_0's velocity row from /joint_states; the rest keep the
     # model's own propagation. Positions and both passive rows are always
@@ -122,6 +124,8 @@ crane_mpc:
       # 30+ splits the start kick over two cycles and then overshoots (+0.64
       # rad/s on slewing), so 10. It damps the flip, it does not remove the
       # kick: first u0 on slewing -0.73 -> -0.67. That wants C4.
+      # Under command_state (C4) it prices the rate dc on every stage, so its
+      # units become (rad/s^2)^-2 and this 10 is not a tuned value there.
       du: [10.0, 10.0, 10.0, 10.0, 10.0, 10.0]
       # `lag`: tracking error on the reference's direction of travel, slewing
       # axis only. Marc's ratio was against q_a's 4.0 and no longer holds -- the
@@ -222,6 +226,9 @@ crane_mpc:
       # `max(plan.timing.speed)/mean` on one real plan settles it.
       progress_rate_headroom: 1.5
       progress_accel_max: 2.0
+      # C4 only: command rate bound, rad/s^2 (m/s^2 sa). Valve slew limit
+      # 0.058/10 ms normalised x end-to-end gain (wiki hydraulics.md 7.2).
+      du_max: [5.2, 1.7, 1.8, 3.5, 14.0]
 
     slack:
       q_u: [1.0e3, 1.0e3]
