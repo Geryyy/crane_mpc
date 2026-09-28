@@ -36,8 +36,10 @@ crane_mpc:
     sensor_to_valve_delay: 0.06
     max_state_age: 0.2
     levenberg_marquardt: 1.0e-6
-    # C4: command as a state, `u` its rate. Off until pass 3 decides.
-    command_state: false
+    # C4: command as a state, `u` its rate (issue 121 follow-up). Offline: removes
+    # the start kick-and-brake at unchanged arrival; envelope sweep 0/75 failed
+    # (C3 2/75). Switch back with `du: 10` for C3.
+    command_state: true
 
     # Which axes take x_0's velocity row from /joint_states; the rest keep the
     # model's own propagation. Positions and both passive rows are always
@@ -124,9 +126,10 @@ crane_mpc:
       # 30+ splits the start kick over two cycles and then overshoots (+0.64
       # rad/s on slewing), so 10. It damps the flip, it does not remove the
       # kick: first u0 on slewing -0.73 -> -0.67. That wants C4.
-      # Under command_state (C4) it prices the rate dc on every stage, so its
-      # units become (rad/s^2)^-2 and this 10 is not a tuned value there.
-      du: [10.0, 10.0, 10.0, 10.0, 10.0, 10.0]
+      # Under command_state (C4) it prices the rate dc on every stage, units
+      # (rad/s^2)^-2. wire_chain, 3 moves: 0.1 kicks, 1 ramps smoothly at
+      # unchanged arrival, 3 no better. (The table above is C3's stage-0 cost.)
+      du: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
       # `lag`: tracking error on the reference's direction of travel, slewing
       # axis only. Marc's ratio was against q_a's 4.0 and no longer holds -- the
       # q_a raise above deliberately left this alone, which is what was measured.

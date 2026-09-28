@@ -413,32 +413,32 @@ def _command_message(
     grid = np.unique(np.round(np.concatenate([t, *edges, steps]), 9))
     grid = grid[grid <= t[-1]]
 
-    points = []
-    for at in grid:
-        i = min(np.searchsorted(t, at, side="right") - 1, len(t) - 2)
-        p, v = _jtc_cubic(
-            t[i],
-            t[i + 1],
-            position[i],
-            velocity[i],
-            position[i + 1],
-            velocity[i + 1],
-            at,
+    # All grid points at once: the per-point Python loop cost 12-15 ms a cycle.
+    i = np.minimum(np.searchsorted(t, grid, side="right") - 1, len(t) - 2)
+    p, v = _jtc_cubic(
+        t[i, None],
+        t[i + 1, None],
+        position[i],
+        velocity[i],
+        position[i + 1],
+        velocity[i + 1],
+        grid[:, None],
+    )
+    if linear:
+        command = np.stack([np.interp(grid - period, t, c) for c in u.T], axis=1)
+    else:
+        command = u[np.searchsorted(steps, grid, side="right")]
+    effort = np.zeros_like(v)
+    effort[:, actuated] = command - v[:, actuated]
+    points = [
+        JointTrajectoryPoint(
+            positions=p[n].tolist(),
+            velocities=v[n].tolist(),
+            effort=effort[n].tolist(),
+            time_from_start=seconds_duration(float(at)),
         )
-        if linear:
-            command = np.array([np.interp(at - period, t, c) for c in u.T])
-        else:
-            command = u[np.searchsorted(steps, at, side="right")]
-        effort = np.zeros(cs.K_GENERALIZED_DOF)
-        effort[actuated] = command - v[actuated]
-        points.append(
-            JointTrajectoryPoint(
-                positions=p.tolist(),
-                velocities=v.tolist(),
-                effort=effort.tolist(),
-                time_from_start=seconds_duration(float(at)),
-            )
-        )
+        for n, at in enumerate(grid)
+    ]
     message = JointTrajectory()
     message.header.stamp = stamp
     message.joint_names = list(joints)
