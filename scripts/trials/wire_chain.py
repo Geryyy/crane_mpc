@@ -282,6 +282,7 @@ def main(argv=None) -> int:
     outputs = []  # JTC output over the last cycle, for `cycle.jtc_output`
     events = {"silence": 0, "handback": 0}
     log = []
+    solve_times = []
     seconds = mine.seconds or float(plan.duration) + 5.0
     diverged = False
     for k in range(int(round(seconds / Ts))):
@@ -316,6 +317,8 @@ def main(argv=None) -> int:
             events["silence"] += 1
         else:
             solution, refusal = cycle.solve()
+            if solution is not None:
+                solve_times.append(solution.solve_time_s)
             verdict = (
                 None
                 if refusal
@@ -343,7 +346,8 @@ def main(argv=None) -> int:
                         lead=delay,
                         period=h,
                         in_flight=cycle.last_horizon,
-                        in_flight_u=cycle.applied_inputs[0],
+                        in_flight_u=cycle.in_flight_command(),
+                        linear=cycle.command_state,
                     )
                 flight.append((clock + mine.latency, message))
                 u0 = cycle.horizon.u[0, : cs.K_PLANNED_DOF].copy()
@@ -453,6 +457,12 @@ def main(argv=None) -> int:
             "nonzero_status": int(np.sum(log[:, -nq - 1] > 0)),
             **events,
             "growth_per_s": rate,
+            "u0_first": u0[:10, 0].tolist(),
+            "solve_time_s": (
+                np.percentile(solve_times, [50, 90, 100]).tolist()
+                if solve_times
+                else []
+            ),
         }
         mine.json.write_text(json.dumps(scores, indent=1))
     return 1 if reason else 0

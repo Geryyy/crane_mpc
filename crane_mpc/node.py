@@ -799,7 +799,8 @@ class MpcNode(Node):
             lead=cycle.delay,
             period=self._jtc_period,
             in_flight=cycle.last_horizon,
-            in_flight_u=cycle.applied_inputs[0],
+            in_flight_u=cycle.in_flight_command(),
+            linear=cycle.command_state,
         )
         self.publish_tcp_horizon()
         if self.mode == "active":

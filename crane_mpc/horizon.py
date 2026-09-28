@@ -290,6 +290,7 @@ def horizon_to_message(
     period: float = 0.0,
     in_flight: Knots | None = None,
     in_flight_u=None,
+    linear: bool = False,
 ):
     """
     Write the horizon as a `JointTrajectory`.
@@ -311,6 +312,8 @@ def horizon_to_message(
     effort ramp and one-tick feedforward lookahead it put `u` 30-60 ms late
     against a loop with ~10 ms of margin -- the Gazebo divergence.
     Without a lead the plain form below goes out (shadow and offline paths).
+    `linear` (C4): `u` is the command state at each knot, ramped between them,
+    and `in_flight_u` the in-flight segment's start command.
 
     `effort` carries a feed-forward *velocity*, not a torque, read under the
     JTC's `effort_field_is_feedforward`. `u - dq_a_ref` is the same identity
@@ -342,7 +345,9 @@ def horizon_to_message(
         for index in range(len(horizon))
     ]
     if lead > 0.0:
-        return _command_message(horizon, joints, stamp, period, in_flight, in_flight_u)
+        return _command_message(
+            horizon, joints, stamp, period, in_flight, in_flight_u, linear
+        )
     return message
 
 
@@ -355,7 +360,13 @@ def _jtc_cubic(t0, t1, p0, v0, p1, v1, t):
 
 
 def _command_message(
-    horizon: Knots, joints, stamp, period: float, in_flight=None, in_flight_u=None
+    horizon: Knots,
+    joints,
+    stamp,
+    period: float,
+    in_flight=None,
+    in_flight_u=None,
+    linear=False,
 ) -> JointTrajectory:
     """
     Encode the horizon so the JTC plays exactly what the OCP assumes.
@@ -370,6 +381,8 @@ def _command_message(
     - pos/vel are a cubic Hermite: actuated velocities are the slope of the
       positions sent (the curve's, not the solver's), or the cubic swings
       between knots and `dq_ref + effort` stops summing to `u`.
+    `linear` (C4): the command is piecewise linear through `u` on the knots, so
+    no hold edges; every point carries `c(s - period) - v(s)`.
     """
     t = np.asarray(horizon.t, dtype=float)
     q_a, q_u, dq_u = horizon.q_a_ref, horizon.q_u_ref, horizon.dq_u_ref
@@ -393,9 +406,11 @@ def _command_message(
     velocity[:, passive] = dq_u
     # u_i takes over at t_i + period; just before, the previous one still holds.
     steps = t[1:] + period
+    # Linear: c(s - period) kinks at every t_j + period, t_0's included.
+    edges = [t[:1] + period] if linear else [steps - HOLD_EDGE_S]
     # Rounded to the wire's nanoseconds, or float near-duplicates go out as equal
     # `time_from_start` and the JTC rejects the whole message.
-    grid = np.unique(np.round(np.concatenate([t, steps - HOLD_EDGE_S, steps]), 9))
+    grid = np.unique(np.round(np.concatenate([t, *edges, steps]), 9))
     grid = grid[grid <= t[-1]]
 
     points = []
@@ -410,7 +425,10 @@ def _command_message(
             velocity[i + 1],
             at,
         )
-        command = u[np.searchsorted(steps, at, side="right")]
+        if linear:
+            command = np.array([np.interp(at - period, t, c) for c in u.T])
+        else:
+            command = u[np.searchsorted(steps, at, side="right")]
         effort = np.zeros(cs.K_GENERALIZED_DOF)
         effort[actuated] = command - v[actuated]
         points.append(

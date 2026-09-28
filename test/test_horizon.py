@@ -284,6 +284,53 @@ def test_the_jtc_plays_the_command_the_ocp_assumes():
         assert position[0] == pytest.approx(horizon.q_a_ref[i, 0])
 
 
+def _linear_message(u, start, offset=0.0):
+    """A C4 message: command `u` on the knots, `start` in flight, smooth positions."""
+    from builtin_interfaces.msg import Time
+
+    Ts, tick = 0.06, 0.01
+    horizon = ramp([0.0, Ts, 2 * Ts, 3 * Ts], slope=0.3)
+    t = horizon.t + Ts + offset
+    horizon.q_a_ref[:, 0] = 0.1 * t + 1.5 * t**2
+    horizon.u[:, 0] = u
+    in_flight = ramp([0.0, Ts], slope=0.3)
+    in_flight.q_a_ref[:, 0] = (
+        0.1 * (in_flight.t + offset) + 1.5 * (in_flight.t + offset) ** 2
+    )
+    return horizon_to_message(
+        horizon,
+        CANONICAL,
+        Time(),
+        lead=Ts,
+        period=tick,
+        in_flight=in_flight,
+        in_flight_u=[start, 0, 0, 0, 0],
+        linear=True,
+    )
+
+
+def test_the_jtc_plays_the_ramped_command_the_ocp_assumes():
+    """C4: `c` ramps knot to knot from the in-flight start; the JTC must play `c(tau)`."""
+    Ts, tick = 0.06, 0.01
+    t_ext, C = np.arange(5) * Ts, [0.3, 0.9, -0.4, 1.1, 1.1]
+    message = _linear_message(C[1:], C[0])
+    for i in range(4):
+        for k in range(6):
+            s = i * Ts + (k + 1) * tick
+            _, dq_next, effort_next = _jtc_sample(message, s)
+            assert dq_next[0] + effort_next[0] == pytest.approx(
+                np.interp(s - tick, t_ext, C), abs=1e-6
+            )
+    # The next cycle's message, from this one's knot 0 -> 1, plays the same ramp
+    # over the overlap it takes over.
+    after = _linear_message([C[2], 0.5, 0.5, 0.5], C[1], offset=Ts)
+    for k in range(6):
+        s = (k + 1) * tick
+        _, dq_a, e_a = _jtc_sample(message, Ts + s)
+        _, dq_b, e_b = _jtc_sample(after, s)
+        assert dq_b[0] + e_b[0] == pytest.approx(dq_a[0] + e_a[0], abs=1e-6)
+
+
 def test_without_a_lead_the_wire_form_is_unchanged():
     """No dead time, no prepended knot -- the shadow and offline paths."""
     from builtin_interfaces.msg import Time

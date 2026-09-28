@@ -36,9 +36,9 @@ def cycle(mode="active"):
     return made
 
 
-def solution(outcome, progress_advance=Ts):
+def solution(outcome, progress_advance=Ts, nx=cs.NX):
     """A solve whose states count up, so a shift of them is visible."""
-    states = np.arange(KNOTS * cs.NX, dtype=float).reshape(KNOTS, cs.NX)
+    states = np.arange(KNOTS * nx, dtype=float).reshape(KNOTS, nx)
     return Solution(
         states=states,
         inputs=np.zeros((KNOTS - 1, cs.NU_PROGRESS)),
@@ -836,3 +836,69 @@ def test_the_dead_time_replays_what_the_jtc_output_and_not_what_was_sent():
     assert np.allclose(dead_time[0][: cs.K_PLANNED_DOF], 0.5)
     assert np.allclose(dead_time[0][cs.K_PLANNED_DOF :], 0.0)
     assert np.allclose(published[0], 0.3)
+
+
+# -- C4: the command a state, `u` its rate ----------------------------------------
+
+U_MAX = [1.0] * cs.K_ACTUATED_DOF
+
+
+class C4ReplayOcp(ReplayOcp):
+    """`ReplayOcp` under C4: entries are `(start, dc)` pairs, recorded as given."""
+
+    command_state = True
+    nx = cs.NX_COMMAND
+    parameters = {"limits": {"u_max": U_MAX}}
+
+    def propagate_applied(self, x, applied):
+        self.replayed.append(list(applied))
+        return np.asarray(x).copy()
+
+
+def c4_cycle():
+    one = cycle()
+    one.ocp = C4ReplayOcp()
+    one.measured = np.zeros(cs.NX_COMMAND)
+    return one
+
+
+def test_c4_seeds_a_held_start_inside_psis_domain_from_the_measured_velocity():
+    one = c4_cycle()
+    one.measured[cs.X_PLANNED_VELOCITY : cs.X_PLANNED_VELOCITY + 2] = [0.2, 3.0]
+    assert one.propagate() is None
+    start, rate = one.ocp.replayed[-1][0]
+    assert start[:2] == pytest.approx([0.2, 1.0])
+    assert np.allclose(rate, 0.0)
+    assert one.in_flight_command() is start
+
+
+def test_c4_dead_time_holds_the_jtc_output_then_ramps_the_command_in_flight():
+    one = c4_cycle()
+    one.applied_inputs = [(np.full(DOF, 0.7), np.zeros(cs.NU_PROGRESS))]
+    one.last_start, one.last_input = np.full(DOF, 0.3), np.full(cs.NU_PROGRESS, 2.0)
+    one.jtc_output = np.full(DOF, 0.5)
+    assert one.propagate() is None
+    (dead_time,), (published,) = one.ocp.replayed
+    assert np.allclose(dead_time[0], 0.5) and np.allclose(dead_time[1], 0.0)
+    assert np.allclose(published[0], 0.3) and np.allclose(published[1], 2.0)
+
+
+def test_c4_publishes_the_command_state_and_carries_the_ramp_that_went_out():
+    one = c4_cycle()
+    solved = solution(Outcome.CONVERGED, nx=cs.NX_COMMAND)
+    solved.inputs[:] = 0.25
+    one.adopt_solution(solved)
+    command = solved.states[:, cs.X_COMMAND : cs.X_COMMAND + DOF]
+    assert np.array_equal(one.horizon.u[:, :DOF], command)
+    one.advance(solved, NOMINAL_NS, MIN_RATE, MAX_STALL)
+    assert np.array_equal(one.last_start, command[0])
+    assert np.allclose(one.last_input, 0.25)
+
+    # Shifted: knot 0 -> 1 of the previous horizon is the ramp that went out.
+    one.last_tcp_states = solved.states
+    one.consecutive_failures = 1
+    failed = solution(Outcome.BUDGET_EXCEEDED, nx=cs.NX_COMMAND)
+    assert one.ladder(failed, 3, 0.02).published
+    one.advance(failed, NOMINAL_NS, MIN_RATE, MAX_STALL)
+    assert one.last_start == pytest.approx(command[1])
+    assert one.last_input[:DOF] == pytest.approx((command[2] - command[1]) / Ts)

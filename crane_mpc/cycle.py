@@ -271,10 +271,13 @@ class Cycle:
         self.dq_a_carried: np.ndarray | None = None
         self.velocity_carry = VelocityCarry()
         self.last_input = np.zeros(cs.NU_PROGRESS)
-        # What this node put in flight, newest first. One command spans the
-        # window on the shipped 60 ms / 60 ms; `Ocp.replay` still cuts a partial
-        # interval for the fractional pairs the benches build, which `configure`
-        # refuses for the node because `carry_stage` cannot express them.
+        #: C4: `c` where `last_input`'s ramp starts (`last_input` is then `dc`).
+        self.last_start = np.zeros(PLANNED_DOF)
+        # What this node put in flight, newest first; C4: `(start, input)` pairs.
+        # One command spans the window on the shipped 60 ms / 60 ms; `Ocp.replay`
+        # still cuts a partial interval for the fractional pairs the benches build,
+        # which `configure` refuses for the node because `carry_stage` cannot
+        # express them.
         # Kept as deep as `Ocp.replay` needs.
         self.applied_inputs: list = []
         #: Mean JTC output over the dead time before the measurement, planned
@@ -308,6 +311,16 @@ class Cycle:
         self.follower = FollowerCommand()
         self.shadow_command = np.zeros(ACTUATED_DOF)
         self.shadow_command_valid = False
+
+    @property
+    def command_state(self) -> bool:
+        """C4: the command is a state and `u` its rate."""
+        return bool(getattr(self.ocp, "command_state", False))
+
+    def in_flight_command(self):
+        """Give what the JTC plays until knot 0: C3 its hold, C4 its ramp's start."""
+        entry = self.applied_inputs[0]
+        return entry[0] if self.command_state else entry
 
     # -- what the node hands in --------------------------------------------------
 
@@ -373,6 +386,9 @@ class Cycle:
         self.follower = follower
         if self.mode == "shadow":
             self.last_input = follower_input(follower, u_max)
+            if self.command_state:
+                self.last_start = self.last_input[:PLANNED_DOF].copy()
+                self.last_input = np.zeros(cs.NU_PROGRESS)
 
     # -- the gates ---------------------------------------------------------------
 
@@ -527,6 +543,9 @@ class Cycle:
         # One snapshot of the tool row: single-threaded executor, no callback
         # lands between reads.
         self.tool_position = float(measurement.q_a[TOOL_AXIS])
+        nx = getattr(self.ocp, "nx", cs.NX)
+        if self.carried.size != nx:
+            self.carried = np.zeros(nx)
         x = self.carried.copy()
         x[cs.X_PLANNED_POSITION : cs.X_PLANNED_POSITION + PLANNED_DOF] = (
             measurement.q_a[:PLANNED_DOF]
@@ -565,22 +584,41 @@ class Cycle:
         self.ocp.pin_tool(self.tool_position)
         # Recorded here, not beside `last_input` writes: shadow mode writes it
         # twice per cycle but only one command applies here.
+        # C4 replays `(start, dc)`: x0's `c` is then last solve's `states[1]` exactly.
+        c4 = self.command_state
         if self.mode == "active" and not self.applied_inputs:
             # Nothing of ours in flight (first cycle, after a silence or a mode
             # change): the machine's own velocity is the best reading of what the
             # JTC runs -- zero at rest, and neither a stale `u0` nor a hard stop
             # when it moves.
-            self.last_input = np.zeros(cs.NU_PROGRESS)
-            self.last_input[:PLANNED_DOF] = self.measured[
+            velocity = self.measured[
                 cs.X_PLANNED_VELOCITY : cs.X_PLANNED_VELOCITY + PLANNED_DOF
             ]
-        self.applied_inputs.insert(0, self.last_input.copy())
+            self.last_input = np.zeros(cs.NU_PROGRESS)
+            if c4:
+                # Held, inside Psi's domain (`c`'s hard box).
+                bound = np.asarray(
+                    self.ocp.parameters["limits"]["u_max"][:PLANNED_DOF], dtype=float
+                )
+                self.last_start = np.clip(velocity, -bound, bound)
+            else:
+                self.last_input[:PLANNED_DOF] = velocity
+        self.applied_inputs.insert(
+            0,
+            (self.last_start.copy(), self.last_input.copy())
+            if c4
+            else self.last_input.copy(),
+        )
         depth = self.ocp.replay[0].age + 1 if self.ocp.replay else 1
         del self.applied_inputs[depth + 1 :]
         dead_time = self.applied_inputs[1:] or self.applied_inputs
         if self.jtc_output is not None:
-            dead_time = [np.zeros(cs.NU_PROGRESS)]
-            dead_time[0][:PLANNED_DOF] = self.jtc_output
+            held = np.zeros(cs.NU_PROGRESS)
+            if c4:
+                dead_time = [(np.asarray(self.jtc_output, dtype=float), held)]
+            else:
+                held[:PLANNED_DOF] = self.jtc_output
+                dead_time = [held]
         try:
             # Over the dead time the plant runs what left the JTC one cycle ago;
             # then one `Ts` of the command already published (`command_delay`).
@@ -635,7 +673,8 @@ class Cycle:
                     self.q_eq,
                     self.guess,
                     path=self.path,
-                    in_flight=self.applied_inputs[0],
+                    # C4 prices `dc` on every stage; no stage-0 move cost.
+                    in_flight=None if self.command_state else self.applied_inputs[0],
                 )
         except Exception as error:
             self.applied_previous = False
@@ -728,7 +767,7 @@ class Cycle:
                 q_eq,
                 self.guess,
                 path=self.resolved_path(),
-                in_flight=self.last_input,
+                in_flight=None if self.command_state else self.last_input,
             )
         except Exception:
             self.forget_preparation()
@@ -855,8 +894,13 @@ class Cycle:
         ]
         # One input short of a knot: N intervals between N+1 knots. The last
         # interval's command is held, as a zero-order hold already holds it.
+        # C4: the command is the state `c`, one per knot, ramped between them.
         commands = solution.inputs[:, : cs.NU]
-        if commands.size:
+        if self.command_state:
+            self.horizon.u[:, :PLANNED_DOF] = states[
+                :, cs.X_COMMAND : cs.X_COMMAND + PLANNED_DOF
+            ]
+        elif commands.size:
             self.horizon.u[:-1, :PLANNED_DOF] = commands
             self.horizon.u[-1, :PLANNED_DOF] = commands[-1]
         self.horizon.u[:, TOOL_AXIS] = 0.0
@@ -900,8 +944,20 @@ class Cycle:
         self.last_tcp_states = (
             None if self.tcp_states is None else self.tcp_states.copy()
         )
+        c4 = self.command_state
         if solution.outcome is Outcome.CONVERGED:
             self.last_input = solution.u0.copy()
+            if c4:
+                self.last_start = solution.states[
+                    0, cs.X_COMMAND : cs.X_COMMAND + PLANNED_DOF
+                ].copy()
+        elif c4:
+            # The shifted knots' ramp 0 -> 1 is what went out.
+            self.last_start = self.horizon.u[0, :PLANNED_DOF].copy()
+            self.last_input = np.zeros(cs.NU_PROGRESS)
+            self.last_input[:PLANNED_DOF] = (
+                self.horizon.u[1, :PLANNED_DOF] - self.last_start
+            ) / self.Ts
         else:
             # `ladder` shifted the previous horizon into `self.horizon` and
             # published it, so `u[0]` is what the machine got -- the same row
