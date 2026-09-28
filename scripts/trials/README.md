@@ -10,9 +10,16 @@ then withdrawn on that metric. Score on the growth rate instead.
   linear effort, PI at the tick, feedforward a tick later) into MuJoCo (issue
   171); settings, solver, plan and plant are `harness.py`'s. Deterministic: a
   repeat matches to the digit except `solve_time_s`. Stable at 0/20/40 ms.
-  Regression check, each must exit 1: `--wire 161` (old encoding, hunts) and `--cadence-phase 0.02`
+  Regression check, each must exit 1: `--wire 161 --set command_state=false --set weights.du=10` (old encoding on C3, hunts; under C4 it is nearly harmless) and `--cadence-phase 0.02`
   (once-anchored grid, diverges). ~10 s a run; a script, not a pytest, because
   the test session exports its own solver.
+- `wire_chain.py --goal out --viewer [--realtime 0]` — the same run in MuJoCo's
+  viewer; past the plan it keeps cycling, unscored, so the settling sway shows.
+  Space ends that, closing the window ends the run. `--realtime 0` is as fast as
+  it computes.
+- `wire_chain.py --random [N] --viewer [--seed S]` — chain N random moves (no N:
+  until the window closes), each from where the last ended; space releases the
+  next. Headless, `--random N` runs the N moves back to back.
 - `sweep_robust.py` — `wire_chain` over moves x plant samples x levers; the worst
   cell per setting.
 - `trial.sh <outdir>` — one live arm: tear down by PID, launch headless,

@@ -12,6 +12,11 @@ phase included -- the five faults behind the 2026-09-25 Gazebo divergence
     ./scripts/trials/wire_chain.py --goal out --latency 0.02
     ./scripts/trials/wire_chain.py --goal out --wire 161         # must diverge
     ./scripts/trials/wire_chain.py --goal out --cadence-phase 0.03  # must diverge
+    ./scripts/trials/wire_chain.py --goal out --viewer --realtime 0
+    ./scripts/trials/wire_chain.py --random --viewer   # space: next move
+
+`--viewer` keeps the chain running past the plan, unscored, until space or the
+window closes. `--random N` chains N moves, each from where the last ended.
 
 Plan, plant mismatch and solver flags are `harness.add_arguments`'. Exit 1 on
 divergence or hunting (`crane_mpc.hunting`: u0 reversing on half the cycles).
@@ -29,6 +34,7 @@ the JTC's tolerance checks, goal handling and angle wraparound are skipped.
 """
 
 import argparse
+import itertools
 import json
 import sys
 from pathlib import Path
@@ -38,15 +44,15 @@ import numpy as np
 from builtin_interfaces.msg import Time
 from crane_model.mismatch import perturb_fit
 from crane_model.model import Payload
-from crane_model.mujoco_plant import MujocoPlant
+from crane_model.mujoco_plant import MujocoPlant, leave
 from crane_model.symbolic import PAYLOAD_MOUNT_LINK
-from growth import growth
-from harness import ACTUATED, PASSIVE, PLANNED, cs, tune_planner
-from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
-
+from crane_model.viewing import SpaceGate
 from crane_mpc import cycle as cy
 from crane_mpc import horizon as hz
 from crane_mpc.hunting import REVERSAL_FRACTION, reversal_fraction
+from growth import growth
+from harness import ACTUATED, PASSIVE, PLANNED, cs, tune_planner
+from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 
 ROTATOR = 4
 #: ros2_control yaml `topic_timeout`: past it the JTC holds position.
@@ -149,7 +155,9 @@ def main(argv=None) -> int:
     parser.add_argument(
         "--seconds", type=float, default=None, help="default plan + 5 s"
     )
-    parser.add_argument("--csv", type=Path, default=None, help="per-cycle log")
+    parser.add_argument(
+        "--csv", type=Path, default=None, help="per-cycle log, last move's"
+    )
     # Regression checks: each reverts one fix of issue 171 and must diverge.
     parser.add_argument("--wire", choices=("today", "161"), default="today")
     parser.add_argument(
@@ -162,9 +170,21 @@ def main(argv=None) -> int:
     parser.add_argument(
         "--plant-payload", type=float, default=None, help="kg; default --payload-mass"
     )
-    parser.add_argument("--json", type=Path, default=None, help="scores")
+    parser.add_argument(
+        "--json", type=Path, default=None, help="scores; a list per move if chained"
+    )
+    parser.add_argument("--viewer", action="store_true", help="MuJoCo passive viewer")
+    parser.add_argument(
+        "--realtime",
+        type=float,
+        default=1.0,
+        help="viewer playback factor; 0 is as fast as it computes. Pacing only",
+    )
     harness.add_arguments(parser)
     options = parser.parse_args(argv)
+    if options.random == 0 and not options.viewer:
+        print("error: --random with no count needs --viewer to end it", file=sys.stderr)
+        return 2
 
     description = tune_planner.plan_example.description()
     planner = tune_planner.Planner(
@@ -191,13 +211,56 @@ def main(argv=None) -> int:
         return planner.model.passive_equilibrium(q_a, payload)
 
     plant.scale_planned_damping(damping_scale)
-    start = tune_planner.start_of(planner, options.resettle_start)
+    start = anchor = tune_planner.start_of(planner, options.resettle_start)
     rng = None if options.random is None else np.random.default_rng(options.seed)
-    plan = harness.plan_move(planner, start, options, rng)
-    if plan is None:
-        return 2
-    chain = harness.Chain(plant, start.q_tool, options, fit=plant_fit)
+    gate = SpaceGate()
+    if options.viewer:
+        plant.set_state(start.q)  # planning takes seconds; show the start meanwhile
+        plant.open_viewer(options.realtime, key_callback=gate)
+    said = False
 
+    def coast():
+        """Cycle on past the plan while the window is open and space unpressed."""
+        nonlocal said
+        if plant.viewer is None or not plant.viewer.is_running() or gate.pressed:
+            return False
+        if not said:
+            said = True
+            print("\nsettling -- space in the viewer for the next goal")
+        return True
+
+    moves, failed, scores = 0, False, []
+    while True:
+        plan = harness.plan_move(planner, start, options, rng)
+        if plan is None:
+            if rng is None or start is anchor:
+                return 2
+            print("no move from here; back to the pose this run opened at")
+            start = anchor
+            continue
+        gate.pressed, said = False, False
+        chain = harness.Chain(plant, start.q_tool, options, fit=plant_fit)
+        reason, score = fly(options, parameters, ocp, chain, equilibrium, plan, coast)
+        failed, moves = failed or bool(reason), moves + 1
+        scores.append(score)
+        if rng is None or (options.random and moves >= options.random):
+            break
+        if plant.viewer is not None and not gate.pressed:
+            break  # window closed
+        start = harness.next_start(plant, planner)
+    if options.json:
+        options.json.write_text(
+            json.dumps(scores[0] if moves == 1 else scores, indent=1)
+        )
+    if plant.viewer is not None:
+        print("close the viewer window to finish")
+    plant.hold_viewer()
+    return 1 if failed else 0
+
+
+def fly(options, parameters, ocp, chain, equilibrium, plan, coast):
+    """One move through the wire; `(failure reasons, scores)`. Coast cycles unscored."""
+    plant = chain.plant
     Ts, N = float(parameters["Ts"]), int(parameters["horizon_length"])
     delay = float(parameters["sensor_to_valve_delay"])
     cycle = cy.Cycle(Ts, hz.Grid(Ts, N), "active", delay, parameters["dq_a_feedback"])
@@ -226,113 +289,120 @@ def main(argv=None) -> int:
     joints = [f"j{i}" for i in range(cs.K_GENERALIZED_DOF)]
     h, ff = chain.step_s, chain.ff_scale
     ticks = int(round(Ts / h))
-    clock = EPOCH
-    live = Playback.hold(clock, plant.q[PLANNED])
-    last_receipt = clock
-    flight = []  # (arrival, message)
-    outputs = []  # JTC output over the last cycle, for `cycle.jtc_output`
     events = {"silence": 0, "handback": 0}
     log = []
     solve_times = []
     seconds = options.seconds or float(plan.duration) + 5.0
     diverged = False
-    for k in range(int(round(seconds / Ts))):
-        now_ns = epoch_ns + k * int(round(Ts * 1e9))
-        cycle.begin()
-        q, dq = plant.q, plant.dq
-        silence = cycle.gates(
-            now_ns,
-            float(parameters["max_clock_skew"]),
-            float(parameters["max_reference_age"]),
-        )
-        if silence is None:
-            silence = cycle.read_state(
-                cy.Measurement(
-                    q[ACTUATED],
-                    dq[ACTUATED],
-                    q[PASSIVE],
-                    dq[PASSIVE],
-                    0.0,
-                    0.0,
-                ),
-                float(parameters["max_state_age"]),
+    scored = int(round(seconds / Ts))
+
+    def cycles():
+        """Run the node's cycle then the JTC's ticks, once per `next`; `(solution, u0)`."""
+        clock = EPOCH
+        live = Playback.hold(clock, plant.q[PLANNED])
+        last_receipt = clock
+        flight = []  # (arrival, message)
+        outputs = []  # JTC output over the last cycle, for `cycle.jtc_output`
+        for k in itertools.count():
+            now_ns = epoch_ns + k * int(round(Ts * 1e9))
+            cycle.begin()
+            q, dq = plant.q, plant.dq
+            silence = cycle.gates(
+                now_ns,
+                float(parameters["max_clock_skew"]),
+                float(parameters["max_reference_age"]),
             )
-        if silence is None:
-            cycle.jtc_output = (
-                np.mean(outputs, axis=0) if len(outputs) == ticks else None
-            )
-            silence = cycle.propagate()
-        solution, u0 = None, np.full(cs.K_PLANNED_DOF, np.nan)
-        if silence is not None:
-            cycle.stay_silent(silence.why)
-            events["silence"] += 1
-        else:
-            solution, refusal = cycle.solve()
-            if solution is not None:
-                solve_times.append(solution.solve_time_s)
-            verdict = (
-                None
-                if refusal
-                else cycle.ladder(
-                    solution,
-                    int(parameters["max_consecutive_failures"]),
-                    ocp.solve_budget_s,
+            if silence is None:
+                silence = cycle.read_state(
+                    cy.Measurement(
+                        q[ACTUATED],
+                        dq[ACTUATED],
+                        q[PASSIVE],
+                        dq[PASSIVE],
+                        0.0,
+                        0.0,
+                    ),
+                    float(parameters["max_state_age"]),
                 )
-            )
-            if verdict is None or not verdict.published:
-                events["handback"] += 1
+            if silence is None:
+                cycle.jtc_output = (
+                    np.mean(outputs, axis=0) if len(outputs) == ticks else None
+                )
+                silence = cycle.propagate()
+            solution, u0 = None, np.full(cs.K_PLANNED_DOF, np.nan)
+            if silence is not None:
+                cycle.stay_silent(silence.why)
+                events["silence"] += 1
             else:
-                stamp = stamp_of(
-                    (cycle.next_first_knot_ns - cycle.command_delay * 1e9) / 1e9
-                )
-                if options.wire == "161":
-                    message = wire_161(
-                        cycle.horizon, joints, stamp, delay, cycle.last_horizon
+                solution, refusal = cycle.solve()
+                if solution is not None:
+                    solve_times.append(solution.solve_time_s)
+                verdict = (
+                    None
+                    if refusal
+                    else cycle.ladder(
+                        solution,
+                        int(parameters["max_consecutive_failures"]),
+                        ocp.solve_budget_s,
                     )
+                )
+                if verdict is None or not verdict.published:
+                    events["handback"] += 1
                 else:
-                    message = hz.horizon_to_message(
-                        cycle.horizon,
-                        joints,
-                        stamp,
-                        lead=delay,
-                        period=h,
-                        in_flight=cycle.last_horizon,
-                        in_flight_u=cycle.in_flight_command(),
-                        linear=cycle.command_state,
+                    stamp = stamp_of(
+                        (cycle.next_first_knot_ns - cycle.command_delay * 1e9) / 1e9
                     )
-                flight.append((clock + options.latency, message))
-                u0 = cycle.horizon.u[0, : cs.K_PLANNED_DOF].copy()
-                cycle.advance(
-                    solution,
-                    now_ns,
-                    float(parameters["min_progress_rate"]),
-                    float(parameters["max_stall_time"]),
-                )
-                cycle.prepare_next(solution)
+                    if options.wire == "161":
+                        message = wire_161(
+                            cycle.horizon, joints, stamp, delay, cycle.last_horizon
+                        )
+                    else:
+                        message = hz.horizon_to_message(
+                            cycle.horizon,
+                            joints,
+                            stamp,
+                            lead=delay,
+                            period=h,
+                            in_flight=cycle.last_horizon,
+                            in_flight_u=cycle.in_flight_command(),
+                            linear=cycle.command_state,
+                        )
+                    flight.append((clock + options.latency, message))
+                    u0 = cycle.horizon.u[0, : cs.K_PLANNED_DOF].copy()
+                    cycle.advance(
+                        solution,
+                        now_ns,
+                        float(parameters["min_progress_rate"]),
+                        float(parameters["max_stall_time"]),
+                    )
+                    cycle.prepare_next(solution)
 
-        outputs = []
-        for _ in range(ticks):
-            # JTC update: take the newest arrived message, then sample at t and t + h.
-            while flight and flight[0][0] <= clock + 1e-9:
-                live = Playback(
-                    flight.pop(0)[1], clock, plant.q[PLANNED], plant.dq[PLANNED]
+            outputs = []
+            for _ in range(ticks):
+                # JTC update: take the newest arrived message, then sample at t and t + h.
+                while flight and flight[0][0] <= clock + 1e-9:
+                    live = Playback(
+                        flight.pop(0)[1], clock, plant.q[PLANNED], plant.dq[PLANNED]
+                    )
+                    last_receipt = clock
+                if clock - last_receipt > TOPIC_TIMEOUT:
+                    live, last_receipt = Playback.hold(clock, plant.q[PLANNED]), np.inf
+                q_ref, dq_ref, _ = live.sample(clock)
+                _, dq_next, effort_next = live.sample(clock + h)
+                command = chain.loop.step(
+                    q_ref,
+                    dq_ref,
+                    plant.q[PLANNED],
+                    plant.dq[PLANNED],
+                    feedforward=ff * (dq_next - dq_ref) + effort_next,
                 )
-                last_receipt = clock
-            if clock - last_receipt > TOPIC_TIMEOUT:
-                live, last_receipt = Playback.hold(clock, plant.q[PLANNED]), np.inf
-            q_ref, dq_ref, _ = live.sample(clock)
-            _, dq_next, effort_next = live.sample(clock + h)
-            command = chain.loop.step(
-                q_ref,
-                dq_ref,
-                plant.q[PLANNED],
-                plant.dq[PLANNED],
-                feedforward=ff * (dq_next - dq_ref) + effort_next,
-            )
-            outputs.append(command)
-            plant.drive(chain.actuator, chain.psi.apply(command), h)
-            clock += h
+                outputs.append(command)
+                plant.drive(chain.actuator, chain.psi.apply(command), h)
+                clock += h
+            yield solution, u0
 
+    run = cycles()
+    for k, (solution, u0) in zip(range(scored), run):
         q, dq = plant.q, plant.dq
         sway = q[PASSIVE] - equilibrium(q[ACTUATED])
         status = -1 if solution is None else solution.status
@@ -390,6 +460,7 @@ def main(argv=None) -> int:
         )
         if bad
     ]
+    scores = None
     if options.json:
         rate, _ = growth(log[:, 0], np.abs(sway).max(axis=1))
         scores = {
@@ -415,9 +486,11 @@ def main(argv=None) -> int:
                 else []
             ),
         }
-        options.json.write_text(json.dumps(scores, indent=1))
-    return 1 if reason else 0
+    # The viewer's coast: same chain, past the plan, unscored.
+    while not diverged and coast() and np.all(np.isfinite(plant.q)):
+        next(run)
+    return reason, scores
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(leave(main()))

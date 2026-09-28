@@ -38,10 +38,9 @@ from crane_model.mujoco_plant import (  # noqa: E402
 )
 from crane_model.symbolic import K_ACTUATOR_FIT  # noqa: E402
 from crane_model.velocity_loop import VelocityLoop, load_velocity_loop  # noqa: E402
-from crane_planning.ocp import evaluate  # noqa: E402
-
 from crane_mpc import solver as ocp_runtime  # noqa: E402
 from crane_mpc.problem import PATH_POINTS  # noqa: E402
+from crane_planning.ocp import evaluate  # noqa: E402
 
 ox, cs = export_ocp.ox, export_ocp.cs
 PLANNED = list(PLANNED_INDICES)
@@ -65,7 +64,14 @@ def add_arguments(parser) -> None:
     )
     parser.add_argument("--no-clamp", action="store_true", help="drop C3's force clamp")
     parser.add_argument(
-        "--random", type=int, nargs="?", const=1, default=None, help="random goal"
+        "--random",
+        type=int,
+        nargs="?",
+        const=0,
+        default=None,
+        metavar="N",
+        help="chain N random goals, each from where the last ended; no N: until "
+        "the viewer closes",
     )
     parser.add_argument("--seed", type=int, default=None, help="--random's stream")
     for side in ("positive", "negative"):
@@ -240,6 +246,15 @@ def plan_move(planner, start, options, rng):
         return plan
     print(f"no goal this planner would take in {GOAL_DRAWS} draws", file=sys.stderr)
     return None
+
+
+def next_start(plant, planner):
+    """Start where this move ended, inside the planner's box; the rotator wraps."""
+    q = plant.q
+    inside = np.clip(q[PLANNED], planner.limits.lower, planner.limits.upper)
+    wrapped = (q[PLANNED] + np.pi) % (2.0 * np.pi) - np.pi
+    q[PLANNED] = np.where(plant.continuous_axes, wrapped, inside)
+    return tune_planner.Start(q=q, dq_a=np.zeros(len(PLANNED)))
 
 
 def path_control(plan) -> np.ndarray:
