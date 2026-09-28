@@ -25,6 +25,13 @@ crane_mpc:
       so a held plan still starts at knot 0 -- but a goal accepted then aborted has anchored it, so pressing
       start again seconds later gets the `max_reference_age` refusal. Recover by planning again."
 
+  jtc_name:
+    type: string
+    default_value: "trajectory_controller_a2b"
+    read_only: true
+    description: "The JTC that plays the horizon, a node beside /controller_manager. Its update_rate (0: the
+      manager's) is read at configuration and must match velocity_loop.yaml rate_hz, or the node refuses."
+
   Ts:
     type: double
     default_value: 0.06
@@ -95,8 +102,10 @@ crane_mpc:
 
   solve_budget:
     type: double
-    default_value: 0.03
-    description: "Solve budget, s; 30 ms leaves margin inside the 40 ms cycle. Not read_only -- it decides
+    default_value: 0.06
+    description: "Budget, s, from the /joint_states sample to the solved horizon -- end-to-end, not only
+      acados' solve_time: past it the command schedule (knot 0 due `command_delay` after the sample) is
+      already broken, so one Ts. Not read_only -- it decides
       what is done with an answer, not which problem is built, so it can be moved against a measured solve
       time without restarting the producer. The solve is **not interrupted** at it: acados' `timeout_max_time`
       is SQP-only, an unknown option field makes acados exit, and a half-finished RTI step is not a plan.

@@ -1,6 +1,7 @@
 """The node's cycle: what it publishes, and what it refuses to publish."""
 
 import math
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -12,8 +13,10 @@ from control_msgs.msg import JointTrajectoryControllerState
 from crane_model import canonical_joints
 from crane_model import symbolic as cs
 from crane_mpc import config, problem
-from crane_mpc.node import MpcNode
+from crane_mpc.node import MpcNode, jtc_rate_mismatch
 from crane_msgs.msg import JointPath, SolverHealth
+from rcl_interfaces.msg import ParameterValue
+from rcl_interfaces.srv import GetParameters
 from rclpy.parameter import Parameter
 from rclpy.time import Time
 from sensor_msgs.msg import JointState
@@ -395,3 +398,35 @@ def test_which_branch_drives_the_position_reference_is_said_out_loud(node):
     logs.lines.clear()
     node.update()
     assert not any("solving against" in text for _, text in logs.lines)
+
+
+def test_a_cycle_late_end_to_end_is_not_published_as_converged(node):
+    """acados' solve_time misses the sample's age; 100 ms old is past a 60 ms budget."""
+    configured(node)
+    node.set_parameters([Parameter("solve_budget", Parameter.Type.DOUBLE, 0.06)])
+    old = joint_state(node)
+    now = node.get_clock().now().nanoseconds
+    old.header.stamp = Time(nanoseconds=now - 100_000_000).to_msg()
+    node.on_joint_state(old)
+    node.update()
+    assert "_shadow_horizon_publisher" not in node.published
+    health = node.published["_health_publisher"][0]
+    assert health.outcome == SolverHealth.SOLVE_BUDGET_EXCEEDED
+    assert "late cycle" in health.message
+
+
+def rate(value):
+    response = GetParameters.Response(values=[ParameterValue(integer_value=value)])
+    return SimpleNamespace(result=lambda: response)
+
+
+def test_a_jtc_off_the_assumed_tick_is_refused(node):
+    assert jtc_rate_mismatch(0.01, 100, 0) == ""  # 0: the manager's rate
+    assert jtc_rate_mismatch(0.01, 50, 100) == ""
+    assert jtc_rate_mismatch(0.01, 100, 20)
+    configured(node)
+    node.on_rate(0, rate(100))
+    node.on_rate(1, rate(20))
+    node.update()
+    assert node.published == {}
+    assert "20 Hz" in node._last_silence

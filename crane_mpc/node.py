@@ -8,6 +8,8 @@ rebuilt each crossing. An adapter: `cycle.py` decides, `reports.py` marshals.
 
 from __future__ import annotations
 
+from collections import deque
+
 import numpy as np
 import rclpy
 from action_msgs.msg import GoalStatus, GoalStatusArray
@@ -19,6 +21,7 @@ from crane_msgs.srv import SetPayload
 from diagnostic_msgs.msg import DiagnosticArray
 from nav_msgs.msg import Path
 from rclpy.node import Node
+from rclpy.parameter_client import AsyncParameterClient
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from rclpy.time import Time
 from sensor_msgs.msg import JointState
@@ -58,6 +61,21 @@ from .solver import Ocp, path_control
 
 #: How often a repeated complaint is logged, ms.
 WARN_PERIOD = 5.0
+#: Seconds (one query each) to wait for the controllers' `update_rate`.
+RATE_QUERIES = 10
+CONTROLLER_MANAGER = "/controller_manager"
+
+
+def jtc_rate_mismatch(assumed_period: float, manager_rate: int, jtc_rate: int) -> str:
+    """Refusal text if the JTC does not tick at `assumed_period`, else `""`."""
+    rate = jtc_rate or manager_rate  # a controller's 0 means the manager's
+    if rate > 0 and abs(1.0 / rate - assumed_period) <= 1e-6:
+        return ""
+    return (
+        f"the JTC ticks at {rate} Hz (update_rate {jtc_rate}, controller_manager "
+        f"{manager_rate}) and the horizon is built for a {assumed_period} s tick "
+        "from velocity_loop.yaml rate_hz; the feed-forward would be sampled off-tick"
+    )
 
 
 def _qos(durability=DurabilityPolicy.VOLATILE) -> QoSProfile:
@@ -133,6 +151,9 @@ class MpcNode(Node):
 
         #: The JTC's tick; it samples feedforward one tick ahead (`hz._command_message`).
         self._jtc_period = 1.0 / load_velocity_loop()[1]
+        #: `(stamp_ns, planned-axis output)` from the JTC, oldest first.
+        self._jtc_outputs: deque = deque(maxlen=64)
+        self._rates: list = [None, None]
 
         self._reference_message: JointTrajectory | None = None
         self._path_message: JointPath | None = None
@@ -358,6 +379,14 @@ class MpcNode(Node):
         if not set(self._joints) & set(message.joint_names):
             return
         self._controller_state = message
+        names = list(message.joint_names)
+        output = message.output.velocities
+        rows = [names.index(j) for j in self._joints[:PLANNED_DOF] if j in names]
+        if len(rows) == PLANNED_DOF and max(rows) < len(output):
+            velocity = np.array([output[row] for row in rows])
+            if np.all(np.isfinite(velocity)):
+                stamp = Time.from_msg(message.header.stamp).nanoseconds
+                self._jtc_outputs.append((stamp, velocity))
 
     # -- configuration -----------------------------------------------------------
 
@@ -415,9 +444,51 @@ class MpcNode(Node):
             )
         self.adopt_reference()
         self.adopt_path()
+        self.ask_jtc_rate()
+
+    def ask_jtc_rate(self) -> None:
+        """Read the JTC's tick off the controllers; a mismatch is refused."""
+        names = (CONTROLLER_MANAGER, "/" + str(self._values.jtc_name))
+        self._rate_clients = [AsyncParameterClient(self, name) for name in names]
+        self._rate_queries = 0
+        self._rate_timer = self.create_timer(1.0, self.query_jtc_rate)
+
+    def query_jtc_rate(self) -> None:
+        self._rate_queries += 1
+        if self._rate_queries > RATE_QUERIES:
+            self._rate_timer.cancel()
+            self.get_logger().warn(
+                f"No update_rate from {CONTROLLER_MANAGER} and /{self._values.jtc_name} "
+                f"in {RATE_QUERIES} s, so the JTC is assumed to tick every "
+                f"{self._jtc_period} s (velocity_loop.yaml) -- unchecked."
+            )
+            return
+        for slot, client in enumerate(self._rate_clients):
+            if self._rates[slot] is None and client.services_are_ready():
+                client.get_parameters(
+                    ["update_rate"],
+                    callback=lambda future, slot=slot: self.on_rate(slot, future),
+                )
+
+    def on_rate(self, slot: int, future) -> None:
+        response = future.result()
+        if response is None or not response.values:
+            return
+        self._rates[slot] = int(response.values[0].integer_value)
+        if None in self._rates or self._rate_timer.is_canceled():
+            return
+        self._rate_timer.cancel()
+        why = jtc_rate_mismatch(self._jtc_period, *self._rates)
+        if why:
+            self._configuration_failure = why
+            self.get_logger().error(f"The MPC refuses its configuration: {why}.")
 
     def ready(self) -> bool:
-        return self._ocp is not None and self._model is not None
+        return (
+            self._ocp is not None
+            and self._model is not None
+            and not self._configuration_failure
+        )
 
     def adopt_reference(self) -> None:
         if self._reference_message is None or not self.ready():
@@ -507,10 +578,14 @@ class MpcNode(Node):
             self.fall_silent(self.ungated())
             return
 
+        # The sample's own instant, not the tick: it lags 0-10 ms plus transport.
+        stamp = self._actuated_stamp
+        measured = now if stamp is None else min(stamp.nanoseconds, now)
         silence = cycle.gates(
             now,
             float(self._values.max_clock_skew),
             float(self._values.max_reference_age),
+            measured,
         )
         if silence is None:
             silence = cycle.read_state(
@@ -522,6 +597,9 @@ class MpcNode(Node):
             cycle.adopt_follower(
                 self.follower_command(now), self._ocp.parameters["limits"]["u_max"]
             )
+            cycle.jtc_output = (
+                self.jtc_output(measured) if self.mode == "active" else None
+            )
             silence = cycle.propagate()
         if silence is not None:
             self.fall_silent(silence)
@@ -529,7 +607,9 @@ class MpcNode(Node):
         self.say_path_source()
         self.warn_divergence()
 
-        solution, refusal = cycle.solve()
+        solution, refusal = cycle.solve(
+            lambda: (self.get_clock().now().nanoseconds - measured) / 1e9
+        )
         if refusal:
             self.report(None, refusal)
             self.warn(f"The OCP refused its arguments: {refusal}.")
@@ -644,6 +724,19 @@ class MpcNode(Node):
             age(self._actuated_stamp),
             age(self._passive_stamp),
         )
+
+    def jtc_output(self, measured_ns: int):
+        """
+        Mean JTC output over `[measured - Ts, measured)`, or `None`.
+
+        What the plant runs over the dead time, PI included. `None` below half
+        the expected ticks.
+        """
+        start = measured_ns - int(self.Ts * NANOSECONDS)
+        window = [v for t, v in self._jtc_outputs if start <= t < measured_ns]
+        if len(window) < 0.5 * self.Ts / self._jtc_period:
+            return None
+        return np.mean(window, axis=0)
 
     def follower_command(self, now_ns: int) -> FollowerCommand:
         """Read what the velocity controller is actually doing, per axis."""

@@ -163,8 +163,8 @@ def measure(data, parameters: dict) -> dict:
         "nonzero_status": int(np.count_nonzero(data.status)),
         "fallback_cycles": int(np.count_nonzero(data.fallback)),
         "over_budget_cycles": int(np.count_nonzero(data.solve_time > budget)),
-        # `solve_budget` is 0.08 against a 0.06 cycle, so a variant can be
-        # inside it and still miss every control deadline
+        # the node charges `solve_budget` end-to-end from the sample; this
+        # times the solve alone, so over_budget understates the node's count
         "over_period_cycles": int(np.count_nonzero(data.solve_time > period)),
         # --- per run: what the cost bought ------------------------------------
         "terminal_error": float(np.linalg.norm(error)),

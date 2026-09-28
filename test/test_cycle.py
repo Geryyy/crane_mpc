@@ -793,3 +793,27 @@ def test_after_a_silence_the_command_in_flight_is_the_machines_own_velocity():
     replayed = one.ocp.replayed[-1][0]
     assert replayed[0] == pytest.approx(0.2)
     assert np.allclose(replayed[1 : cs.K_PLANNED_DOF], 0.0)
+
+
+def test_the_horizon_is_anchored_on_the_measurement_and_not_the_tick():
+    """A sample 10 ms old puts knot 0, and with it the stamp, 10 ms earlier."""
+    one = curve_cycle(stamp_ns=0)
+    now = 1_000_000_000
+    measured = now - 10_000_000
+    assert one.gates(now, 1.0, 0.5, measured) is None
+    assert one.next_first_knot_ns == measured + int(one.command_delay * 1e9)
+
+
+def test_the_dead_time_replays_what_the_jtc_output_and_not_what_was_sent():
+    """The JTC's output carries the PI the OCP does not model; the command does not."""
+    one = cycle()
+    one.ocp = ReplayOcp()
+    one.applied_inputs = [np.full(cs.NU_PROGRESS, 0.7)]
+    one.last_input = np.full(cs.NU_PROGRESS, 0.3)
+    one.measured = np.zeros(cs.NX)
+    one.jtc_output = np.full(cs.K_PLANNED_DOF, 0.5)
+    assert one.propagate() is None
+    dead_time, published = one.ocp.replayed
+    assert np.allclose(dead_time[0][: cs.K_PLANNED_DOF], 0.5)
+    assert np.allclose(dead_time[0][cs.K_PLANNED_DOF :], 0.0)
+    assert np.allclose(published[0], 0.3)

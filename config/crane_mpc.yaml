@@ -23,8 +23,8 @@ crane_mpc:
     #      60         92 mm              29 mm            8.8 ms
     #      80         79 mm              24 mm           12.1 ms
     #
-    # Worst-case arrival is what moves, and it is 2.8x. 12.1 ms leaves 6x to
-    # the 80 ms budget; the old note that sim load costs 2-4x still leaves the
+    # Worst-case arrival is what moves, and it is 2.8x. 12.1 ms leaves 5x to
+    # the 60 ms budget; the old note that sim load costs 2-4x still leaves the
     # median inside it, and `solve_budget` catches the tail.
     # Publishes at 16.7 Hz vs a 25 Hz target; unresolved, own issue.
     Ts: 0.06
@@ -53,11 +53,10 @@ crane_mpc:
     # states, the warm start and the command. Set it here, at launch.
     dq_a_feedback: [true, true, true, true, true, true]
 
-    # Health threshold, not a period: above Ts on purpose. Idle, 0.06/40:
-    # 12.8/25 ms, but 2-4x that under sim load -- an idle-sized budget made
-    # escalation fire on a merely busy box. Overrun costs cadence not
-    # correctness: knots re-anchor each cycle and 2.34s of horizon outlives one.
-    solve_budget: 0.08
+    # End-to-end, sample to solved horizon: = Ts, since knot 0 is due
+    # command_delay after the sample. Late -> previous horizon shifted (172).
+    # Live sim: tick to arrival 30 ms median, solve 10 ms median, 44 ms max.
+    solve_budget: 0.06
 
     solver_health_decimation: 2
 

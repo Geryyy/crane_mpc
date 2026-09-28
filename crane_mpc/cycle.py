@@ -9,7 +9,7 @@ in `node.py`, because refusals quote them and `reports.py` reuses them.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 import numpy as np
 from crane_model import symbolic as cs
@@ -277,6 +277,11 @@ class Cycle:
         # refuses for the node because `carry_stage` cannot express them.
         # Kept as deep as `Ocp.replay` needs.
         self.applied_inputs: list = []
+        #: Mean JTC output over the dead time before the measurement, planned
+        #: axes; replaces `applied_inputs[1]` in that roll -- it carries the PI.
+        self.jtc_output: np.ndarray | None = None
+        #: Measurement-to-solved seconds of the last solve, `None` if unmeasured.
+        self.latency_s: float | None = None
         self.guess = None
         #: A preparation standing for this cycle, and the resampled reference it
         #: was linearised about. The horizon is what gets re-checked: it is the
@@ -370,9 +375,17 @@ class Cycle:
 
     # -- the gates ---------------------------------------------------------------
 
-    def gates(self, now_ns: int, max_clock_skew: float, max_reference_age: float):
+    def gates(
+        self,
+        now_ns: int,
+        max_clock_skew: float,
+        max_reference_age: float,
+        measured_ns: int | None = None,
+    ):
         """
         Run the reference's three refusals, then the anchor and the resample.
+
+        The cadence anchors on `measured_ns`, the state's stamp, else on `now_ns`.
 
         Returns the `Silence` that stops this cycle, or `None` with `self.horizon` set.
         """
@@ -403,7 +416,7 @@ class Cycle:
                 f"on {HORIZON_TOPIC}.",
             )
 
-        self.anchor_cadence(now_ns)
+        self.anchor_cadence(now_ns if measured_ns is None else measured_ns)
         if not self.reference_anchored:
             # Skipping the planning latency is what a time-indexed reference wants:
             # the plan is that old, so its first seconds are past. A path-following
@@ -484,16 +497,17 @@ class Cycle:
         # inverts -- so this is the same number, read off the grid.
         return self.grid.duration()
 
-    def anchor_cadence(self, now_ns: int) -> None:
+    def anchor_cadence(self, measured_ns: int) -> None:
         """
-        Knot 0 takes effect `command_delay` after *this* tick, every cycle.
+        Knot 0 takes effect `command_delay` after this cycle's measurement.
 
         A grid anchored once and advanced by `Ts` keeps the first tick's phase:
         the timer ticks on its own grid, so every stamp then sat a fixed 0-60 ms
         off the real measurement instant -- random per run, against a loop with
-        ~10 ms of timing margin. That was which runs diverged.
+        ~10 ms of timing margin. That was which runs diverged. The tick itself
+        still sat 0-10 ms after the sample the predictor rolls from (issue 172).
         """
-        self.next_first_knot_ns = now_ns + int(self.command_delay * NANOSECONDS)
+        self.next_first_knot_ns = measured_ns + int(self.command_delay * NANOSECONDS)
 
     def read_state(self, measurement: Measurement, max_state_age: float):
         """
@@ -562,12 +576,14 @@ class Cycle:
         self.applied_inputs.insert(0, self.last_input.copy())
         depth = self.ocp.replay[0].age + 1 if self.ocp.replay else 1
         del self.applied_inputs[depth + 1 :]
+        dead_time = self.applied_inputs[1:] or self.applied_inputs
+        if self.jtc_output is not None:
+            dead_time = [np.zeros(cs.NU_PROGRESS)]
+            dead_time[0][:PLANNED_DOF] = self.jtc_output
         try:
             # Over the dead time the plant runs what left the JTC one cycle ago;
             # then one `Ts` of the command already published (`command_delay`).
-            self.x_next = self.ocp.propagate_applied(
-                self.measured, self.applied_inputs[1:] or self.applied_inputs
-            )
+            self.x_next = self.ocp.propagate_applied(self.measured, dead_time)
             x0 = self.ocp.propagate_applied(self.x_next, self.applied_inputs[:1])
         except Exception as error:
             return Silence(
@@ -592,9 +608,13 @@ class Cycle:
 
     # -- the solve and its ladder ------------------------------------------------
 
-    def solve(self):
+    def solve(self, latency=None):
         """
         Solve. Returns `(solution, refusal)`; exactly one is falsy.
+
+        `latency()`, seconds since the measurement, is read once the OCP answers;
+        past `solve_budget_s` a converged solve is late end-to-end and is handled
+        as over budget -- acados' `solve_time` misses the Python around it.
 
         A refusal has already stopped the publisher; the caller only reports it.
 
@@ -621,6 +641,13 @@ class Cycle:
             return None, str(error)
 
         self.solves += 1
+        self.latency_s = None if latency is None else float(latency())
+        if (
+            solution.outcome is Outcome.CONVERGED
+            and self.latency_s is not None
+            and self.latency_s > self.ocp.solve_budget_s
+        ):
+            solution = replace(solution, outcome=Outcome.BUDGET_EXCEEDED)
         self.last_solution = solution
         self.guess = (
             None if solution.outcome is Outcome.FAILED else self.ocp.carried(solution)
@@ -703,6 +730,13 @@ class Cycle:
                 published=True,
             )
 
+        late = self.latency_s is not None and self.latency_s > solve_budget_s
+        spent = (
+            f"{round(1000 * self.latency_s)} ms end-to-end from the measurement, a "
+            "late cycle,"
+            if late
+            else f"{round(1000 * solution.solve_time_s)} ms"
+        ) + f" against a {round(1000 * solve_budget_s)} ms budget"
         if self.consecutive_failures >= max_consecutive_failures:
             # Handing back happens once; later cycles just wait for a believable
             # solve. SolverHealth keeps FAULT_SOLVER either way -- only log
@@ -710,10 +744,6 @@ class Cycle:
             handing_back = not self.escalated
             self.escalated = True
             self.applied_previous = False
-            spent = (
-                f"{round(1000 * solution.solve_time_s)} ms against a "
-                f"{round(1000 * solve_budget_s)} ms budget"
-            )
             if handing_back:
                 text = (
                     f"mpc §6's repeated-failure escalation: "
@@ -743,9 +773,7 @@ class Cycle:
             self.applied_previous = True
             return Verdict(
                 f"acados answered {solution.status_word} ({solution.outcome}) after "
-                f"{round(1000 * solution.solve_time_s)} ms against a "
-                f"{round(1000 * solve_budget_s)} ms budget, so mpc §6's previous "
-                "solution shifted by one step was published on "
+                f"{spent}, so mpc §6's previous solution shifted by one step was published on "
                 f"{destination} instead",
                 published=True,
                 severity="warn",
@@ -753,8 +781,9 @@ class Cycle:
 
         self.applied_previous = False
         text = (
-            f"acados answered {solution.status_word} ({solution.outcome}) and there "
-            "was no previous solution to shift, so nothing was published"
+            f"acados answered {solution.status_word} ({solution.outcome}) after "
+            f"{spent} and there was no previous solution to shift, so nothing was "
+            "published"
         )
         self.stay_silent_after_failure(
             "the solve did not converge and there is no previous solution to shift"

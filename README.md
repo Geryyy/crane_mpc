@@ -207,7 +207,8 @@ them. So the property under test is the stronger one: **the same `x0`, `stages`
 and `guess` give the same answer bit for bit, whatever ran in between.**
 
 **3. Bound the solve time, and define what is applied past it.** Enforced, not
-measured. A solve whose `time_tot` exceeds `solve_budget` is not published; what
+measured. A solve whose `time_tot`, or whose cycle from the `/joint_states`
+stamp to the solved horizon, exceeds `solve_budget` is not published; what
 goes out instead is the previous solution shifted by one step with its last
 stage duplicated, and the overrun is on the health stream. The knot times do not
 move, so shifted knots land on the instants they were computed for. Any other
