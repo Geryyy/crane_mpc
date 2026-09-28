@@ -26,6 +26,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import numpy as np
+import yaml
 
 HERE = Path(__file__).resolve().parent
 OUT = HERE.parent.parent / "build" / "sweep_robust"
@@ -103,7 +104,9 @@ def run(job):
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[1])
     parser.add_argument("--move", action="append", help=f"default {MOVES}")
-    parser.add_argument("--band", action="append", default=[], help="name=lo,hi")
+    parser.add_argument(
+        "--band", action="append", default=[], help="name=lo,hi or name=[lo..],[hi..]"
+    )
     parser.add_argument("--lever", action="append", default=[], help="key=v1,v2")
     parser.add_argument("--cartesian", action="store_true")
     parser.add_argument("--samples", type=int, default=0, help="random plant draws")
@@ -117,7 +120,8 @@ def main() -> int:
         name, _, values = text.partition("=")
         if name not in BANDS:
             parser.error(f"--band {name}: one of {list(BANDS)}")
-        bands[name] = tuple(float(v) for v in values.split(","))
+        # `lo,hi` or, per axis, `[lo x5],[hi x5]` -- the envelope is per axis.
+        bands[name] = tuple(np.asarray(yaml.safe_load(v), float) for v in split(values))
     levers = {k: split(v) for k, _, v in (t.partition("=") for t in args.lever)}
     if args.cartesian:
         settings = [dict(zip(levers, c)) for c in itertools.product(*levers.values())]
