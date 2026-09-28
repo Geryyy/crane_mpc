@@ -11,7 +11,6 @@ from ament_index_python.packages import get_package_share_directory
 from conftest import export_for
 from crane_model import hydraulic_limits
 from crane_model import symbolic as cs
-
 from crane_mpc import problem
 from crane_mpc.config import machine_limits
 from crane_mpc.horizon import Grid, Knots, resample
@@ -40,6 +39,10 @@ def parameters():
     values.update({"hydraulics": hydraulic_limits()})
     # neither the box nor u^+ is in the yaml; crane_model owns both
     values["limits"].update(machine_limits())
+    # These tests pin C3's semantics (ZOH replay, stage-0 move cost); C4 has its
+    # own fixture below, whatever the shipped yaml selects.
+    values["command_state"] = False
+    values["weights"]["du"] = [10.0] * 6
     return values
 
 
