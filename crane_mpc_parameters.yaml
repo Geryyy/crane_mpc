@@ -253,6 +253,16 @@ crane_mpc:
       validation:
         fixed_size<>: [6]
         lower_element_bounds<>: [0.0]
+    du:
+      type: double_array
+      default_value: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+      read_only: true
+      description: "w_du -- move suppression, stage 0 only: w_du*(u_0 - u_f)^2, u_f the command in flight
+        over [t, t+Ts). Folded into the u row (W = w_u + w_du, yref = w_du*u_f/W), so no re-export. Damps
+        the cycle-to-cycle flip of u_0 (issue 121). Zero is today's cost exactly."
+      validation:
+        fixed_size<>: [6]
+        lower_element_bounds<>: [0.0]
     lag:
       type: double
       default_value: 40.0

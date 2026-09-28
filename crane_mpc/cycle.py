@@ -289,6 +289,7 @@ class Cycle:
         #: cadence or a slipped clock can move underneath it.
         self.prepared = False
         self.prepared_horizon: hz.Knots | None = None
+        self.prepared_in_flight: np.ndarray | None = None
         self.last_solution = None
         self.measured: np.ndarray | None = None
         self.x0: np.ndarray | None = None
@@ -629,7 +630,12 @@ class Cycle:
                 solution = self.ocp.feedback(self.x0)
             else:
                 solution = self.ocp.solve(
-                    self.x0, self.horizon, self.q_eq, self.guess, path=self.path
+                    self.x0,
+                    self.horizon,
+                    self.q_eq,
+                    self.guess,
+                    path=self.path,
+                    in_flight=self.applied_inputs[0],
                 )
         except Exception as error:
             self.applied_previous = False
@@ -672,6 +678,12 @@ class Cycle:
         """
         if self.prepared_horizon is None or self.horizon is None:
             return False
+        # Stage 0's move cost stands on the preparer's in-flight command; in
+        # shadow the follower's replaces it.
+        if self.prepared_in_flight is not None and not np.array_equal(
+            self.prepared_in_flight, self.applied_inputs[0]
+        ):
+            return False
         return all(
             np.array_equal(
                 getattr(self.prepared_horizon, block), getattr(self.horizon, block)
@@ -708,14 +720,23 @@ class Cycle:
             # `advance` has already moved `path_origin` on, so this resolves the
             # path as the *next* cycle will -- otherwise the preparation would
             # stand on a path one interval behind the feedback phase's.
+            # `advance` set `last_input` to what `propagate` will put in flight
+            # next cycle.
             self.ocp.prepare(
-                predicted, horizon, q_eq, self.guess, path=self.resolved_path()
+                predicted,
+                horizon,
+                q_eq,
+                self.guess,
+                path=self.resolved_path(),
+                in_flight=self.last_input,
             )
         except Exception:
             self.forget_preparation()
             return
         self.prepared = True
         self.prepared_horizon = horizon
+        if self.ocp.suppresses_moves:
+            self.prepared_in_flight = self.last_input.copy()
 
     def ladder(self, solution, max_consecutive_failures: int, solve_budget_s: float):
         """Publish this solve, shift the last one, or hand control back."""
@@ -1012,6 +1033,7 @@ class Cycle:
         """Drop a standing preparation: next cycle solves whole, as it used to."""
         self.prepared = False
         self.prepared_horizon = None
+        self.prepared_in_flight = None
 
     def forget_plan(self) -> None:
         """Drop the warm start and the horizon a shift would be taken from."""

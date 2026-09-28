@@ -18,8 +18,10 @@ from crane_mpc.solver import (
     Ocp,
     Outcome,
     export_key,
+    move_suppression,
     predictor_label,
     replay_schedule,
+    weight_matrices,
 )
 
 PLANNED = cs.K_PLANNED_DOF
@@ -479,3 +481,62 @@ def test_a_machine_at_rest_asked_to_stay_there_is_commanded_nothing(ocp, paramet
     solution = ocp.solve(x, horizon, q_eq)
     assert solution.outcome is not Outcome.FAILED
     assert np.max(np.abs(solution.inputs[0, :PLANNED]) / u_max) < 0.05
+
+
+def test_move_suppression_is_the_sum_of_the_two_quadratics(parameters):
+    """Issue 121: w_u*u^2 + w_du*(u - u_f)^2 == W*(u - yref)^2 + const, per row."""
+    weight = weight_matrices(parameters)[0]
+    reference = np.zeros(problem.NY)
+    du = np.array([3.0, 0.0, 10.0, 1.0, 30.0])
+    in_flight = np.array([0.4, -0.2, 0.1, 0.0, -0.3, 7.0])  # last: progress accel
+    folded, shifted = move_suppression(weight, reference, du, in_flight)
+
+    rows = np.arange(problem.Y_INPUT, problem.Y_INPUT + PLANNED)
+    w_u = np.diag(weight)[rows]
+
+    def split(u):
+        return w_u * u**2 + du * (u - in_flight[:PLANNED]) ** 2
+
+    def joint(u):
+        return np.diag(folded)[rows] * (u - shifted[rows]) ** 2
+
+    offset = split(np.zeros(PLANNED)) - joint(np.zeros(PLANNED))
+    for u in (np.full(PLANNED, 0.5), np.linspace(-1.0, 1.0, PLANNED)):
+        assert np.allclose(split(u) - joint(u), offset)
+    # Every other row, the progress-accel input included, is untouched.
+    others = np.setdiff1d(np.arange(problem.NY), rows)
+    assert np.array_equal(np.diag(folded)[others], np.diag(weight)[others])
+    assert np.array_equal(shifted[others], reference[others])
+
+
+@pytest.mark.parametrize("du", [0.0, 10.0])
+def test_stage_zero_prices_the_command_in_flight_only_when_asked(
+    parameters, export_base, du
+):
+    """w_du = 0 writes stage 0 exactly as before; w_du > 0 moves only the u rows."""
+    values = dict(parameters)
+    values["weights"] = dict(parameters["weights"], du=[du] * cs.K_ACTUATED_DOF)
+    description = problem.default_description().read_text()
+    export_for(export_base, values, values["hydraulics"], description)
+    ocp = Ocp(description, values, values["hydraulics"])
+    state = hold_state(ocp)
+    position = state[cs.X_PLANNED_POSITION : cs.X_PLANNED_POSITION + PLANNED]
+    q_eq = state[cs.X_PASSIVE_POSITION : cs.X_PASSIVE_POSITION + cs.K_PASSIVE_DOF]
+    horizon = horizon_holding(ocp, position)
+    in_flight = np.full(cs.NU_PROGRESS, 0.3)
+
+    ocp.solve(state, horizon, q_eq)
+    plain = ocp.solver.cost_get(0, "W"), ocp.solver.cost_get(0, "yref")
+    ocp.solve(state, horizon, q_eq, in_flight=in_flight)
+    weight, reference = ocp.solver.cost_get(0, "W"), ocp.solver.cost_get(0, "yref")
+
+    assert np.array_equal(plain[0], weight_matrices(values)[0])
+    rows = slice(problem.Y_INPUT, problem.Y_INPUT + PLANNED)
+    if du == 0.0:
+        assert np.array_equal(weight, plain[0])
+        assert np.array_equal(reference, plain[1])
+    else:
+        w_u = np.diag(plain[0])[rows]
+        assert np.allclose(np.diag(weight)[rows], w_u + du)
+        assert np.allclose(reference[rows], du * 0.3 / (w_u + du))
+        assert np.array_equal(reference[: problem.Y_INPUT], plain[1][: problem.Y_INPUT])

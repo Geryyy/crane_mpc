@@ -443,12 +443,15 @@ class StubOcp:
     """Records whether `prepare_next` got as far as linearising anything."""
 
     split_rti = True
+    suppresses_moves = True
 
     def __init__(self):
         self.prepared_with = []
+        self.in_flight = None
 
-    def prepare(self, x0, horizon, q_eq, guess, path=None):
+    def prepare(self, x0, horizon, q_eq, guess, path=None, in_flight=None):
         self.prepared_with.append((x0, horizon, q_eq, guess, path))
+        self.in_flight = in_flight
         return 0.001
 
 
@@ -474,6 +477,22 @@ def test_a_prepared_cycle_linearises_about_the_state_it_predicts():
     # states[1], the optimizer's own one step ahead -- not the state this cycle
     # measured, and not a second integration.
     assert np.array_equal(x0, answer.states[1])
+
+
+def test_a_preparation_prices_the_command_that_will_be_in_flight():
+    """Issue 121: the move cost is written a cycle early, so it has to stand on
+    what the next `propagate` puts in flight -- this cycle's `u0` -- and fall
+    when something else went out instead (shadow's follower)."""
+    one = preparable_cycle()
+    one.last_input = np.arange(cs.NU_PROGRESS, dtype=float)  # what `advance` left
+    one.prepare_next(solution(Outcome.CONVERGED))
+    assert np.array_equal(one.ocp.in_flight, one.last_input)
+
+    one.horizon = one.prepared_horizon.copy()
+    one.applied_inputs = [one.last_input.copy()]
+    assert one.preparation_still_applies()
+    one.applied_inputs = [one.last_input + 0.1]
+    assert not one.preparation_still_applies()
 
 
 def test_a_failed_solve_prepares_nothing_for_the_next_cycle():

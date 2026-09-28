@@ -182,6 +182,28 @@ def weight_matrices(parameters: dict) -> tuple[np.ndarray, np.ndarray]:
     return np.diag(diagonal), np.diag(terminal)
 
 
+def move_suppression(
+    weight: np.ndarray, reference: np.ndarray, du: np.ndarray, in_flight
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Fold `w_du*(u0 - u_f)^2` into stage 0's `w_u*u0^2`, per planned input row.
+
+    Same minimiser and curvature: `W = w_u + w_du`, `yref = w_du*u_f/W`; only a
+    constant is dropped. Progress-accel row untouched.
+    """
+    weight, reference = weight.copy(), reference.copy()
+    rows = np.arange(problem.Y_INPUT, problem.Y_INPUT + du.size)
+    total = weight[rows, rows] + du
+    weight[rows, rows] = total
+    reference[rows] = np.divide(
+        du * np.asarray(in_flight, dtype=float)[: du.size],
+        total,
+        out=np.zeros_like(total),
+        where=total > 0.0,
+    )
+    return weight, reference
+
+
 def constraint_data(
     chamber: tuple, scale: np.ndarray, hydraulics: dict
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
@@ -589,6 +611,13 @@ class Ocp:
         )
 
         self._weight, self._terminal_weight = weight_matrices(parameters)
+        self._du = np.asarray(
+            parameters["weights"]["du"][: cs.K_PLANNED_DOF], dtype=float
+        )
+        #: Whether stage 0 carries a move cost, i.e. depends on the command in flight.
+        self.suppresses_moves = bool(self._du.any())
+        #: The in-flight command stage 0 was last written against, for `cost_terms`.
+        self._in_flight: np.ndarray | None = None
         self._u_max, self.cylinder_force_max, self.cylinder_force_retract = (
             self._configure_fixed()
         )
@@ -959,12 +988,15 @@ class Ocp:
         path: PathCycle,
         q_eq: np.ndarray,
         guess: Guess | None,
+        in_flight=None,
     ) -> bool:
         """
         Write everything the solve reads except the initial-state bound's own value.
 
         Returns whether the cycle is warm. Split out of `solve` so `prepare` can
-        run it against a predicted state one cycle early.
+        run it against a predicted state one cycle early. `in_flight`: the command
+        the JTC plays over [t, t+Ts), what stage 0's move cost prices against;
+        `None` leaves it out.
         """
         intervals = self.intervals
 
@@ -1011,18 +1043,27 @@ class Ocp:
         parameter = self._path_parameters(path)
         self._last_parameter = parameter
         self._last_path = path
+        self._in_flight = (
+            None
+            if in_flight is None or not self.suppresses_moves
+            else np.array(in_flight, dtype=float)
+        )
         for stage in range(intervals + 1):
             self.solver.set(stage, "p", parameter)
-            self.solver.cost_set(
-                stage,
-                "yref",
-                stage_reference(
-                    stage_equilibrium(q_eq, stage),
-                    force_reference,
-                    stage == intervals,
-                    self.nominal_progress(stage, path),
-                ),
+            reference = stage_reference(
+                stage_equilibrium(q_eq, stage),
+                force_reference,
+                stage == intervals,
+                self.nominal_progress(stage, path),
             )
+            if stage == 0 and self.suppresses_moves:
+                weight = self._weight
+                if self._in_flight is not None:
+                    weight, reference = move_suppression(
+                        weight, reference, self._du, self._in_flight
+                    )
+                self.solver.cost_set(0, "W", weight)
+            self.solver.cost_set(stage, "yref", reference)
             if stage == 0:
                 # Initial condition: every row, actuator states included, pinned at x0.
                 self.solver.constraints_set(0, "lbx", x0)
@@ -1136,6 +1177,7 @@ class Ocp:
         q_eq: np.ndarray,
         guess: Guess | None = None,
         path: PathCycle | None = None,
+        in_flight=None,
     ) -> Solution:
         """
         One whole RTI step, linearisation and QP together.
@@ -1148,7 +1190,7 @@ class Ocp:
         # A preparation this call overwrites is gone, and must not be consumable
         # by a later `feedback`.
         self._prepared = False
-        warm = self._write_problem(x0, cycle, q_eq, guess)
+        warm = self._write_problem(x0, cycle, q_eq, guess, in_flight)
         if self.split_rti:
             self._set_phase(0)
         status = int(self.solver.solve())
@@ -1163,6 +1205,7 @@ class Ocp:
         q_eq: np.ndarray,
         guess: Guess | None = None,
         path: PathCycle | None = None,
+        in_flight=None,
     ) -> float:
         """
         Everything but the QP, against a **predicted** state, one cycle early.
@@ -1174,7 +1217,7 @@ class Ocp:
         """
         cycle = self._resolved_path(horizon, path)
         x0 = self._checked_x0(x0, horizon, q_eq, cycle)
-        self._prepared_warm = self._write_problem(x0, cycle, q_eq, guess)
+        self._prepared_warm = self._write_problem(x0, cycle, q_eq, guess, in_flight)
         self._set_phase(1)
         self.solver.solve()
         self._prepared = True
@@ -1288,7 +1331,13 @@ class Ocp:
                     solution.states[stage], solution.inputs[stage], parameter
                 )
             ).reshape(-1)
-            row = 0.5 * diagonal * (value - reference) ** 2
+            weight = diagonal
+            if stage == 0 and self._in_flight is not None:
+                weight, reference = move_suppression(
+                    np.diag(diagonal), reference, self._du, self._in_flight
+                )
+                weight = np.diag(weight)
+            row = 0.5 * weight * (value - reference) ** 2
             terms.q_a += float(np.sum(row[problem.Y_PLANNED_POSITION :][:planned]))
             terms.dq_a += float(np.sum(row[problem.Y_PLANNED_VELOCITY :][:planned]))
             terms.q_u += float(np.sum(row[problem.Y_PASSIVE_POSITION :][:passive]))

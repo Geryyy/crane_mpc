@@ -39,6 +39,7 @@ WIDTHS = {
         "dq_a": cs.K_ACTUATED_DOF,
         "tau_a": cs.K_ACTUATED_DOF,
         "u": cs.K_ACTUATED_DOF,
+        "du": cs.K_ACTUATED_DOF,
         "q_u": cs.K_PASSIVE_DOF,
         "dq_u": cs.K_PASSIVE_DOF,
     },
@@ -74,6 +75,7 @@ WEIGHTS = (
     "dq_u",
     "tau_a",
     "u",
+    "du",
     "lag",
     "tool",
     "progress",
@@ -262,7 +264,7 @@ def check_settings(parameters: dict, hydraulics: dict) -> None:
     _refuse(
         _offender(
             weights,
-            ("q_a", "dq_a", "q_u", "dq_u", "tau_a", "u", "lag", "progress_accel"),
+            ("q_a", "dq_a", "q_u", "dq_u", "tau_a", "u", "du", "lag", "progress_accel"),
             _non_negative,
         ),
         "every weight of `mpc` §2 must be finite and non-negative: the Gauss-Newton "

@@ -109,6 +109,20 @@ crane_mpc:
       # `u` is a velocity here; progress_rate below is derived against this
       # 1.0 -- the two move together or not at all (issue 137).
       u: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+      # Stage-0 move cost against the command in flight (issue 121, cheap
+      # variant). Faithful JTC chain, 30 ms latency, --goal out | --random 1
+      # --seed 1; flips of dU sign over the first 40 cycles, rms dU, max err:
+      #
+      #   du    dU flips      rms dU          err mrad    peak tilt sway
+      #    0    40 | 36 %   .063 | .065    0.64 | 0.12    .149 | .138
+      #   10    18 | 21 %   .062 | .056    0.75 | 0.12    .147 | .138
+      #   30    17 | 17 %   .076 | .049    0.72 | 0.12    .131 | .136
+      #  100    26 | 26 %   .071 | .058    1.03 | 0.16    .114 | .115
+      #
+      # 30+ splits the start kick over two cycles and then overshoots (+0.64
+      # rad/s on slewing), so 10. It damps the flip, it does not remove the
+      # kick: first u0 on slewing -0.73 -> -0.67. That wants C4.
+      du: [10.0, 10.0, 10.0, 10.0, 10.0, 10.0]
       # `lag`: tracking error on the reference's direction of travel, slewing
       # axis only. Marc's ratio was against q_a's 4.0 and no longer holds -- the
       # q_a raise above deliberately left this alone, which is what was measured.
