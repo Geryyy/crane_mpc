@@ -1,7 +1,7 @@
 """
 Is the chain off, or is it hunting? Two numbers, because those are two faults.
 
-`sim_chain.tracking_report` scores where the tool ended up. That cannot tell
+A final-error score says where the tool ended up. That cannot tell
 "arrived 11 mrad off" -- which is what a `p = 0` rung does, and is expected --
 from "arrived oscillating", which is a chain about to break a crane. One scalar
 covering both would rank the harmless one as the worse. This is the second

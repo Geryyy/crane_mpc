@@ -19,9 +19,7 @@ The node is Python and the solver is generated C:
 | `crane_mpc/problem.py` | the OCP itself, as an `AcadosOcp` |
 | `crane_mpc/hunting.py` | is the chain off, or oscillating? The two scores, kept apart |
 | `scripts/export_ocp.py` | **run this first**: the same problem generated, compiled and recorded |
-| `scripts/bench_ocp.py` | a corpus of sampled moves, and what the solver did on each cycle |
-| `scripts/sweep_ocp.py` | `bench_ocp.py` once per acados variant, tabled |
-| `scripts/sweep_mismatch.py` | `sim_chain.py` once per application delay, PI rung and plant sample, one CSV row each |
+| `scripts/trials/wire_chain.py` | the node's `Cycle` offline, through the published horizon, the JTC's playback and MuJoCo; `sweep_robust.py` sweeps it over plant samples |
 
 `problem.py` is imported by both the node and the exporter, so the solver a
 deployment runs and the tree that is checked in are one definition of the
@@ -119,10 +117,10 @@ The description is baked into a generated solver, so an artifact is one
 machine's, and the PZS100 is the machine that has to run; there is no tool
 selection anywhere in this package.
 
-The offline harnesses are the one exception to "never build at startup":
-`mpc_a2b.py` and `sim_chain.py` export on demand, into a directory named for the
+The offline harness is the one exception to "never build at startup":
+`scripts/trials/wire_chain.py` exports on demand, into a directory named for the
 problem, through the same `ox.export`. A sweep walks configurations no
-deliberate export could have anticipated — `sweep_ocp.py` visits one per acados
+deliberate export could have anticipated — a compiled `--set` or an acados
 variant — so a hand-run export per variant would make it unusable. The node has
 no such path.
 
@@ -228,8 +226,7 @@ Issue 129 measured the shipped configuration at a **13.7 ms median against the
 rather than every cycle. (An older 70–80 ms figure predates issue 116's model and
 integrator.) **Every timing on this container is worthless without the load
 average** — the same binary measured 34.89 ms median at load 4.0 and 13.05 ms at
-load 1.8, which is why `scripts/sweep_grid.py` prints the load beside every
-number. The budget is not widened to hide a measurement.
+load 1.8, so a timing is quoted with its load. The budget is not widened to hide a measurement.
 
 **4. Expose the residuals.** The per-constraint violation and the per-term cost
 go out on a stream, because they are the only way to tell a tuning problem from a
@@ -652,18 +649,12 @@ applied last, so a swept setting beats anything set above it, and it enters
 `.so` and read as a null result**, which is how a sweep measures the baseline
 once per variant.
 
-    ./scripts/bench_ocp.py --moves 25            # one corpus, one solver
-    ./scripts/sweep_ocp.py --moves 25            # the corpus once per variant
-    CRANE_MPC_OCP_OPTIONS='{"hpipm_mode":"SPEED"}' ./scripts/bench_ocp.py
+    CRANE_MPC_OCP_OPTIONS='{"hpipm_mode":"SPEED"}' ./scripts/trials/wire_chain.py \
+        --goal out --json build/speed.json      # solve_time_s: p50, p90, max
 
-The corpus draws both endpoints uniformly from the control-safe box, insets
-10 % of each span (sampled onto a bound, a move is about the bound), and sizes
-each move so the reference's **peak** rate reaches `--speed-fraction` of the
-binding axis' control-safe speed. Peak, not average: a minimum-jerk quintic
-peaks at 15/8 of its average, so sizing on the average would put every sample
-1.875x over constraint 2 and the whole corpus would measure the fallback path.
-
-At the shipped 0.6, `--moves 25` / 6252 cycles is the baseline every variant is
+The numbers below are from `bench_ocp.py`, retired in issue 181: it ran its own
+cycle against a model-matched plant over a corpus of joint-space moves sized to
+0.6 of the binding axis' speed. At that 0.6, `--moves 25` / 6252 cycles is the baseline every variant is
 read against: no cycle refused, none fell back, none over `solve_budget`, one
 over `Ts`. `qp_iter` **5 median, 11 at p90**, 28 max. Solve 5.06 ms median, of
 which the QP is 2.43 ms and linearisation 1.47 ms.
@@ -715,9 +706,8 @@ box, and the one-minute load average both runs recorded (5.1, 5.3) does not
 explain the gap. `wall_s` is not comparable between rows at all, since a cold
 variant pays for a compile.
 
-Nothing has been swept on this OCP yet; `scripts/sweep_grid.py` remains the
-oracle for the `Ts` x `horizon_length` grid, which is a different question and
-is answered in [config/crane_mpc.yaml](config/crane_mpc.yaml).
+The `Ts` x `horizon_length` grid is a different question and is answered in
+[config/crane_mpc.yaml](config/crane_mpc.yaml).
 
 ## Dependency resolution
 

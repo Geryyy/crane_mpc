@@ -11,6 +11,7 @@ instability, and a detector that flags it cannot tell the two apart.
 from __future__ import annotations
 
 import numpy as np
+
 from crane_mpc.hunting import hunting_report
 
 CYCLES = 120
@@ -26,7 +27,7 @@ def _run(command, dq):
     return u, rate
 
 
-#: The run's last second, as `sim_chain.hunting_score` computes it at Ts = 60 ms.
+#: The run's last second at Ts = 60 ms.
 SETTLED = CYCLES - 16
 
 

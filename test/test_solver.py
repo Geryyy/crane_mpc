@@ -11,6 +11,7 @@ from ament_index_python.packages import get_package_share_directory
 from conftest import export_for
 from crane_model import hydraulic_limits
 from crane_model import symbolic as cs
+
 from crane_mpc import problem
 from crane_mpc.config import machine_limits
 from crane_mpc.horizon import Grid, Knots, resample
@@ -325,7 +326,7 @@ def test_a_non_finite_input_never_reaches_a_solve(ocp, state):
 
 def test_a_swept_acados_setting_moves_the_export_key(parameters, monkeypatch):
     """
-    The one thing `scripts/sweep_ocp.py` rests on.
+    The one thing a variant sweep rests on.
 
     Every setting in `SOLVER_TUNING` is compiled into the `.so`, so a variant
     the key does not see opens its predecessor's solver and measures the

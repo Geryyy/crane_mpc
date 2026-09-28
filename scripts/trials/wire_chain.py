@@ -2,19 +2,18 @@
 """
 The node's own `Cycle`, closed through the wire: horizon message -> JTC -> MuJoCo.
 
-`sim_chain.py` and `closedloop.py` hand `u` to the plant as a zero-order hold,
-so neither sees the horizon encoding, the JTC's interpolation, its one-tick
-feedforward lookahead, delivery latency or the cadence phase -- the five
-faults behind the 2026-09-25 Gazebo divergence (issue 171). This runs
-`Cycle` in the node's order, writes each horizon with `hz.horizon_to_message`
-and plays it as `trajectory.cpp` does into sim_chain's velocity loop, C3
-actuator and MuJoCo plant. Nothing is published.
+Runs `Cycle` in the node's order, writes each horizon with
+`hz.horizon_to_message` and plays it as `trajectory.cpp` does into the velocity
+loop, C3 actuator and MuJoCo plant of `harness.py`: horizon encoding, JTC
+interpolation, its one-tick feedforward lookahead, delivery latency and cadence
+phase included -- the five faults behind the 2026-09-25 Gazebo divergence
+(issue 171). Nothing is published.
 
     ./scripts/trials/wire_chain.py --goal out --latency 0.02
     ./scripts/trials/wire_chain.py --goal out --wire 161         # must diverge
     ./scripts/trials/wire_chain.py --goal out --cadence-phase 0.03  # must diverge
 
-Unknown flags go to sim_chain / mpc_a2b (plant mismatch included). Exit 1 on
+Plan, plant mismatch and solver flags are `harness.add_arguments`'. Exit 1 on
 divergence or hunting (`crane_mpc.hunting`: u0 reversing on half the cycles).
 
 Levers: `--set weights.du=30 --set dq_a_feedback=false` overrides crane_mpc.yaml
@@ -30,34 +29,25 @@ the JTC's tolerance checks, goal handling and angle wraparound are skipped.
 """
 
 import argparse
-import dataclasses
 import json
 import sys
 from pathlib import Path
 
+import harness
 import numpy as np
-import yaml
+from builtin_interfaces.msg import Time
+from crane_model.mismatch import perturb_fit
+from crane_model.model import Payload
+from crane_model.mujoco_plant import MujocoPlant
+from crane_model.symbolic import PAYLOAD_MOUNT_LINK
+from growth import growth
+from harness import ACTUATED, PASSIVE, PLANNED, cs, tune_planner
+from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-import sim_chain  # noqa: E402
-from builtin_interfaces.msg import Time  # noqa: E402
-from crane_model.model import Payload  # noqa: E402
-from crane_model.symbolic import PAYLOAD_MOUNT_LINK  # noqa: E402
-from crane_mpc import cycle as cy  # noqa: E402
-from crane_mpc import horizon as hz  # noqa: E402
-from crane_mpc.hunting import REVERSAL_FRACTION, reversal_fraction  # noqa: E402
-from growth import growth  # noqa: E402
-from sim_chain import (  # noqa: E402
-    ACTUATED_INDICES,
-    PASSIVE_INDICES,
-    PLANNED,
-    cs,
-    mpc_a2b,
-    tune_planner,
-)
-from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint  # noqa: E402
+from crane_mpc import cycle as cy
+from crane_mpc import horizon as hz
+from crane_mpc.hunting import REVERSAL_FRACTION, reversal_fraction
 
-PASSIVE = list(PASSIVE_INDICES)
 ROTATOR = 4
 #: ros2_control yaml `topic_timeout`: past it the JTC holds position.
 TOPIC_TIMEOUT = 0.18
@@ -123,21 +113,6 @@ def stamp_of(seconds):
     return Time(sec=ns // 1_000_000_000, nanosec=ns % 1_000_000_000)
 
 
-def override(parameters, assignment):
-    """Apply one `--set key.path=value` to the loaded parameters."""
-    key, _, text = assignment.partition("=")
-    *path, leaf = key.split(".")
-    node = parameters
-    for part in path:
-        node = node[part]
-    if leaf not in node:
-        raise SystemExit(f"--set {key}: no such parameter")
-    value = yaml.safe_load(text)
-    if isinstance(node[leaf], list) and not isinstance(value, list):
-        value = [value] * len(node[leaf])
-    node[leaf] = value
-
-
 def carry_payload(plant, mass, com):
     """Put a point mass on MuJoCo's payload mount, where the OCP's sits."""
     if not mass:
@@ -185,45 +160,32 @@ def main(argv=None) -> int:
         "once-anchored grid did",
     )
     parser.add_argument(
-        "--pi-scale", type=float, default=1.0, help="multiply the JTC's p, i, d"
-    )
-    parser.add_argument(
-        "--set", action="append", default=[], metavar="KEY=VALUE", help="yaml lever"
-    )
-    parser.add_argument(
         "--plant-payload", type=float, default=None, help="kg; default --payload-mass"
     )
     parser.add_argument("--json", type=Path, default=None, help="scores")
-    mine, rest = parser.parse_known_args(sys.argv[1:] if argv is None else argv)
-    options, forwarded = sim_chain.arguments(rest)
-    mpc = mpc_a2b.parse_arguments(forwarded)
+    harness.add_arguments(parser)
+    options = parser.parse_args(argv)
 
     description = tune_planner.plan_example.description()
     planner = tune_planner.Planner(
         description, tune_planner.plan_example.configure(options)
     )
-    parameters, hydraulics = mpc_a2b.load_settings(mpc)
-    xml = (
-        mpc_a2b.export_ocp.DEFAULT_DESCRIPTIONS / mpc_a2b.export_ocp.DESCRIPTION
-    ).read_text()
-    shipped = sim_chain.ocp_runtime.export_key(parameters, hydraulics, xml)
-    for assignment in mine.set:
-        override(parameters, assignment)
-    moved = sim_chain.ocp_runtime.export_key(parameters, hydraulics, xml)
-    moved = [key for key in shipped if moved[key] != shipped[key]]
-    if moved:
-        print(f"warning: --set moves compiled {moved}; re-exports", file=sys.stderr)
-    plant_fit, damping_scale = sim_chain.perturb_fit(
+    parameters, hydraulics = harness.settings(options.set)
+    plant_fit, damping_scale = perturb_fit(
         k=options.k_scale, d=options.d_scale, lag_shift_s=options.lag_shift
     )
-    ocp, model, _ = mpc_a2b.create_solver(mpc, parameters, hydraulics)
+    ocp = harness.create_solver(
+        parameters, hydraulics, options.rebuild, options.verbose_build
+    )
     # Offline wall time is not the machine's; `--latency` stands for it.
     ocp.solve_budget_s = 10.0
-    ocp.set_payload(mpc.payload_mass, mpc.payload_com)
-    plant = sim_chain.MujocoPlant(description, timestep=options.timestep)
-    carried = mpc.payload_mass if mine.plant_payload is None else mine.plant_payload
-    carry_payload(plant, carried, mpc.payload_com)
-    payload = Payload(carried, np.asarray(mpc.payload_com, float), valid=True)
+    ocp.set_payload(options.payload_mass, options.payload_com)
+    plant = MujocoPlant(description, timestep=options.timestep)
+    carried = (
+        options.payload_mass if options.plant_payload is None else options.plant_payload
+    )
+    carry_payload(plant, carried, options.payload_com)
+    payload = Payload(carried, np.asarray(options.payload_com, float), valid=True)
 
     def equilibrium(q_a):
         return planner.model.passive_equilibrium(q_a, payload)
@@ -231,21 +193,10 @@ def main(argv=None) -> int:
     plant.scale_planned_damping(damping_scale)
     start = tune_planner.start_of(planner, options.resettle_start)
     rng = None if options.random is None else np.random.default_rng(options.seed)
-    plan = sim_chain.plan_move(planner, start, options, rng)
+    plan = harness.plan_move(planner, start, options, rng)
     if plan is None:
         return 2
-    path = sim_chain.planned_path(plan)
-    chain = sim_chain.Chain(plant, model, start.q_tool, options, fit=plant_fit)
-    chain.loop = type(chain.loop)(
-        [
-            dataclasses.replace(
-                a, p=a.p * mine.pi_scale, i=a.i * mine.pi_scale, d=a.d * mine.pi_scale
-            )
-            for a in chain.loop.gains
-        ],
-        chain.step_s,
-        continuous=chain.wrap,
-    )
+    chain = harness.Chain(plant, start.q_tool, options, fit=plant_fit)
 
     Ts, N = float(parameters["Ts"]), int(parameters["horizon_length"])
     delay = float(parameters["sensor_to_valve_delay"])
@@ -259,18 +210,18 @@ def main(argv=None) -> int:
         plan.dq_a,
     )
     cycle.adopt_reference(reference, epoch_ns)
-    cycle.adopt_path(path.control, plan.duration, epoch_ns)
-    if mine.cadence_phase:
+    cycle.adopt_path(harness.path_control(plan), plan.duration, epoch_ns)
+    if options.cadence_phase:
         anchor = cycle.anchor_cadence
-        phase_ns = int(round(mine.cadence_phase * 1e9))
+        phase_ns = int(round(options.cadence_phase * 1e9))
         cycle.anchor_cadence = lambda ns: anchor(ns + phase_ns)
 
     q0 = plan.q[0].copy()
-    q0[PASSIVE] = equilibrium(q0[list(ACTUATED_INDICES)])
+    q0[PASSIVE] = equilibrium(q0[ACTUATED])
     x_init = np.zeros(cs.NX)
     x_init[: cs.K_PLANNED_DOF] = q0[PLANNED]
     x_init[cs.X_PASSIVE_POSITION : cs.X_PASSIVE_POSITION + 2] = q0[PASSIVE]
-    chain._seed(x_init)
+    chain.seed(x_init)
 
     joints = [f"j{i}" for i in range(cs.K_GENERALIZED_DOF)]
     h, ff = chain.step_s, chain.ff_scale
@@ -283,7 +234,7 @@ def main(argv=None) -> int:
     events = {"silence": 0, "handback": 0}
     log = []
     solve_times = []
-    seconds = mine.seconds or float(plan.duration) + 5.0
+    seconds = options.seconds or float(plan.duration) + 5.0
     diverged = False
     for k in range(int(round(seconds / Ts))):
         now_ns = epoch_ns + k * int(round(Ts * 1e9))
@@ -297,8 +248,8 @@ def main(argv=None) -> int:
         if silence is None:
             silence = cycle.read_state(
                 cy.Measurement(
-                    q[list(ACTUATED_INDICES)],
-                    dq[list(ACTUATED_INDICES)],
+                    q[ACTUATED],
+                    dq[ACTUATED],
                     q[PASSIVE],
                     dq[PASSIVE],
                     0.0,
@@ -334,7 +285,7 @@ def main(argv=None) -> int:
                 stamp = stamp_of(
                     (cycle.next_first_knot_ns - cycle.command_delay * 1e9) / 1e9
                 )
-                if mine.wire == "161":
+                if options.wire == "161":
                     message = wire_161(
                         cycle.horizon, joints, stamp, delay, cycle.last_horizon
                     )
@@ -349,7 +300,7 @@ def main(argv=None) -> int:
                         in_flight_u=cycle.in_flight_command(),
                         linear=cycle.command_state,
                     )
-                flight.append((clock + mine.latency, message))
+                flight.append((clock + options.latency, message))
                 u0 = cycle.horizon.u[0, : cs.K_PLANNED_DOF].copy()
                 cycle.advance(
                     solution,
@@ -383,7 +334,7 @@ def main(argv=None) -> int:
             clock += h
 
         q, dq = plant.q, plant.dq
-        sway = q[PASSIVE] - equilibrium(q[list(ACTUATED_INDICES)])
+        sway = q[PASSIVE] - equilibrium(q[ACTUATED])
         status = -1 if solution is None else solution.status
         log.append(
             [
@@ -409,8 +360,8 @@ def main(argv=None) -> int:
     u0 = log[:, -nq:]
     u0 = u0[np.all(np.isfinite(u0), axis=1)]
     print(
-        f"wire {mine.wire}, latency {1e3 * mine.latency:.0f} ms, "
-        f"cadence phase {1e3 * mine.cadence_phase:.0f} ms, {len(log)} cycles\n"
+        f"wire {options.wire}, latency {1e3 * options.latency:.0f} ms, "
+        f"cadence phase {1e3 * options.cadence_phase:.0f} ms, {len(log)} cycles\n"
         f"  final error      {np.abs(log[-1, 2 : 2 + nq] - plan.q[-1, PLANNED]).max():.4f}\n"
         f"  sway peak        {np.round(np.abs(sway).max(axis=0), 3)} rad\n"
         f"  sway last 3 s    {np.round(np.abs(late).max(axis=0), 3)} rad\n"
@@ -420,11 +371,11 @@ def main(argv=None) -> int:
         f"  u0 reversals     {np.round(reversal_fraction(u0), 3)}\n"
         f"  silence/handback {events['silence']}/{events['handback']}"
     )
-    if mine.csv:
+    if options.csv:
         names = ["t", "origin"] + [f"q{i}" for i in range(nq)] + ["sway0", "sway1"]
         names += [f"dq{i}" for i in range(nq)] + ["dq_u0", "dq_u1", "status"]
         names += [f"u0_{i}" for i in range(nq)]
-        np.savetxt(mine.csv, log, delimiter=",", header=",".join(names), comments="")
+        np.savetxt(options.csv, log, delimiter=",", header=",".join(names), comments="")
     # A joint past its command clamp is out of Psi's domain: a hunting run at 1/3
     # reversals (PI x4, issue 173) passed the reversal gate alone.
     dq = log[:, 2 + nq + 2 : 2 + 2 * nq + 2]
@@ -439,7 +390,7 @@ def main(argv=None) -> int:
         )
         if bad
     ]
-    if mine.json:
+    if options.json:
         rate, _ = growth(log[:, 0], np.abs(sway).max(axis=1))
         scores = {
             "exit": reason[0] if reason else "ok",
@@ -464,9 +415,9 @@ def main(argv=None) -> int:
                 else []
             ),
         }
-        mine.json.write_text(json.dumps(scores, indent=1))
+        options.json.write_text(json.dumps(scores, indent=1))
     return 1 if reason else 0
 
 
 if __name__ == "__main__":
-    sys.exit(sim_chain.leave(main()))
+    sys.exit(main())

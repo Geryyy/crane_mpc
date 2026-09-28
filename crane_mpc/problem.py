@@ -46,7 +46,7 @@ def chamber_forces(model, relief_pa: float, actuated_dof: int) -> tuple:
 # --- the acados backend, and the one place it is written down -----------------
 #
 # Every setting that is compiled into the solver and is a choice rather than a
-# consequence. `scripts/sweep_ocp.py` layers a variant over this through
+# consequence. A variant layers over this through
 # `CRANE_MPC_OCP_OPTIONS`, and `solver.solver_signature` hashes the result --
 # without that a variant opens its predecessor's `.so` and reads as a null
 # result, which is how a sweep measures the baseline 33 times.

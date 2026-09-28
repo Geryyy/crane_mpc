@@ -83,10 +83,9 @@ from crane_mpc.problem import (  # noqa: E402
     DESCRIPTION,
     TOOL,
     build_ocp,
-    shooting_intervals,  # noqa: F401  -- re-exported for scripts/mpc_a2b.py
 )
 
-# default description location, shared with scripts/mpc_a2b.py
+# default description location, shared with scripts/trials/harness.py
 DEFAULT_DESCRIPTIONS = ox.default_descriptions(PACKAGE)
 
 # --- the C3 fit, and the places it lives --------------------------------------

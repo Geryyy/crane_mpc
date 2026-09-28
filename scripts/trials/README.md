@@ -5,19 +5,16 @@ gives 145.5, 1010.0 and 3288.3 mrad, because the end state of an exponentially
 growing mode depends on *when* it saturates. Three "fixes" were accepted and
 then withdrawn on that metric. Score on the growth rate instead.
 
-- `closedloop.py` — the node's feedback loop offline, no ROS, no Gazebo, the
-  OCP's own model as the plant. Seconds per arm, deterministic. Run this first:
-  it separates a fault in the loop from a plant/model mismatch.
 - `wire_chain.py --goal out [--latency S]` — the node's `Cycle` closed through
   the published `JointTrajectory` and a `trajectory.cpp` playback (cubic pos/vel,
-  linear effort, PI at the tick, feedforward a tick later) into MuJoCo: the wire
-  the two above skip (issue 171). Stable at 0/20/40 ms. Regression check, each
-  must exit 1: `--wire 161` (old encoding, hunts) and `--cadence-phase 0.02`
+  linear effort, PI at the tick, feedforward a tick later) into MuJoCo (issue
+  171); settings, solver, plan and plant are `harness.py`'s. Deterministic: a
+  repeat matches to the digit except `solve_time_s`. Stable at 0/20/40 ms.
+  Regression check, each must exit 1: `--wire 161` (old encoding, hunts) and `--cadence-phase 0.02`
   (once-anchored grid, diverges). ~10 s a run; a script, not a pytest, because
   the test session exports its own solver.
-- `nulltest.py` — the OCP alone, at rest, asked to hold. Seed the passive pair
-  from `passive_equilibrium`, or the solver is indicted for the seed's own
-  1.57 rad error.
+- `sweep_robust.py` — `wire_chain` over moves x plant samples x levers; the worst
+  cell per setting.
 - `trial.sh <outdir>` — one live arm: tear down by PID, launch headless,
   activate `trajectory_controller_a2b`, call `/a2b_movement`, capture.
   `CTRL=pid MOVE=<script>` swaps the arm. ~3 min.
