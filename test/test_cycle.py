@@ -6,6 +6,8 @@ that hands control back, and the shift that keeps driving on a solve that
 did not converge.
 """
 
+from types import SimpleNamespace
+
 import numpy as np
 import pytest
 from crane_model import symbolic as cs
@@ -14,7 +16,10 @@ from crane_mpc import reports
 from crane_mpc.cycle import (
     HORIZON_TOPIC,
     JOINT_PATH_TOPIC,
+    Bounds,
     Cycle,
+    Timing,
+    Verdict,
     carry_actuated_velocity,
     watch_progress,
 )
@@ -25,11 +30,12 @@ from rclpy.time import Time
 
 KNOTS = 5
 Ts = 0.04
+BOUNDS = Bounds(1.0, 0.5, 0.2, 3, 0.1, 2.0)
 
 
 def cycle(mode="active"):
     # `delay == Ts` is the one timing invariant `config.check_settings` enforces.
-    made = Cycle(Ts, hz.Grid(Ts, KNOTS), mode, Ts)
+    made = Cycle(Timing(Ts, Ts), hz.Grid(Ts, KNOTS), mode)
     made.horizon = hz.Knots.zeros(KNOTS)
     return made
 
@@ -786,6 +792,102 @@ def test_the_dead_time_replays_what_the_jtc_output_and_not_what_was_sent():
     assert np.allclose(dead_time[0][: cs.K_PLANNED_DOF], 0.5)
     assert np.allclose(dead_time[0][cs.K_PLANNED_DOF :], 0.0)
     assert np.allclose(published[0], 0.3)
+
+
+ORDER = (
+    "gates",
+    "read_state",
+    "adopt_follower",
+    "propagate",
+    "solve",
+    "ladder",
+    "publish",
+    "advance",
+    "prepare_next",
+)
+
+
+def test_step_runs_the_one_order_both_callers_used_to_copy():
+    """
+    The node and `wire_chain` each carried this order and had drifted apart.
+
+    `publish` before `advance` is the load-bearing pair: `advance` moves the
+    progress and the cadence anchor the *next* cycle resamples on, so a horizon
+    written after it is stamped for a cycle that has already been charged.
+    `adopt_follower` is the call `wire_chain`'s copy had dropped.
+    """
+    one = cycle()
+    one.ocp = SimpleNamespace(solve_budget_s=1.0, parameters={"limits": {"u_max": []}})
+    said = []
+    answer = solution(Outcome.CONVERGED)
+    returns = {
+        "gates": None,
+        "read_state": None,
+        "adopt_follower": None,
+        "propagate": None,
+        "solve": (answer, ""),
+        "ladder": Verdict("published", published=True),
+        "advance": None,
+        "prepare_next": None,
+    }
+    for name, value in returns.items():
+        setattr(one, name, lambda *_, n=name, v=value, **__: (said.append(n), v)[1])
+
+    step = one.step(0, 0, None, BOUNDS, publish=lambda: said.append("publish"))
+
+    assert said == list(ORDER)
+    assert step.verdict.published and step.solution is answer
+
+
+def test_a_solver_exception_without_a_message_is_still_a_refusal():
+    """`str(AssertionError())` is `""`, which used to read as "no refusal"."""
+    one = cycle()
+    one.ocp = SimpleNamespace(solve_budget_s=1.0, parameters={"limits": {"u_max": []}})
+    for name in ("gates", "read_state", "adopt_follower", "propagate"):
+        setattr(one, name, lambda *_, **__: None)
+    one.solve = lambda *_, **__: (None, "")
+
+    step = one.step(0, 0, None, BOUNDS)
+
+    assert step.refusal and step.verdict is None
+
+
+def test_the_two_silent_fallbacks_are_said_once_per_episode():
+    """
+    Both read from outside like the healthy case, which is why they are said.
+
+    Once and not per cycle: at 25 Hz a repeat is a log nobody reads, and the
+    conditions that raise them last for runs, not cycles. Once per *episode*
+    and not once per process: the first episode of the missing JTC output is
+    the cold start, and latching on it would spend the line before the machine
+    has moved.
+    """
+    said = []
+    ticking = Timing(Ts, Ts, jtc_period=0.01, say=said.append)
+    now = 1_000_000_000
+
+    assert ticking.measured_ns(now, now + 5_000_000) == now
+    assert ticking.measured_ns(now, now + 9_000_000) == now
+    assert ticking.measured_ns(now, now - 5_000_000) == now - 5_000_000
+    assert ticking.measured_ns(now, None) == now
+    assert len(said) == 1 and "ahead of this" in said[0]
+
+    # One of the four ticks a 0.04 s cycle expects: not the interval's mean.
+    ticking.record_output(now, np.zeros(cs.K_PLANNED_DOF))
+    assert ticking.jtc_output(now + int(Ts * 1e9)) is None
+    assert ticking.jtc_output(now + int(Ts * 1e9)) is None
+    assert len(said) == 2 and "half a cycle's ticks" in said[1]
+
+    for tick in range(1, 4):
+        ticking.record_output(now + tick * 10_000_000, np.full(cs.K_PLANNED_DOF, 2.0))
+    mean = ticking.jtc_output(now + int(Ts * 1e9))
+    assert mean == pytest.approx(np.full(cs.K_PLANNED_DOF, 1.5))
+    assert len(said) == 2
+
+    # Re-armed by the healthy cycle above: the next episode is said again.
+    assert ticking.jtc_output(now + int(5 * Ts * 1e9)) is None
+    assert ticking.measured_ns(now, now + 5_000_000) == now
+    assert len(said) == 4
 
 
 # -- C4: the command a state, `u` its rate ----------------------------------------

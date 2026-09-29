@@ -7,14 +7,11 @@ stays in the OCP's own `x` end to end, never rebuilt at a crossing.
 
 from __future__ import annotations
 
-from collections import deque
-
 import numpy as np
 import rclpy
 from action_msgs.msg import GoalStatus, GoalStatusArray
 from control_msgs.msg import JointTrajectoryControllerState
 from crane_model import CraneModel, Payload, Tool, canonical_joints, hydraulic_limits
-from crane_model.velocity_loop import load_velocity_loop
 from crane_msgs.msg import JointPath, SolverHealth, SwaySettled
 from crane_msgs.srv import SetPayload
 from diagnostic_msgs.msg import DiagnosticArray
@@ -36,7 +33,6 @@ from .cycle import (
     HORIZON_TOPIC,
     JOINT_PATH_TOPIC,
     JOINT_STATE_TOPIC,
-    NANOSECONDS,
     PASSIVE_DOF,
     PASSIVE_INDICES,
     PLANNED_DOF,
@@ -48,10 +44,12 @@ from .cycle import (
     SOLVER_HEALTH_TOPIC,
     SWAY_SETTLED_TOPIC,
     TCP_HORIZON_TOPIC,
+    Bounds,
     Cycle,
     FollowerCommand,
     Measurement,
     Silence,
+    Timing,
 )
 from .parameters import crane_mpc as parameter_library
 from .solver import Ocp, path_control
@@ -61,18 +59,6 @@ WARN_PERIOD = 5.0
 #: Seconds (one query each) to wait for the controllers' `update_rate`.
 RATE_QUERIES = 10
 CONTROLLER_MANAGER = "/controller_manager"
-
-
-def jtc_rate_mismatch(assumed_period: float, manager_rate: int, jtc_rate: int) -> str:
-    """Refusal text if the JTC does not tick at `assumed_period`, else `""`."""
-    rate = jtc_rate or manager_rate  # a controller's 0 means the manager's
-    if rate > 0 and abs(1.0 / rate - assumed_period) <= 1e-6:
-        return ""
-    return (
-        f"the JTC ticks at {rate} Hz (update_rate {jtc_rate}, controller_manager "
-        f"{manager_rate}) and the horizon is built for a {assumed_period} s tick "
-        "from velocity_loop.yaml rate_hz; the feed-forward would be sampled off-tick"
-    )
 
 
 class StartGate:
@@ -109,14 +95,15 @@ class RateQuery:
     Ask the controller manager and the JTC for `update_rate`, once.
 
     One query a second for `RATE_QUERIES` s: the controllers come up after this
-    node does. Unanswered, the `velocity_loop.yaml` tick stands unchecked; a
-    mismatch goes to `refuse`, so the node owns the refusal.
+    node does. Unanswered, the `velocity_loop.yaml` tick stands unchecked; the
+    verdict is `Timing.rate_mismatch`' and a mismatch goes to `refuse`, so the
+    tick is one number and the refusal the node's.
     """
 
-    def __init__(self, node: Node, jtc_name: str, period: float, refuse) -> None:
+    def __init__(self, node: Node, jtc_name: str, timing: Timing, refuse) -> None:
         self._node = node
         self._jtc_name = jtc_name
-        self._assumed_period = period
+        self._timing = timing
         self._refuse = refuse
         names = (CONTROLLER_MANAGER, f"/{jtc_name}")
         self._clients = [AsyncParameterClient(node, name) for name in names]
@@ -131,7 +118,7 @@ class RateQuery:
             self._node.get_logger().warn(
                 f"no update_rate from {CONTROLLER_MANAGER} or /{self._jtc_name} in "
                 f"{RATE_QUERIES} s; the JTC is assumed to tick every "
-                f"{self._assumed_period} s (velocity_loop.yaml), unchecked."
+                f"{self._timing.jtc_period} s (velocity_loop.yaml), unchecked."
             )
             return
         for slot, client in enumerate(self._clients):
@@ -150,7 +137,7 @@ class RateQuery:
         if None in self._rates or self._timer.is_canceled():
             return
         self._timer.cancel()
-        why = jtc_rate_mismatch(self._assumed_period, *self._rates)
+        why = self._timing.rate_mismatch(*self._rates)
         if why:
             self._refuse(why)
 
@@ -197,12 +184,17 @@ class MpcNode(Node):
 
         self.Ts = float(self._values.Ts)
         self.grid = hz.Grid(self.Ts, int(self._values.horizon_length))
-        self.delay = float(self._values.sensor_to_valve_delay)
-        self._cycle = Cycle(
+        #: Every instant this node runs on; the cycle reads the same one.
+        self._timing = Timing(
             self.Ts,
+            float(self._values.sensor_to_valve_delay),
+            # Throttled: once per episode still flaps if the condition does.
+            say=self.warn,
+        )
+        self._cycle = Cycle(
+            self._timing,
             self.grid,
             str(self._values.mode),
-            self.delay,
             list(self._values.dq_a_feedback),
             list(self._values.dq_a_divergence_max),
         )
@@ -227,11 +219,6 @@ class MpcNode(Node):
         #: When a passive *velocity* (not pose) was last written; settled verdict ages against this.
         self._passive_velocity_stamp: Time | None = None
 
-        #: The JTC's tick; it samples feedforward one tick ahead (`hz._command_message`).
-        self._jtc_period = 1.0 / load_velocity_loop()[1]
-        #: `(stamp_ns, planned-axis output)` from the JTC, oldest first.
-        self._jtc_outputs: deque = deque(maxlen=64)
-
         self._reference_message: JointTrajectory | None = None
         self._path_message: JointPath | None = None
         self._payload = Payload()
@@ -253,7 +240,7 @@ class MpcNode(Node):
 
         self.get_logger().info(
             f"crane_mpc in {self.mode} mode: {self.grid.horizon_length} knots at "
-            f"{self.Ts} s, {self.delay} s of transport delay, a "
+            f"{self.Ts} s, {self._timing.delay} s of transport delay, a "
             f"{self._values.solve_budget} s budget."
         )
         self.warn_open_loop_axes()
@@ -419,7 +406,7 @@ class MpcNode(Node):
             velocity = np.array([output[row] for row in rows])
             if np.all(np.isfinite(velocity)):
                 stamp = Time.from_msg(message.header.stamp).nanoseconds
-                self._jtc_outputs.append((stamp, velocity))
+                self._timing.record_output(stamp, velocity)
 
     # -- configuration -----------------------------------------------------------
 
@@ -465,7 +452,7 @@ class MpcNode(Node):
         self.adopt_reference()
         self.adopt_path()
         self._rate_query = RateQuery(
-            self, str(self._values.jtc_name), self._jtc_period, self.refuse
+            self, str(self._values.jtc_name), self._timing, self.refuse
         )
 
     def refuse(self, why: str) -> None:
@@ -568,67 +555,50 @@ class MpcNode(Node):
             self.fall_silent(self.ungated())
             return
 
-        # The sample's own instant, not the tick: it lags 0-10 ms plus transport.
         stamp = self._actuated_stamp
-        measured = now if stamp is None else min(stamp.nanoseconds, now)
-        silence = cycle.gates(
-            now,
-            float(self._values.max_clock_skew),
-            float(self._values.max_reference_age),
-            measured,
+        measured = self._timing.measured_ns(
+            now, None if stamp is None else stamp.nanoseconds
         )
-        if silence is None:
-            silence = cycle.read_state(
-                self.measurement(now), float(self._values.max_state_age)
-            )
-        if silence is None:
-            # u^+ is crane_model's, resolved when the problem was posed -- not a
-            # parameter, so the only copy is the one the solver was configured on
-            cycle.adopt_follower(
-                self.follower_command(now), self._ocp.parameters["limits"]["u_max"]
-            )
-            cycle.jtc_output = (
-                self.jtc_output(measured) if self.mode == "active" else None
-            )
-            silence = cycle.propagate()
-        if silence is not None:
-            self.fall_silent(silence)
+        step = cycle.step(
+            now,
+            measured,
+            self.measurement(now),
+            self.bounds(),
+            follower=self.follower_command(now),
+            latency=lambda: (self.get_clock().now().nanoseconds - measured) / 1e9,
+            publish=self.publish_horizon,
+        )
+        if step.silence is not None:
+            # `step` already fell silent; this only says so.
+            self.warn(step.silence.warning)
             return
         self.say_path_source()
         self.warn_divergence()
 
-        solution, refusal = cycle.solve(
-            lambda: (self.get_clock().now().nanoseconds - measured) / 1e9
-        )
-        if refusal:
-            self.report(None, refusal)
-            self.warn(f"The OCP refused its arguments: {refusal}.")
+        if step.refusal:
+            self.report(None, step.refusal)
+            self.warn(f"The OCP refused its arguments: {step.refusal}.")
             return
 
-        verdict = cycle.ladder(
-            solution,
-            int(self._values.max_consecutive_failures),
-            float(self._ocp.solve_budget_s),
-        )
+        verdict = step.verdict
         if not verdict.published:
-            self.report(solution, verdict.text)
+            self.report(step.solution, verdict.text)
             self.complain(verdict)
             return
-
         self.complain(verdict)
-        self.publish_horizon()
-        was_stalled = cycle.progress_stalled
-        cycle.advance(
-            solution,
-            now,
-            float(self._values.min_progress_rate),
-            float(self._values.max_stall_time),
+        self.report(step.solution, self.say_stalled(verdict.text, step.was_stalled))
+
+    def bounds(self) -> Bounds:
+        """Read this cycle's gate parameters, once."""
+        values = self._values
+        return Bounds(
+            float(values.max_clock_skew),
+            float(values.max_reference_age),
+            float(values.max_state_age),
+            int(values.max_consecutive_failures),
+            float(values.min_progress_rate),
+            float(values.max_stall_time),
         )
-        # After `advance`, which moves the progress and the cadence anchor the
-        # next cycle resamples on; and after the horizon went out, so the
-        # linearisation runs in the part of the cycle nobody is waiting on.
-        cycle.prepare_next(solution)
-        self.report(solution, self.say_stalled(verdict.text, was_stalled))
 
     def say_stalled(self, text: str, was_stalled: bool) -> str:
         """Add the stall to the verdict, and say it once on the transition."""
@@ -699,19 +669,6 @@ class MpcNode(Node):
             age(self._passive_stamp),
         )
 
-    def jtc_output(self, measured_ns: int):
-        """
-        Mean JTC output over `[measured - Ts, measured)`, or `None`.
-
-        What the plant runs over the dead time, PI included. `None` below half
-        the expected ticks.
-        """
-        start = measured_ns - int(self.Ts * NANOSECONDS)
-        window = [v for t, v in self._jtc_outputs if start <= t < measured_ns]
-        if len(window) < 0.5 * self.Ts / self._jtc_period:
-            return None
-        return np.mean(window, axis=0)
-
     def follower_command(self, now_ns: int) -> FollowerCommand:
         """Read what the velocity controller is doing; only shadow mode compares."""
         return reports.follower_command(
@@ -728,16 +685,15 @@ class MpcNode(Node):
     # -- what goes out -----------------------------------------------------------
 
     def publish_horizon(self) -> None:
-        cycle = self._cycle
+        cycle, timing = self._cycle, self._timing
         # Stamped at the measurement instant; knot 0 is due `command_delay` later.
         # See `hz.horizon_to_message`.
-        lead_ns = int(cycle.command_delay * NANOSECONDS)
         message = hz.horizon_to_message(
             cycle.horizon,
             self._canonical_joints,
-            Time(nanoseconds=cycle.next_first_knot_ns - lead_ns).to_msg(),
-            lead=cycle.delay,
-            period=self._jtc_period,
+            Time(nanoseconds=timing.stamp_ns()).to_msg(),
+            lead=timing.delay,
+            period=timing.jtc_period,
             in_flight=cycle.last_horizon,
             in_flight_u=cycle.in_flight_command(),
             linear=cycle.command_state,

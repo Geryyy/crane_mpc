@@ -1,18 +1,21 @@
 """
 One MPC cycle, without ROS.
 
-`node.update()` calls into this: silence gates, cadence anchor, state carried
-solve to solve, the repeated-failure ladder. Nanosecond ints, not
-`rclpy.time.Time`, keep it testable without a node. Wire names live here, not
-in `node.py`, because refusals quote them and `reports.py` reuses them.
+`Cycle.step` owns the call order; `node.update()` and `scripts/trials/wire_chain`
+both run it rather than each copying it. `Timing` owns every instant that order
+turns on. Nanosecond ints, not `rclpy.time.Time`, keep it testable without a
+node. Wire names live here, not in `node.py`, because refusals quote them and
+`reports.py` reuses them.
 """
 
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import dataclass, field, replace
 
 import numpy as np
 from crane_model import symbolic as cs
+from crane_model.velocity_loop import load_velocity_loop
 
 from . import bspline, problem
 from . import horizon as hz
@@ -43,6 +46,136 @@ TOOL_AXIS = cs.K_TOOL_AXIS
 
 NANOSECONDS = 1_000_000_000
 
+#: JTC outputs kept at least, whatever the tick: several cycles' worth at 100 Hz.
+OUTPUT_HISTORY = 64
+
+
+class Timing:
+    """
+    Every instant one cycle runs on, in one place.
+
+    The dead time knot 0 is due after, the cadence anchor a horizon is stamped
+    from, the JTC's own output over that dead time, the tick the JTC is assumed
+    to run at, and whether a solve came back late. `Cycle` holds one of these
+    and the node reads it rather than keeping a second copy -- split over the
+    two files, the copies drifted.
+
+    `say` is called once per episode of each silent fallback -- re-armed when
+    that fallback stops happening, so a cold start does not spend the line for
+    the run. Both of them read from outside exactly like the healthy case,
+    which is why they are said at all.
+    """
+
+    def __init__(self, Ts: float, delay: float, jtc_period=None, say=None) -> None:
+        self.Ts = float(Ts)
+        self.delay = float(delay)
+        #: A solve started at `now` drives from the next cycle on, so its result may
+        #: arrive any time inside `Ts`: until then the JTC plays the command
+        #: published last cycle, and the predictor replays exactly that. Without it
+        #: the first `solve latency` of every interval ran a command nobody
+        #: predicted -- 10 ms of it diverges the loop.
+        self.command_delay = self.delay + self.Ts
+        self.command_delay_ns = int(self.command_delay * NANOSECONDS)
+        #: The JTC's tick; it samples feedforward one tick ahead (`hz._command_message`).
+        self.jtc_period = (
+            1.0 / load_velocity_loop()[1] if jtc_period is None else float(jtc_period)
+        )
+        #: When knot 0 of the horizon this cycle builds takes effect.
+        self.next_first_knot_ns = 0
+        # `(stamp_ns, planned-axis output)` from the JTC, oldest first. Two cycles
+        # of ticks at least, or a fast tick (a trial's `--control-rate`) would
+        # push the far end of the dead-time window out before it is averaged.
+        ticks = max(1, round(self.Ts / self.jtc_period))
+        self._outputs: deque = deque(maxlen=max(OUTPUT_HISTORY, 2 * ticks))
+        self._say, self._said = say, set()
+
+    # -- the cadence -------------------------------------------------------------
+
+    def measured_ns(self, now_ns: int, stamp_ns: int | None) -> int:
+        """
+        Give the instant to anchor on: the sample's own, not the tick's.
+
+        The sample lags the tick by 0-10 ms plus transport. A stamp in this
+        node's future is another clock, not a prediction, so it is clamped back
+        to `now` -- and said, because a clamped stamp reads like a timely one.
+        """
+        if stamp_ns is None:
+            return now_ns
+        if stamp_ns > now_ns:
+            self._once(
+                "future stamp",
+                f"a state stamp is {(stamp_ns - now_ns) / 1e9:.3f} s ahead of this "
+                f"node's clock on {JOINT_STATE_TOPIC} and is clamped to it, so the "
+                "cadence anchors on the tick instead of the sample.",
+            )
+            return now_ns
+        self._said.discard("future stamp")
+        return stamp_ns
+
+    def anchor(self, measured_ns: int) -> None:
+        """
+        Knot 0 takes effect `command_delay` after this cycle's measurement.
+
+        Re-anchored every cycle, not once and advanced by `Ts`: the timer ticks on
+        its own grid, so a once-anchored stamp sat a fixed 0-60 ms off the real
+        measurement instant, random per run, against ~10 ms of timing margin.
+        """
+        self.next_first_knot_ns = measured_ns + self.command_delay_ns
+
+    def stamp_ns(self) -> int:
+        """Give what a horizon is stamped: the measurement knot 0 counts from."""
+        return self.next_first_knot_ns - self.command_delay_ns
+
+    # -- what the JTC did --------------------------------------------------------
+
+    def record_output(self, stamp_ns: int, velocity) -> None:
+        self._outputs.append((int(stamp_ns), np.asarray(velocity, dtype=float)))
+
+    def jtc_output(self, measured_ns: int):
+        """
+        Mean JTC output over `[measured - Ts, measured)`, or `None`.
+
+        What the plant ran over the dead time, PI included -- the command that
+        was sent carries none of it. `None` below half the expected ticks: two
+        samples of ten are not the interval's mean.
+        """
+        start = measured_ns - int(self.Ts * NANOSECONDS)
+        window = [v for t, v in self._outputs if start <= t < measured_ns]
+        if len(window) < 0.5 * self.Ts / self.jtc_period:
+            self._once(
+                "no jtc output",
+                f"fewer than half a cycle's ticks arrived on {CONTROLLER_STATE_TOPIC}, "
+                "so the dead time replays the command that was sent instead of the "
+                "JTC's own output -- which carries the PI term and the command does not.",
+            )
+            return None
+        self._said.discard("no jtc output")
+        return np.mean(window, axis=0)
+
+    # -- what the controllers promise --------------------------------------------
+
+    def rate_mismatch(self, manager_rate: int, jtc_rate: int) -> str:
+        """Refusal text if the JTC does not tick at `jtc_period`, else `""`."""
+        rate = jtc_rate or manager_rate  # a controller's 0 means the manager's
+        if rate > 0 and abs(1.0 / rate - self.jtc_period) <= 1e-6:
+            return ""
+        return (
+            f"the JTC ticks at {rate} Hz (update_rate {jtc_rate}, controller_manager "
+            f"{manager_rate}) and the horizon is built for a {self.jtc_period} s tick "
+            "from velocity_loop.yaml rate_hz; the feed-forward would be sampled off-tick"
+        )
+
+    def late(self, latency_s, budget_s: float) -> bool:
+        """End-to-end from the measurement, not acados' own `solve_time`."""
+        return latency_s is not None and float(latency_s) > float(budget_s)
+
+    def _once(self, key: str, message: str) -> None:
+        """Say this fallback once per episode; the healthy branch re-arms `key`."""
+        if self._say is None or key in self._said:
+            return
+        self._said.add(key)
+        self._say(message)
+
 
 @dataclass(frozen=True)
 class Silence:
@@ -60,6 +193,30 @@ class Verdict:
     published: bool
     #: `""`, `"warn"` or `"error"` -- how loudly `text` is logged.
     severity: str = ""
+
+
+@dataclass(frozen=True)
+class Bounds:
+    """One read of the gate parameters, for the cycle that is about to run."""
+
+    max_clock_skew: float
+    max_reference_age: float
+    max_state_age: float
+    max_consecutive_failures: int
+    min_progress_rate: float
+    max_stall_time: float
+
+
+@dataclass
+class Step:
+    """What one `Cycle.step` did: the first thing that stopped it, or the verdict."""
+
+    silence: Silence | None = None
+    solution: object = None
+    refusal: str = ""
+    verdict: Verdict | None = None
+    #: Whether the plan was already stalled before `advance` folded this cycle in.
+    was_stalled: bool = False
 
 
 @dataclass
@@ -163,23 +320,15 @@ class Cycle:
 
     def __init__(
         self,
-        Ts: float,
+        timing: Timing,
         grid: hz.Grid,
         mode: str,
-        delay: float,
         dq_a_feedback=None,
         dq_a_divergence_max=None,
     ) -> None:
-        self.Ts = Ts
+        self.timing = timing
         self.grid = grid
         self.mode = mode
-        self.delay = delay
-        #: A solve started at `now` drives from the next cycle on, so its result may
-        #: arrive any time inside `Ts`: until then the JTC plays the command
-        #: published last cycle, and the predictor replays exactly that. Without it
-        #: the first `solve latency` of every interval ran a command nobody
-        #: predicted -- 10 ms of it diverges the loop.
-        self.command_delay = delay + Ts
         #: `x` rolled to the next measurement instant; the next cycle's C3 rows.
         self.x_next = None
         #: Per axis, whether x_0's velocity is measured or model-carried.
@@ -213,7 +362,6 @@ class Cycle:
         self.progress_stalled = False
         self.progress_mark_ns = 0
         self.progress_marked = False
-        self.next_first_knot_ns = 0
 
         self.horizon: hz.Knots | None = None
         self.last_horizon: hz.Knots | None = None
@@ -266,6 +414,12 @@ class Cycle:
         self.follower = FollowerCommand()
         self.shadow_command = np.zeros(ACTUATED_DOF)
         self.shadow_command_valid = False
+
+    # `Timing`'s, read through here: `reports` and the node's publisher want one
+    # of these per cycle and there is only one place it can be right.
+    Ts = property(lambda self: self.timing.Ts)
+    command_delay = property(lambda self: self.timing.command_delay)
+    next_first_knot_ns = property(lambda self: self.timing.next_first_knot_ns)
 
     @property
     def command_state(self) -> bool:
@@ -345,6 +499,78 @@ class Cycle:
                 self.last_start = self.last_input[:PLANNED_DOF].copy()
                 self.last_input = np.zeros(cs.NU_PROGRESS)
 
+    # -- one cycle, in order -----------------------------------------------------
+
+    def step(
+        self,
+        now_ns: int,
+        measured_ns: int,
+        measurement: Measurement,
+        bounds: Bounds,
+        follower: FollowerCommand | None = None,
+        latency=None,
+        publish=None,
+    ) -> Step:
+        """
+        Run the whole cycle, in the one order it may be run in.
+
+        Gates, state, follower, the dead-time roll, the solve, the ladder,
+        `publish()`, then `advance` and the next cycle's preparation. Every
+        caller runs this rather than copying the order: the copy in
+        `wire_chain` had already drifted -- its own `jtc_output` rule and no
+        `adopt_follower` at all.
+
+        `begin()` stays the caller's: it marks cycles this never reaches, the
+        ones a node refuses before it is configured. A gate silences the cycle
+        here, so the caller only reports the `Silence` it gets back.
+        """
+        silence = self.gates(
+            now_ns, bounds.max_clock_skew, bounds.max_reference_age, measured_ns
+        )
+        if silence is None:
+            silence = self.read_state(measurement, bounds.max_state_age)
+        if silence is None:
+            # u^+ is crane_model's, resolved when the problem was posed -- not a
+            # parameter, so the only copy is the one the solver was configured on.
+            self.adopt_follower(
+                follower if follower is not None else FollowerCommand(),
+                self.ocp.parameters["limits"]["u_max"],
+            )
+            # In shadow this node drives nothing, so the JTC's output is another
+            # commander's and may not stand in for what ours put in flight.
+            self.jtc_output = (
+                self.timing.jtc_output(measured_ns) if self.mode == "active" else None
+            )
+            silence = self.propagate()
+        if silence is not None:
+            self.stay_silent(silence.why)
+            return Step(silence=silence)
+
+        solution, refusal = self.solve(latency)
+        if solution is None:
+            # On the refusal `solve` has already fallen silent. Tested on the
+            # solution and not on `refusal`: `str(AssertionError())` is `""`,
+            # and a falsy refusal used to carry `None` into `ladder` and take
+            # the node's timer callback down with it.
+            return Step(refusal=refusal or "the OCP raised without a message")
+
+        verdict = self.ladder(
+            solution, bounds.max_consecutive_failures, self.ocp.solve_budget_s
+        )
+        done = Step(
+            solution=solution, verdict=verdict, was_stalled=self.progress_stalled
+        )
+        if not verdict.published:
+            return done
+        if publish is not None:
+            publish()
+        self.advance(solution, now_ns, bounds.min_progress_rate, bounds.max_stall_time)
+        # After `advance`, which moves the progress and the cadence anchor the next
+        # cycle resamples on; and after the horizon went out, so the linearisation
+        # runs in the part of the cycle nobody is waiting on.
+        self.prepare_next(solution)
+        return done
+
     # -- the gates ---------------------------------------------------------------
 
     def gates(
@@ -388,7 +614,7 @@ class Cycle:
                 f"on {HORIZON_TOPIC}.",
             )
 
-        self.anchor_cadence(now_ns if measured_ns is None else measured_ns)
+        self.timing.anchor(now_ns if measured_ns is None else measured_ns)
         if not self.reference_anchored:
             # Skipping the planning latency is what a time-indexed reference wants:
             # the plan is that old, so its first seconds are past. A path-following
@@ -468,16 +694,6 @@ class Cycle:
         # The window fit spans one horizon, which is what `nominal_progress_rate`
         # inverts -- so this is the same number, read off the grid.
         return self.grid.duration()
-
-    def anchor_cadence(self, measured_ns: int) -> None:
-        """
-        Knot 0 takes effect `command_delay` after this cycle's measurement.
-
-        Re-anchored every cycle, not once and advanced by `Ts`: the timer ticks on
-        its own grid, so a once-anchored stamp sat a fixed 0-60 ms off the real
-        measurement instant, random per run, against ~10 ms of timing margin.
-        """
-        self.next_first_knot_ns = measured_ns + int(self.command_delay * NANOSECONDS)
 
     def read_state(self, measurement: Measurement, max_state_age: float):
         """
@@ -640,10 +856,8 @@ class Cycle:
 
         self.solves += 1
         self.latency_s = None if latency is None else float(latency())
-        if (
-            solution.outcome is Outcome.CONVERGED
-            and self.latency_s is not None
-            and self.latency_s > self.ocp.solve_budget_s
+        if solution.outcome is Outcome.CONVERGED and self.timing.late(
+            self.latency_s, self.ocp.solve_budget_s
         ):
             solution = replace(solution, outcome=Outcome.BUDGET_EXCEEDED)
         self.guess = (
@@ -742,7 +956,7 @@ class Cycle:
                 published=True,
             )
 
-        late = self.latency_s is not None and self.latency_s > solve_budget_s
+        late = self.timing.late(self.latency_s, solve_budget_s)
         spent = (
             f"{round(1000 * self.latency_s)} ms end-to-end from the measurement, a "
             "late cycle,"

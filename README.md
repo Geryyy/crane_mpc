@@ -11,7 +11,7 @@ The node is Python and the solver is generated C:
 | file | what it is |
 |---|---|
 | `crane_mpc/node.py` | the ROS adapter: parameters, subscriptions, publishers, the service, the timer |
-| `crane_mpc/cycle.py` | one cycle without ROS: the silence gates, the cadence anchor, the fallback ladder |
+| `crane_mpc/cycle.py` | one cycle without ROS: `Cycle.step`'s call order, the silence gates, `Timing`, the fallback ladder |
 | `crane_mpc/reports.py` | what the cycle says about itself, as messages: health, the shadow comparison, the TCP path |
 | `crane_mpc/config.py` | the parameters shaped as the problem reads them, and what it refuses to start on |
 | `crane_mpc/solver.py` | the solver wrapper: what is written before a solve and read after, the dead-time predictor and the static hold force |
@@ -150,6 +150,21 @@ even a valid estimate measures a load rather than stating that one was picked
 up, which is the tree's to say.
 
 ## Timing and command
+
+Every instant a cycle runs on is `cycle.Timing`'s, and there is one of them:
+`command_delay`, the cadence anchor a horizon is stamped from, the mean JTC
+output over the dead time, the tick the JTC is checked against
+(`RateQuery` asks the controller manager and `Timing.rate_mismatch` judges) and
+whether a solve came back late. `Cycle` holds it and `node.py` reads the same
+one. The order those are used in is `Cycle.step`, which the node and
+`scripts/trials/wire_chain.py` both call rather than each writing out — as two
+copies they had already drifted apart (issue 186).
+
+Two fallbacks inside it are silent by construction and so are logged once:
+`/crane/controller_state` not carrying half a cycle's ticks, which makes the
+dead time replay the command that was sent instead of the JTC's own output; and
+a `/joint_states` stamp ahead of this node's clock, which is clamped back to the
+tick.
 
 `T_s` and the horizon length have one parameter source. The shipped grid is 80
 knots at 60 ms (79 shooting intervals, 4.74 s from first to last knot). The

@@ -2,9 +2,9 @@
 """
 The node's own `Cycle`, closed through the wire: horizon message -> JTC -> MuJoCo.
 
-Runs `Cycle` in the node's order, writes each horizon with
-`hz.horizon_to_message` and plays it as `trajectory.cpp` does into the velocity
-loop, C3 actuator and MuJoCo plant of `harness.py`: horizon encoding, JTC
+Runs `Cycle.step` -- the node's own call order, not a copy of it -- writes each
+horizon with `hz.horizon_to_message` and plays it as `trajectory.cpp` does into
+the velocity loop, C3 actuator and MuJoCo plant of `harness.py`: horizon encoding, JTC
 interpolation, its one-tick feedforward lookahead, delivery latency and cadence
 phase included -- the five faults behind the 2026-09-25 Gazebo divergence
 (issue 171). Nothing is published.
@@ -264,8 +264,17 @@ def fly(options, parameters, ocp, chain, equilibrium, plan, coast):
     plant = chain.plant
     Ts, N = float(parameters["Ts"]), int(parameters["horizon_length"])
     delay = float(parameters["sensor_to_valve_delay"])
-    cycle = cy.Cycle(Ts, hz.Grid(Ts, N), "active", delay, parameters["dq_a_feedback"])
+    timing = cy.Timing(Ts, delay, jtc_period=chain.step_s)
+    cycle = cy.Cycle(timing, hz.Grid(Ts, N), "active", parameters["dq_a_feedback"])
     cycle.ocp = ocp
+    bounds = cy.Bounds(
+        float(parameters["max_clock_skew"]),
+        float(parameters["max_reference_age"]),
+        float(parameters["max_state_age"]),
+        int(parameters["max_consecutive_failures"]),
+        float(parameters["min_progress_rate"]),
+        float(parameters["max_stall_time"]),
+    )
     epoch_ns = int(EPOCH * 1e9)
     reference = hz.Knots.zeros(len(plan.time))
     reference.t[:], reference.q_a_ref[:], reference.dq_a_ref[:] = (
@@ -276,9 +285,9 @@ def fly(options, parameters, ocp, chain, equilibrium, plan, coast):
     cycle.adopt_reference(reference, epoch_ns)
     cycle.adopt_path(harness.path_control(plan), plan.duration, epoch_ns)
     if options.cadence_phase:
-        anchor = cycle.anchor_cadence
+        anchor = timing.anchor
         phase_ns = int(round(options.cadence_phase * 1e9))
-        cycle.anchor_cadence = lambda ns: anchor(ns + phase_ns)
+        timing.anchor = lambda ns: anchor(ns + phase_ns)
 
     q0 = plan.q[0].copy()
     q0[PASSIVE] = equilibrium(q0[ACTUATED])
@@ -303,83 +312,54 @@ def fly(options, parameters, ocp, chain, equilibrium, plan, coast):
         live = Playback.hold(clock, plant.q[PLANNED])
         last_receipt = clock
         flight = []  # (arrival, message)
-        outputs = []  # JTC output over the last cycle, for `cycle.jtc_output`
+        h_ns = int(round(h * 1e9))
+        u0 = np.full(cs.K_PLANNED_DOF, np.nan)
+
+        def send():
+            """`Cycle.step`'s publisher: encode the horizon and put it on the wire."""
+            nonlocal u0
+            stamp = stamp_of(timing.stamp_ns() / 1e9)
+            if options.wire == "161":
+                message = wire_161(
+                    cycle.horizon, joints, stamp, delay, cycle.last_horizon
+                )
+            else:
+                message = hz.horizon_to_message(
+                    cycle.horizon,
+                    joints,
+                    stamp,
+                    lead=delay,
+                    period=h,
+                    in_flight=cycle.last_horizon,
+                    in_flight_u=cycle.in_flight_command(),
+                    linear=cycle.command_state,
+                )
+            flight.append((clock + options.latency, message))
+            u0 = cycle.horizon.u[0, : cs.K_PLANNED_DOF].copy()
+
         for k in itertools.count():
             now_ns = epoch_ns + k * int(round(Ts * 1e9))
             cycle.begin()
             q, dq = plant.q, plant.dq
-            silence = cycle.gates(
+            u0 = np.full(cs.K_PLANNED_DOF, np.nan)
+            # Measurement is exact at the cycle instant here, so it is its own stamp.
+            step = cycle.step(
                 now_ns,
-                float(parameters["max_clock_skew"]),
-                float(parameters["max_reference_age"]),
+                now_ns,
+                cy.Measurement(
+                    q[ACTUATED], dq[ACTUATED], q[PASSIVE], dq[PASSIVE], 0.0, 0.0
+                ),
+                bounds,
+                publish=send,
             )
-            if silence is None:
-                silence = cycle.read_state(
-                    cy.Measurement(
-                        q[ACTUATED],
-                        dq[ACTUATED],
-                        q[PASSIVE],
-                        dq[PASSIVE],
-                        0.0,
-                        0.0,
-                    ),
-                    float(parameters["max_state_age"]),
-                )
-            if silence is None:
-                cycle.jtc_output = (
-                    np.mean(outputs, axis=0) if len(outputs) == ticks else None
-                )
-                silence = cycle.propagate()
-            solution, u0 = None, np.full(cs.K_PLANNED_DOF, np.nan)
-            if silence is not None:
-                cycle.stay_silent(silence.why)
+            if step.solution is not None:
+                solve_times.append(step.solution.solve_time_s)
+            if step.silence is not None:
                 events["silence"] += 1
-            else:
-                solution, refusal = cycle.solve()
-                if solution is not None:
-                    solve_times.append(solution.solve_time_s)
-                verdict = (
-                    None
-                    if refusal
-                    else cycle.ladder(
-                        solution,
-                        int(parameters["max_consecutive_failures"]),
-                        ocp.solve_budget_s,
-                    )
-                )
-                if verdict is None or not verdict.published:
-                    events["handback"] += 1
-                else:
-                    stamp = stamp_of(
-                        (cycle.next_first_knot_ns - cycle.command_delay * 1e9) / 1e9
-                    )
-                    if options.wire == "161":
-                        message = wire_161(
-                            cycle.horizon, joints, stamp, delay, cycle.last_horizon
-                        )
-                    else:
-                        message = hz.horizon_to_message(
-                            cycle.horizon,
-                            joints,
-                            stamp,
-                            lead=delay,
-                            period=h,
-                            in_flight=cycle.last_horizon,
-                            in_flight_u=cycle.in_flight_command(),
-                            linear=cycle.command_state,
-                        )
-                    flight.append((clock + options.latency, message))
-                    u0 = cycle.horizon.u[0, : cs.K_PLANNED_DOF].copy()
-                    cycle.advance(
-                        solution,
-                        now_ns,
-                        float(parameters["min_progress_rate"]),
-                        float(parameters["max_stall_time"]),
-                    )
-                    cycle.prepare_next(solution)
+            elif step.verdict is None or not step.verdict.published:
+                events["handback"] += 1
 
-            outputs = []
-            for _ in range(ticks):
+            for tick in range(ticks):
                 # JTC update: take the newest arrived message, then sample at t and t + h.
                 while flight and flight[0][0] <= clock + 1e-9:
                     live = Playback(
@@ -397,10 +377,13 @@ def fly(options, parameters, ocp, chain, equilibrium, plan, coast):
                     plant.dq[PLANNED],
                     feedforward=ff * (dq_next - dq_ref) + effort_next,
                 )
-                outputs.append(command)
+                # Stamped off `now_ns`, not the float `clock`: these are the ticks
+                # `Timing.jtc_output` averages over `[measured - Ts, measured)` next
+                # cycle, and an accumulated float would drop the one on the edge.
+                timing.record_output(now_ns + tick * h_ns, command)
                 plant.drive(chain.actuator, chain.psi.apply(command), h)
                 clock += h
-            yield solution, u0
+            yield step.solution, u0
 
     run = cycles()
     for k, (solution, u0) in zip(range(scored), run):

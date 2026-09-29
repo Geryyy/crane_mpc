@@ -14,7 +14,8 @@ from control_msgs.msg import JointTrajectoryControllerState
 from crane_model import canonical_joints, hydraulic_limits
 from crane_model import symbolic as cs
 from crane_mpc import config, problem
-from crane_mpc.node import MpcNode, StartGate, jtc_rate_mismatch
+from crane_mpc.cycle import Timing
+from crane_mpc.node import MpcNode, StartGate
 from crane_msgs.msg import JointPath, SolverHealth
 from rcl_interfaces.msg import ParameterValue
 from rcl_interfaces.srv import GetParameters
@@ -468,9 +469,10 @@ def rate(value):
 
 
 def test_a_jtc_off_the_assumed_tick_is_refused(node):
-    assert jtc_rate_mismatch(0.01, 100, 0) == ""  # 0: the manager's rate
-    assert jtc_rate_mismatch(0.01, 50, 100) == ""
-    assert jtc_rate_mismatch(0.01, 100, 20)
+    ticking = Timing(0.04, 0.04, jtc_period=0.01)
+    assert ticking.rate_mismatch(100, 0) == ""  # 0: the manager's rate
+    assert ticking.rate_mismatch(50, 100) == ""
+    assert ticking.rate_mismatch(100, 20)
     configured(node)
     node._rate_query.on_rate(0, rate(100))
     node._rate_query.on_rate(1, rate(20))
