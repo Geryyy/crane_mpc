@@ -6,11 +6,12 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 import rclpy
+import yaml
 from action_msgs.msg import GoalStatus, GoalStatusArray
 from builtin_interfaces.msg import Duration
-from conftest import export_for
+from conftest import export_for, shipped_config, shipped_init_args
 from control_msgs.msg import JointTrajectoryControllerState
-from crane_model import canonical_joints
+from crane_model import canonical_joints, hydraulic_limits
 from crane_model import symbolic as cs
 from crane_mpc import config, problem
 from crane_mpc.node import MpcNode, jtc_rate_mismatch
@@ -37,7 +38,7 @@ PASSIVE_POSE = [0.5 * math.pi - POSE[1] - POSE[2], 0.5 * math.pi]
 
 @pytest.fixture(scope="module")
 def context():
-    rclpy.init()
+    rclpy.init(args=shipped_init_args())
     yield
     rclpy.shutdown()
 
@@ -45,14 +46,15 @@ def context():
 @pytest.fixture
 def node(context, export_base):
     node = MpcNode()
-    # The node builds its `Ocp` inside `configure`, from its declared parameters
-    # rather than from `config/crane_mpc.yaml` -- a different configuration from
-    # the one the shipped export carries, so it needs its own. Done here and not
-    # in `configured` because several tests hand a description over themselves.
+    # Every assertion below is on the configuration the repo ships: the
+    # declaration carries no defaults, so `context` hands the node
+    # `config/crane_mpc.yaml` and there is no second controller to run. The
+    # export is built here and not in `configured` because several tests hand a
+    # description over themselves.
     export_for(
         export_base,
         config.parameter_dict(node._values),
-        config.hydraulics_dict(node._values),
+        hydraulic_limits(),
         problem.default_description().read_text(),
     )
     # Budget overrun is tested separately, not left to decide every other assertion.
@@ -107,6 +109,23 @@ def configured(node):
     node.on_reference(reference(node))
     node.on_joint_state(joint_state(node))
     return node
+
+
+def test_the_node_runs_on_the_shipped_values(node):
+    """
+    Not on a declaration default, because there are none (issue 183).
+
+    Without this every assertion below could be measuring a controller that
+    never ships -- which is what they did while the two yamls disagreed on
+    `q_a`, `dq_u`, `du`, `tool`, `progress`, `terminal_scale` and `command_state`.
+    """
+    shipped = yaml.safe_load(shipped_config().read_text())["crane_mpc"][
+        "ros__parameters"
+    ]
+    assert node.Ts == shipped["Ts"]
+    assert node.grid.horizon_length == shipped["horizon_length"]
+    assert node._values.command_state == shipped["command_state"]
+    assert list(node._values.weights.q_a) == shipped["weights"]["q_a"]
 
 
 def test_without_a_description_nothing_is_published(node):

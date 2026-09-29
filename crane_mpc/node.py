@@ -14,7 +14,7 @@ import numpy as np
 import rclpy
 from action_msgs.msg import GoalStatus, GoalStatusArray
 from control_msgs.msg import JointTrajectoryControllerState
-from crane_model import CraneModel, Payload, Tool, canonical_joints
+from crane_model import CraneModel, Payload, Tool, canonical_joints, hydraulic_limits
 from crane_model.velocity_loop import load_velocity_loop
 from crane_msgs.msg import JointPath, PayloadEstimate, SolverHealth, SwaySettled
 from crane_msgs.srv import SetPayload
@@ -180,11 +180,6 @@ class MpcNode(Node):
         self._create_subscriptions()
         self.create_timer(self.Ts, self.update)
 
-        if abs(1.0 / self.Ts - 1.0 / 0.04) > 1e-9:
-            self.get_logger().warn(
-                f"Ts is {self.Ts} s, so this node publishes at {1.0 / self.Ts:.1f} Hz "
-                "and ros2_interfaces §4 fixes /crane/mpc/horizon at 25 Hz."
-            )
         self.get_logger().info(
             f"crane_mpc in {self.mode} mode: {self.grid.horizon_length} knots at "
             f"{self.Ts} s, {self.delay} s of transport delay, a "
@@ -405,7 +400,7 @@ class MpcNode(Node):
             self._ocp = Ocp(
                 problem.default_description().read_text(),
                 config.parameter_dict(self._values),
-                config.hydraulics_dict(self._values),
+                hydraulic_limits(),
             )
         except Exception as error:  # the description decides whether this node runs
             self._configuration_failure = str(error)

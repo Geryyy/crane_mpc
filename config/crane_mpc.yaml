@@ -1,240 +1,101 @@
-# Default MPC configuration.
+# The MPC's values, and the only place they live: `crane_mpc_parameters.yaml`
+# carries type, validation and one line of description, no defaults. A key left
+# out here is a startup refusal naming it, not a silent default (issue 183).
+#
+# Every number's provenance -- the sweeps, the measured tables -- is in the notes
+# of the issue that picked it: 119, 121, 137, 156, 174.
 crane_mpc:
   ros__parameters:
     mode: shadow
+    # Empty is no gate: /crane/reference arriving is the go signal. The launch
+    # passes its own argument over this.
+    start_signal_action: ""
+    jtc_name: trajectory_controller_a2b
 
-    # Coarser than the former 0.04/50, for cost: 17 ms median/29.8 ms max vs a
-    # 30 ms budget -- no margin, overruns under sim load. 0.06/40 (measured,
-    # scripts/mpc_a2b.py): 12.8/25.0 ms, tracks better (error 0.358 vs 0.420,
-    # sway 0.157 vs 0.161). 0.10/25 rejected: cheaper (7.3 ms) but 21% more
-    # error, 17% more sway, QP iteration cap cold.
-    # Nothing downstream samples the grid (JTC interpolates via PID). But
-    # 80*0.06=4.74s must cover the ~2s sway period and 2s fault-tolerance
-    # budget (old 1.96s missed both), and Ts must equal sensor_to_valve_delay
-    # below -- `config.check_settings` refuses anything else, because the state
-    # carried into the next cycle has to stand at that cycle's measurement
-    # instant and only a whole stage can be picked. It must also be a whole
-    # number of velocity_loop.yaml ticks. So lookahead can only be bought in
-    # knots, not in a coarser grid.
-    #
-    # 40 -> 80 once the tool row was in, 20 moves on two seeds:
-    #
-    #   knots   goal worst (avg)   goal median (avg)   solve median
-    #      40        222 mm              27 mm            5.4 ms
-    #      60         92 mm              29 mm            8.8 ms
-    #      80         79 mm              24 mm           12.1 ms
-    #
-    # Worst-case arrival is what moves, and it is 2.8x. 12.1 ms leaves 5x to
-    # the 60 ms budget; the old note that sim load costs 2-4x still leaves the
-    # median inside it, and `solve_budget` catches the tail.
-    # Publishes at 16.7 Hz vs a 25 Hz target; unresolved, own issue.
+    # 80 * 0.06 = 4.8 s covers the ~2 s sway period and the 2 s fault-tolerance
+    # budget. Ts must equal sensor_to_valve_delay and be a whole number of
+    # velocity_loop.yaml ticks, so lookahead is bought in knots, not in a
+    # coarser grid. Publishes at 16.7 Hz against a 25 Hz interface; own issue.
     Ts: 0.06
     horizon_length: 80
 
-    # Transport dead time, common to all six axes. Modelled here in the
-    # predictor, not in the plant: symbolic.py carries the other blocks with
-    # no delay, so a second one there would double-count it.
+    # Transport dead time, common to all six axes, modelled in the predictor
+    # only -- symbolic.py carries no delay, so a second one double-counts.
     sensor_to_valve_delay: 0.06
     max_state_age: 0.2
     levenberg_marquardt: 1.0e-6
-    # C4: command as a state, `u` its rate (issue 121 follow-up). Offline: removes
-    # the start kick-and-brake at unchanged arrival; envelope sweep 0/75 failed
-    # (C3 2/75). Switch back with `du: 10` for C3.
+    # C4: command a state, `u` its rate. `du: 10` and false is C3.
     command_state: true
 
-    # Which axes take x_0's velocity row from /joint_states; the rest keep the
-    # model's own propagation. Positions and both passive rows are always
-    # measured. Order is the actuated six: slew, boom, arm, telescope, rotator,
-    # tool (the tool row is inert -- pinned, no velocity row in the OCP state).
-    #
-    # Marc's node deploys `velocity_feedback_joints: [0]` -- slewing alone on
-    # measurement, the rest open-loop -- because hydraulic velocity is noisy and
-    # the lag/force states integrate that noise. C3 gives every axis those
-    # states here, not just slewing, so all-true generalizes his design and
-    # carries the noise exposure to every axis with it.
-    #
-    # read_only: flipping mid-move steps that row of x_0 by whatever the two
-    # sources disagree on, and the step propagates into the force and lag
-    # states, the warm start and the command. Set it here, at launch.
+    # Actuated order: slew, boom, arm, telescope, rotator, tool. All-true
+    # generalizes Marc's slewing-only velocity feedback to every axis, which
+    # carries his noise exposure with it -- dq_a_divergence_max watches for it
+    # and reports, a quarter of dq_a_max per axis.
     dq_a_feedback: [true, true, true, true, true, true]
+    dq_a_divergence_max: [0.19, 0.06, 0.08, 0.10, 0.53, 0.13]
 
-    # End-to-end, sample to solved horizon: = Ts, since knot 0 is due
-    # command_delay after the sample. Late -> previous horizon shifted (172).
-    # Live sim: tick to arrival 30 ms median, solve 10 ms median, 44 ms max.
+    # = Ts: knot 0 is due one command delay after the sample. Live sim, tick to
+    # arrival 30 ms median, solve 10 ms median, 44 ms max.
     solve_budget: 0.06
-
+    # 12.5 Hz, the largest decimation not running ahead of a 20 Hz consumer.
     solver_health_decimation: 2
-
+    # 300 ms of fallback horizon against a 4.8 s one.
     max_consecutive_failures: 5
 
     sway:
-      # rad/s per passive row. Four control_recordings bags: still machine
-      # reads 0.0046 rad/s RMS on theta6_tip_joint/theta7_tilt_joint over
-      # 406 s quiescence, max 0.039. Instantaneous verdict.
+      # A still machine reads 0.0046 rad/s RMS, max 0.039, over 406 s of
+      # quiescence in the control_recordings bags.
       dq_u_settled: [0.04, 0.04]
 
     weights:
-      # 10x from 4.0/1.0. At the old row the machine parked ~0.2 rad off the
-      # plan and stayed: tracking was too cheap against the rest of the cost and
-      # nothing integrates a standing error away. No single rival term is to
-      # blame -- u, dq_a, dq_u or progress switched off each leaves 0.47-0.55 on
-      # mpc_a2b's model-matched plant, against 0.504 as shipped. Two levers do
-      # work, this one and terminal_scale 10x; that one costs 6x the solve
-      # (3.6 -> 22 ms median, 3 of 178 cycles over budget), so it is this one.
-      # `--goal out` on the full chain: 0.202 -> 0.068 rad, 0.504 -> 0.082 on
-      # the model-matched plant. Pump peak 0.62 -> 0.85 of the planning limit,
-      # sway within 10%, no QP failure, solve 2.8 -> 3.6 ms median. Not zero and
-      # no weight makes it zero (0.046 at 100x) -- that wants an estimator.
+      # 10x from 4.0/1.0: at the old row the machine parked ~0.2 rad off the
+      # plan and nothing integrates a standing error away. 0.202 -> 0.068 rad
+      # on the full chain. Not zero, and no weight makes it zero -- that wants
+      # an estimator.
       q_a: [40.0, 40.0, 40.0, 40.0, 10.0, 10.0]
       dq_a: [0.4, 0.4, 0.4, 0.4, 0.1, 0.1]
-      # Sway damped by rate alone, deliberately: q_eq frozen at measurement,
-      # so this prices boom+arm travel, not swing. Node's own centre 20.0 is
-      # worse than 0.0 on tracking and sway (issue 137); centre is issue 049's.
+      # Sway damped by rate alone: q_eq is frozen at measurement, so q_u prices
+      # boom+arm travel and not swing. 20.0 measured worse than 0.0 on both.
       q_u: [0.0, 0.0]
-      # 16x from 4.0, which had never moved since this file was written -- while
-      # `q_a` went 4 -> 40, `tool` 0 -> 1000, `progress` 160 -> 20480 and
-      # `terminal_scale` 20 -> 60 around it. Sway was not repriced, so its share
-      # of the cost collapsed and the load was still swinging at the end of the
-      # move. `sim_chain --random 4`, seeds 1 and 2, sway rate over the last
-      # second of the move against the 0.04 rad/s `dq_u_settled` verdict:
-      #
-      #   dq_u   still moving (med)   path rms (med)   goal (med)
-      #    4.0     0.169 | 0.147       41.1 | 37.4     32.9 | 31.0
-      #   64.0     0.041 | 0.037       32.8 | 31.7     13.2 | 31.6
-      #
-      # 4x less residual swing and the path improves with it on both seeds --
-      # the swing was costing the path, not buying anything. Arrival is much
-      # better on seed 1 and a wash on seed 2. No refused cycle either way.
-      # Sway *peak* barely moves (0.18 vs 0.16, 0.20 vs 0.19): this prices the
-      # swinging, not the throw, which is q_u's job and issue 049's.
+      # 16x from 4.0, which had never moved while q_a, tool, progress and
+      # terminal_scale rose around it: 4x less residual swing at the end of the
+      # move and the path improves with it.
       dq_u: [64.0, 64.0]
-      # Priced against h_eff, not zero -- a zero reference prices holding the
-      # machine's own weight.
       tau_a: [1.0e-8, 1.0e-8, 1.0e-8, 1.0e-8, 1.0e-8, 1.0e-8]
-      # `u` is a velocity here; progress_rate below is derived against this
-      # 1.0 -- the two move together or not at all (issue 137).
       u: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
-      # Stage-0 move cost against the command in flight (issue 121, cheap
-      # variant). Faithful JTC chain, 30 ms latency, --goal out | --random 1
-      # --seed 1; flips of dU sign over the first 40 cycles, rms dU, max err:
-      #
-      #   du    dU flips      rms dU          err mrad    peak tilt sway
-      #    0    40 | 36 %   .063 | .065    0.64 | 0.12    .149 | .138
-      #   10    18 | 21 %   .062 | .056    0.75 | 0.12    .147 | .138
-      #   30    17 | 17 %   .076 | .049    0.72 | 0.12    .131 | .136
-      #  100    26 | 26 %   .071 | .058    1.03 | 0.16    .114 | .115
-      #
-      # 30+ splits the start kick over two cycles and then overshoots (+0.64
-      # rad/s on slewing), so 10. It damps the flip, it does not remove the
-      # kick: first u0 on slewing -0.73 -> -0.67. That wants C4.
-      # Under command_state (C4) it prices the rate dc on every stage, units
-      # (rad/s^2)^-2. wire_chain, 3 moves: 0.1 kicks, 1 ramps smoothly at
-      # unchanged arrival, 3 no better. (The table above is C3's stage-0 cost.)
+      # C4's rate cost: 0.1 kicks, 3 is no better.
       du: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
-      # `lag`: tracking error on the reference's direction of travel, slewing
-      # axis only. Marc's ratio was against q_a's 4.0 and no longer holds -- the
-      # q_a raise above deliberately left this alone, which is what was measured.
-      #
-      # `progress` and `progress_rate` are the path-following pair and replaced
-      # the rate regulator that used to sit here at 160: the progress state is
-      # the path parameter now, so the cost says *end up at the end of the path*
-      # and prices the rate toward rest, instead of saying be here at this time.
-      # Regulating the pace is what pushed the horizon off the path, worst at
-      # its tail (400 mm against 230 mm at stage 0, measured).
-      #
-      # Ratio is robocrane's: `weight_theta` equals `weight_pos` there, 10
-      # against 10, not the hundredth an earlier note here claimed. Swept
-      # against `sim_chain --random 5 --seed 1`, which is the only way to see
-      # it -- the trade is arrival against path error, and one move shows
-      # neither:
-      #
-      #   progress   path worst / med rms   goal worst / median   min fraction
-      #          8      514 /  65 mm          5054 / 2589 mm          0.290
-      #         24      666 /  98 mm          5075 /  293 mm          0.619
-      #         40      423 / 105 mm          2231 /  205 mm          0.853
-      #         80      839 / 118 mm           973 /  206 mm          0.965
-      #        240      961 / 123 mm           908 /  207 mm          0.993
-      #
-      # 40 tracks the path better and leaves the hardest move 2.2 m short; the
-      # progress state exists so the machine finishes, so 80 -- every move
-      # reaches 0.965 of its path and the gain saturates above it. Seeds 2 and
-      # 3 agree (goal median 107 and 161 mm, no refused cycle).
+      # Marc's ratio against q_a's 4.0, deliberately left where it was when q_a
+      # rose -- that is what was measured.
       lag: 40.0
-      # Task-space tracking, m. 0.0 is the joint-space-only cost that shipped
-      # before the row existed; swept below.
+      # With the tool row priced at 1000 the pull to the end of the path has to
+      # rise with it: arrival keeps improving to 20480 at flat path error, and
+      # the cost is ~1% refused cycles.
       tool: 1000.0
-      # Answers `tool` above: with the tool row priced at 1000 the optimizer
-      # would rather sit on the path than travel it, so the pull to the end has
-      # to rise with it. Swept at tool 1000 over 20 moves:
-      #
-      #   progress    path rms    goal worst / median
-      #         80      30 mm       1412 /  275 mm
-      #       1280      35 mm        861 /  110 mm
-      #       5120      34 mm        510 /   34 mm
-      #      20480      37 mm        145 /   24 mm   (seed 1)
-      #      20480      43 mm        268 /   31 mm   (seed 2)
-      #
-      # Arrival keeps improving to 20480 and path error is flat across it. The
-      # cost is refused cycles: 1.0% on seed 1, 0.2% on seed 2, against 0 at
-      # 5120 -- watch it if the grid or the box ever changes.
       progress: 20480.0
       progress_rate: 0.1
       progress_accel: 0.01
-      # Scales the whole terminal prefix, progress row included -- which is
-      # what makes the machine arrive. Scaling only the tracking rows was
-      # measured and is far worse (goal median 2533 mm against 262): the
-      # terminal progress weight is the arrival, not a race.
-      #
-      # 20 moves, seeds 1 and 2, `sim_chain --random 10`:
-      #
-      #   terminal   goal median   goal worst   path rms
-      #         10       295 mm      1894 mm     177 mm
-      #         20       196 mm      1468 mm     198 mm
-      #         30       228 mm       972 mm     273 mm
-      #
-      # The brief's target is the endpoint, so goal median picks it: 20, a
-      # third off it for 12% more path error. 30 is the choice if worst-case
-      # arrival ever matters more than typical.
-      # Re-picked once the tool row existed. 20 moves at tool 1000 /
-      # progress 20480, goal median and refused cycles per seed:
-      #
-      #    5    31.4 (0.0%) | 46.1 (0.6%)
-      #   20    23.7 (1.0%) | 30.7 (0.2%)
-      #   60    22.1 (0.6%) | 31.7 (0.1%)
-      #
-      # 20 and 60 are one number within run-to-run noise; 60 refuses less on
-      # both seeds, so 60. Refusals are all ACADOS_MINSTEP and come from the
-      # progress weight's four-order gap over the tracking rows -- acados
-      # refuses `qpscaling_*` under SQP_RTI, and `levenberg_marquardt` large
-      # enough to help destroys tracking (goal median 24 -> 210 mm at 1e-4).
+      # Scales the whole terminal prefix, progress row included -- which is what
+      # makes the machine arrive; scaling the tracking rows alone measured far
+      # worse. 20 and 60 are one number within noise, 60 refuses less.
       terminal_scale: 60.0
 
     limits:
-      # No q_a_lower/q_a_upper/q_a_margin/dq_a_max here: the control-safe box
-      # lives in crane_model/config/control_safe_limits.yaml, which carries the
-      # provenance per number and which crane_planning reads too. Resolved by
-      # `crane_mpc.config.control_safe_box`; writing one here would be the
-      # second copy issue 128 had to repair. No u_max either: constraint 5's
-      # bound is min(Psi's identified domain, dq_a_max), both crane_model's,
-      # derived by `crane_mpc.config.command_domain`.
+      # No q_a_lower/q_a_upper/q_a_margin/dq_a_max/u_max here: crane_model owns
+      # the control-safe box and `config.command_domain` derives u^+ from it.
       q_u_max: [0.2, 0.2]
       dq_u_max: [1.0, 0.5]
-      # `0 <= v_s <= headroom * nominal`. Nominal is one path per plan on the
-      # planner's curve -- `1/duration`, a per-plan number -- and one path per
-      # `(horizon_length - 1) * Ts` on the window fit, 0.211/s at this grid (it
-      # read 0.427 while the horizon was 40 knots). Floor is structural zero: the
-      # plan never runs backwards. 1.5 is 50% catch-up after a slowdown, and stays
-      # 50% if the grid changes, which an absolute rate did not. Note what it is
-      # 50% of on a curve: the plan's *average* pace, so a planner profile peaking
-      # above 1.5x its own average cannot be matched mid-move -- unmeasured, and
-      # `max(plan.timing.speed)/mean` on one real plan settles it.
+      # 50% catch-up on the plan's own average pace, and it stays 50% if the
+      # grid changes. A planner profile peaking above 1.5x its own average
+      # cannot be matched mid-move -- unmeasured.
       progress_rate_headroom: 1.5
       progress_accel_max: 2.0
-      # C4 only: command rate bound, rad/s^2 (m/s^2 sa). Valve slew limit
-      # 0.058/10 ms normalised x end-to-end gain (wiki hydraulics.md 7.2).
+      # Valve slew limit 0.058/10 ms normalised x end-to-end gain per axis.
       du_max: [5.2, 1.7, 1.8, 3.5, 14.0]
 
     slack:
+      # The stage cost runs to order 1e2 at these weights, so 1e3 is the decade
+      # above that makes the penalty exact; force and flow a decade dearer.
       q_u: [1.0e3, 1.0e3]
       dq_u: [1.0e3, 1.0e3]
       cylinder_force: [1.0e4, 1.0e4, 1.0e4, 1.0e4, 1.0e4, 1.0e4]
@@ -242,10 +103,11 @@ crane_mpc:
 
     max_reference_age: 0.5
 
-    # Liveness pair, wall clock (max_reference_age above is plan-time,
-    # optimizer-controlled). 0.1 is a seventh of the lowest legitimate
-    # over-ask measured (issue 119, 0.760 re-measured); 2.0s is one horizon.
+    # Liveness pair, wall clock. 0.1 is a third of the lowest legitimate
+    # over-ask measured; 2.0 s is a horizon spent without moving through the
+    # plan.
     min_progress_rate: 0.1
     max_stall_time: 2.0
 
+    # One T_s, the resolution the whole path is quantised at.
     max_clock_skew: 0.04

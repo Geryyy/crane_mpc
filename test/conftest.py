@@ -7,6 +7,9 @@ rather than quietly compiling one, which is the property under test elsewhere.
 `export_for` is how a fixture says "export this, once per session", keyed by the
 same `export_key` the runtime checks, so two tests on one configuration compile
 it once.
+
+`shipped_init_args` is the other half: the declaration carries no defaults, so a
+node gets its values the one way a deployment does -- the shipped config file.
 """
 
 import os
@@ -14,11 +17,29 @@ from pathlib import Path
 
 import crane_ocp_export as ox
 import pytest
+from ament_index_python.packages import get_package_share_directory
 from crane_mpc import problem
 from crane_mpc import solver as ocp_runtime
 
 #: Configurations already exported this session, by key digest.
 _DONE: set = set()
+
+
+def shipped_config() -> Path:
+    """Locate the installed `config/crane_mpc.yaml`, the only source of the node's values."""
+    return Path(get_package_share_directory("crane_mpc")) / "config" / "crane_mpc.yaml"
+
+
+def shipped_init_args() -> list:
+    """
+    `rclpy.init` arguments that hand every node in the context the shipped values.
+
+    `--params-file`, the way the launch passes it, rather than
+    `parameter_overrides`: the declaration has no defaults, so a test building a
+    node without this gets the same `ParameterUninitializedException` a
+    deployment that forgot the file would.
+    """
+    return ["--ros-args", "--params-file", str(shipped_config())]
 
 
 @pytest.fixture(scope="session")

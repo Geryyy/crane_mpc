@@ -10,9 +10,10 @@ quantity, its value, and why the bound exists.
 
 `parameter_dict` reshapes the generated `Params` object into the plain
 dicts `problem`/`solver` read; a yaml on disk arrives in the same shape.
-`hydraulics_dict`, `control_safe_box` and `command_domain` are where this
-node asks `crane_model` for a number. None of the three is a declared
-parameter, so no deployment can carry a second copy of the machine.
+`control_safe_box` and `command_domain` are where this node asks
+`crane_model` for a number -- neither is a declared parameter, so no
+deployment can carry a second copy of the machine. The hydraulic constants
+are read the same way, straight off `crane_model.hydraulic_limits()`.
 """
 
 from __future__ import annotations
@@ -20,7 +21,6 @@ from __future__ import annotations
 import math
 
 import numpy as np
-from crane_model import hydraulic_limits
 from crane_model import symbolic as cs
 from crane_model.conventions import (
     ACTUATED_INDICES,
@@ -107,7 +107,6 @@ LIMITS = (
     "du_max",
 )
 SLACK = ("q_u", "dq_u", "cylinder_force", "pump_flow")
-HYDRAULICS = ("pump_flow_max", "pump_flow_planning_factor", "system_pressure_pa")
 
 
 class MpcConfigError(ValueError):
@@ -178,22 +177,6 @@ def command_domain(dq_a_max) -> list:
         )
         for axis, index in enumerate(ACTUATED_INDICES)
     ]
-
-
-def hydraulics_dict(values) -> dict:
-    """
-    Resolve the hydraulic constants.
-
-    crane_model owns the numbers; a declared 0.0 means "take its", anything
-    else overrides it for this deployment.
-    """
-    home = hydraulic_limits()
-    declared = values.hydraulics
-    resolved = {}
-    for name in HYDRAULICS:
-        value = float(getattr(declared, name))
-        resolved[name] = home[name] if value == 0.0 else value
-    return resolved
 
 
 def _positive(value: float) -> bool:

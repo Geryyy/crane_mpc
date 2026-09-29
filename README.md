@@ -150,9 +150,9 @@ picked up, which is the tree's to say.
 
 ## Timing and command
 
-`T_s` and the horizon length have one parameter source. The shipped grid is 50
-knots at 40 ms (49 shooting intervals, 1.96 s from first to last knot). The
-default remains a design value based on a sway period of order two seconds; the
+`T_s` and the horizon length have one parameter source. The shipped grid is 80
+knots at 60 ms (79 shooting intervals, 4.74 s from first to last knot). The
+length remains a design value based on a sway period of order two seconds; the
 slowest sway period has never been computed and is not presented as a
 measurement.
 
@@ -353,7 +353,7 @@ it, and a supervisor's action on the escalation is the same as on a standing
 `FAULT_SOLVER` with no horizon arriving.
 
 The stream is decimated to one report per `solver_health_decimation` solves,
-default two—12.5 Hz against the 25 Hz cycle, which is the largest integer
+shipped at two—8.3 Hz against the 16.7 Hz cycle, which is the largest integer
 decimation that does not run ahead of the 20 Hz supervisor that will read it.
 The inner loop does not spend the real-time boundary on messages nobody reads.
 
@@ -363,8 +363,8 @@ a persisting fault falls back to the decimated cadence. The edge and not the
 level, because exempting the level drops the `FAULT_NONE` that ends a fault
 whenever that lands off-cadence — leaving a supervisor holding a fault the node
 has already recovered from — and because under a configuration that overruns
-every cycle it would run the stream permanently at 25 Hz against its stated
-12.5 Hz, spending a stage-residual evaluation per shooting node in the one
+every cycle it would run the stream permanently at the cycle rate against its
+stated half of it, spending a stage-residual evaluation per shooting node in the one
 regime with none to spare.
 
 `outcome` is compared beside `fault`, so a move between a budget overrun and a QP
@@ -511,12 +511,12 @@ part of the way there. That is the mechanism and not a leak.
 
 ### The transition is not this node's to take
 
-`mode` is a parameter with a `one_of<>` of `shadow` and `active`, defaulting to
+`mode` is a parameter with a `one_of<>` of `shadow` and `active`, shipped as
 shadow, and it is one of only three here that are not `read_only`. ROS 2
 Which command path is live is the supervisor's decision alone and the two never
 drive at once, so the supervisor's mode arbitration has to be able to move this
 at runtime — that is **issue 054**. Today no profile sets it, and `crane_bringup`'s launch contract
-asserts the declared default, the shipped value and that the shipped file is the
+asserts the shipped value and that the shipped file is the
 only parameter source either profile hands this node.
 
 Switching in either direction **leaves no latched state**. The warm start, the
@@ -598,18 +598,26 @@ bringup. Arguments are `use_sim_time`, `joint_states_topic` and
 `start_signal_action`; there is no `mode` argument, because leaving shadow is a
 deliberate separate act (issue 146) and not a launch's.
 
-**One configuration file is passed, unconditionally.** The hydraulic constants
-are not in it: they live in `crane_model/config/hydraulics.yaml` and the node
-resolves them off its own `0.0` defaults, so no file here can carry a stale copy.
+**One configuration file is passed, unconditionally**, and it is the node's only
+source of values, so leaving it out is a refusal rather than a default run. The
+hydraulic constants are not in it: they live in
+`crane_model/config/hydraulics.yaml` and the node reads
+`crane_model.hydraulic_limits()`, so no file here can carry a stale copy.
 `test_launch_contract.py` holds that the file is in the list, unconditional, and
 keyed under this node's name.
 
 ## Parameters
 
-Parameters are declared with `generate_parameter_library`; deployment values are
-in [config/crane_mpc.yaml](config/crane_mpc.yaml). The important groups are the
-shared grid (`Ts`, `horizon_length`), measured delay and solve budget, cost
-weights, the five native box limits, and L1 slack prices.
+Parameters are declared with `generate_parameter_library` in
+[crane_mpc_parameters.yaml](crane_mpc_parameters.yaml), which carries **type,
+validation and one line of description and no values at all**; every value is in
+[config/crane_mpc.yaml](config/crane_mpc.yaml) (issue 183). A key that file omits
+is a `ParameterUninitializedException` naming it at startup — the declaration
+cannot quietly run a controller nobody ships, which is the failure issue 137
+found in the weights. `test_parameters_are_declared.py` holds both directions of
+that and the absence of defaults. The important groups are the shared grid (`Ts`,
+`horizon_length`), measured delay and solve budget, cost weights, the five native
+box limits, and L1 slack prices.
 
 All are read-only except `mode`, `solve_budget` and `solver_health_decimation`,
 re-read per cycle through the listener's non-blocking `try_update_params`. The
@@ -632,10 +640,10 @@ planner spent a release certifying poses and speeds this node hard-refuses
 
 | what | where it lives | how it is read |
 |---|---|---|
-| `hydraulics.*` | `crane_model/config/hydraulics.yaml` | declared at `0.0`, which means "take crane_model's"; a non-zero value overrides it for one deployment |
+| `hydraulics.*` | `crane_model/config/hydraulics.yaml` | `crane_model.hydraulic_limits()`; **not declared** — the overrides were deleted in issue 183 because they are in `solver.export_key`, so any non-zero value made the compiled export stale |
 | constraint 1's box and `dq_a_max` | `crane_model/config/control_safe_limits.yaml` | `config.control_safe_box()`; **not declared**, so a deployment cannot carry a second copy |
 | constraint 5's `u^+` | the two tables above | `config.command_domain()`: the smaller of Psi's identified domain (`crane_model/config/velocity_loop.yaml`, `u_clamp_*`) and `dq_a_max`, per axis |
-| `sensor_to_valve_delay` | declared here | pinned by a test to the fit's `dead_time_s`; it is the deployed sensor-to-valve path, which that number only happens to equal |
+| `sensor_to_valve_delay` | written here | pinned by a test to the fit's `dead_time_s`; it is the deployed sensor-to-valve path, which that number only happens to equal |
 
 `crane_planning` intersects its description-read limits with the same box, so
 the two stacks now narrow together or not at all. Rows are keyed there by axis

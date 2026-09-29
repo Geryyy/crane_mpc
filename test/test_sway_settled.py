@@ -10,6 +10,7 @@ import math
 import pytest
 import rclpy
 from builtin_interfaces.msg import Time
+from conftest import shipped_init_args
 from crane_model import canonical_joints
 from crane_model import symbolic as cs
 from crane_mpc import reports
@@ -65,7 +66,7 @@ def test_a_changed_verdict_is_exempt_from_the_decimation():
 
 @pytest.fixture
 def node():
-    rclpy.init()
+    rclpy.init(args=shipped_init_args())
     node = MpcNode()
     node.published = []
     node._settled_publisher.publish = node.published.append

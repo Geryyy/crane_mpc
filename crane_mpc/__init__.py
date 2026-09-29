@@ -4,7 +4,6 @@ from .config import (
     MpcConfigError,
     check_payload,
     check_settings,
-    hydraulics_dict,
     parameter_dict,
 )
 from .cycle import Cycle, FollowerCommand, Measurement, Silence, Verdict
@@ -26,7 +25,6 @@ __all__ = [
     "Verdict",
     "check_payload",
     "check_settings",
-    "hydraulics_dict",
     "parameter_dict",
     "resample",
 ]

@@ -1,13 +1,14 @@
 """
-A shipped key nobody declared is dropped in silence.
+The declaration and the shipped file name the same parameters, exactly once each.
 
-`generate_parameter_library` reads the declaration; `rclpy` discards anything
-that doesn't match it -- no warning, default runs. Issue 137's divergence
-(a declared key with two values) is separate; this is the typo half.
+`generate_parameter_library` reads the declaration; `rclpy` discards a shipped
+key that doesn't match it -- no warning, and before issue 183 a default ran
+instead. Issue 137's divergence (a declared key with a second value) is the same
+failure from the other side, and the declaration carrying no values is what
+closes it.
 """
 
 from pathlib import Path
-from types import SimpleNamespace
 
 import yaml
 
@@ -36,40 +37,52 @@ def _written(node, prefix=""):
             yield prefix + key
 
 
-def test_every_shipped_key_is_a_declared_parameter():
+def _leaves(node, prefix=""):
+    """Dotted name -> declaration body, for every leaf of the declaration."""
+    for key, value in node.items():
+        if not isinstance(value, dict):
+            continue
+        if isinstance(value.get("type"), str):
+            yield prefix + key, value
+        else:
+            yield from _leaves(value, f"{prefix}{key}.")
+
+
+def test_the_declaration_and_the_shipped_file_name_the_same_parameters():
+    """
+    One value per parameter, in the file a deployment edits.
+
+    Both directions: a shipped key nobody declared is dropped in silence, and a
+    declared key nobody ships is a `ParameterUninitializedException` at startup
+    -- the second is why the declaration may not hold a fallback value.
+    """
     declared = set(_declared(yaml.safe_load(DECLARATION.read_text())["crane_mpc"]))
     written = set()
     for name in SHIPPED:
         document = yaml.safe_load((PACKAGE / "config" / name).read_text())
         written |= set(_written(document["crane_mpc"]["ros__parameters"]))
-    assert written - declared == set()
+    assert written == declared
+
+
+def test_the_declaration_carries_no_values():
+    """Type, validation and a description -- a `default_value` is a second controller."""
+    for name, body in _leaves(yaml.safe_load(DECLARATION.read_text())["crane_mpc"]):
+        assert "default_value" not in body, name
+        assert body["description"].strip(), name
 
 
 # --- the hydraulic constants are crane_model's --------------------------------
-# Declared here only so a deployment can override, at sentinel 0.0; the numbers
-# live in crane_model/config/hydraulics.yaml and nothing shipped repeats one.
-HYDRAULICS = ("pump_flow_max", "pump_flow_planning_factor", "system_pressure_pa")
+# `crane_model.hydraulic_limits()` is the only reader. They were declared here at
+# a 0.0 "take crane_model's" sentinel until issue 183: any non-zero override made
+# the compiled export stale, since the constants are in `solver.export_key`.
 
 
-def test_the_hydraulic_constants_are_the_ones_in_crane_model():
-    from crane_model import hydraulic_limits
-    from crane_mpc import config
-
-    declared = yaml.safe_load(DECLARATION.read_text())["crane_mpc"]["hydraulics"]
-    assert set(declared) == set(HYDRAULICS)
-    for name in HYDRAULICS:
-        assert declared[name]["default_value"] == 0.0, name
+def test_the_hydraulic_constants_are_in_neither_file():
+    declared = yaml.safe_load(DECLARATION.read_text())["crane_mpc"]
+    assert "hydraulics" not in declared
     for name in SHIPPED:
         shipped = yaml.safe_load((PACKAGE / "config" / name).read_text())
         assert "hydraulics" not in shipped["crane_mpc"]["ros__parameters"], name
-
-    # The sentinels resolve to crane_model's numbers, which is the whole contract.
-    values = SimpleNamespace(
-        hydraulics=SimpleNamespace(
-            **{name: declared[name]["default_value"] for name in HYDRAULICS}
-        )
-    )
-    assert config.hydraulics_dict(values) == hydraulic_limits()
 
 
 # --- the machine's own numbers are crane_model's ------------------------------
@@ -123,13 +136,13 @@ def test_constraint_5_is_the_smaller_of_psis_domain_and_the_speed_bound():
 
 def test_the_transport_delay_is_the_fitted_dead_time():
     """
-    Declared, not read: it is the deployed sensor-to-valve path, which the
+    Written, not read: it is the deployed sensor-to-valve path, which the
     fit's own dead time only happens to equal. Pinned so the two stop agreeing
     loudly rather than quietly.
     """
     from crane_model.symbolic import K_ACTUATOR_FIT
 
-    declared = yaml.safe_load(DECLARATION.read_text())["crane_mpc"]
-    assert declared["sensor_to_valve_delay"]["default_value"] == float(
-        K_ACTUATOR_FIT.dead_time_s
-    )
+    for name in SHIPPED:
+        shipped = yaml.safe_load((PACKAGE / "config" / name).read_text())
+        written = shipped["crane_mpc"]["ros__parameters"]
+        assert written["sensor_to_valve_delay"] == float(K_ACTUATOR_FIT.dead_time_s)
