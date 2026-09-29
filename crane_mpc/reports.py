@@ -30,6 +30,7 @@ from .cycle import (
     TCP_HORIZON_FRAME,
     TOOL_AXIS,
     Cycle,
+    FollowerCommand,
 )
 from .solver import Outcome
 
@@ -147,6 +148,56 @@ def sway_settled(dq_u, age: float | None, max_state_age: float, dq_u_settled, st
         f"{bound.tolist()} on the passive pair, measured {age:.3f} s ago"
     )
     return verdict
+
+
+def follower_command(state, joints, now_ns, max_clock_skew, max_state_age):
+    """
+    Read what the velocity controller is doing, per axis, off one controller state.
+
+    `state is None` -- no message yet, or a mode that does not compare -- is the
+    default `FollowerCommand`: nothing taken, nothing compared. Velocity comes
+    from `output` and falls back to `reference`; `source` names which, or why not.
+    """
+    follower = FollowerCommand()
+    if state is None:
+        return follower
+    follower.age = (now_ns - Time.from_msg(state.header.stamp).nanoseconds) / 1e9
+    if -follower.age > max_clock_skew:
+        follower.source = "future"
+        return follower
+    if follower.age > max_state_age:
+        follower.source = "stale"
+        return follower
+
+    names = list(state.joint_names)
+    sources = set()
+    complete = True
+    for axis, joint in enumerate(joints):
+        if joint not in names:
+            complete = False
+            continue
+        row = names.index(joint)
+        taken = None
+        for field in ("output", "reference"):
+            velocities = getattr(state, field).velocities
+            if row < len(velocities) and np.isfinite(velocities[row]):
+                follower.velocity[axis] = velocities[row]
+                taken = f"{field}.velocities"
+                break
+        if taken is None:
+            complete = False
+        else:
+            follower.have_velocity[axis] = True
+            sources.add(taken)
+        errors = state.error.velocities
+        if row < len(errors) and np.isfinite(errors[row]):
+            follower.velocity_error[axis] = errors[row]
+            follower.have_velocity_error[axis] = True
+    follower.complete = complete
+    follower.source = (
+        "mixed" if len(sources) > 1 else (sources.pop() if sources else "none")
+    )
+    return follower
 
 
 def fill_cost_terms(health, terms) -> None:

@@ -16,7 +16,7 @@ from action_msgs.msg import GoalStatus, GoalStatusArray
 from control_msgs.msg import JointTrajectoryControllerState
 from crane_model import CraneModel, Payload, Tool, canonical_joints, hydraulic_limits
 from crane_model.velocity_loop import load_velocity_loop
-from crane_msgs.msg import JointPath, PayloadEstimate, SolverHealth, SwaySettled
+from crane_msgs.msg import JointPath, SolverHealth, SwaySettled
 from crane_msgs.srv import SetPayload
 from diagnostic_msgs.msg import DiagnosticArray
 from nav_msgs.msg import Path
@@ -40,7 +40,6 @@ from .cycle import (
     NANOSECONDS,
     PASSIVE_DOF,
     PASSIVE_INDICES,
-    PAYLOAD_ESTIMATE_TOPIC,
     PLANNED_DOF,
     REFERENCE_TOPIC,
     ROBOT_DESCRIPTION_TOPIC,
@@ -75,6 +74,86 @@ def jtc_rate_mismatch(assumed_period: float, manager_rate: int, jtc_rate: int) -
         f"{manager_rate}) and the horizon is built for a {assumed_period} s tick "
         "from velocity_loop.yaml rate_hz; the feed-forward would be sampled off-tick"
     )
+
+
+class StartGate:
+    """
+    Does the action this node is gated on carry a goal. No action: always open.
+
+    A status topic reports goals, not liveness, so a vanished publisher closes
+    the gate rather than leaving this node driving a controller that is gone.
+    """
+
+    LIVE = (GoalStatus.STATUS_ACCEPTED, GoalStatus.STATUS_EXECUTING)
+
+    def __init__(self, action: str) -> None:
+        self.action = action
+        self.topic = f"{action}/_action/status" if action else ""
+        self.open = not action
+
+    def adopt(self, message: GoalStatusArray) -> bool:
+        """Read one status array; `True` if the gate moved."""
+        was_open = self.open
+        self.open = any(entry.status in self.LIVE for entry in message.status_list)
+        return self.open != was_open
+
+    def closed_with_its_publisher(self, count_publishers) -> bool:
+        """Close an open gate whose status publisher has gone; `True` if it moved."""
+        if not self.open or not self.topic or count_publishers(self.topic):
+            return False
+        self.open = False
+        return True
+
+
+class RateQuery:
+    """
+    Ask the controller manager and the JTC for `update_rate`, once.
+
+    One query a second for `RATE_QUERIES` s: the controllers come up after this
+    node does. Unanswered, the `velocity_loop.yaml` tick stands unchecked; a
+    mismatch goes to `refuse`, so the node owns the refusal.
+    """
+
+    def __init__(self, node: Node, jtc_name: str, period: float, refuse) -> None:
+        self._node = node
+        self._jtc_name = jtc_name
+        self._assumed_period = period
+        self._refuse = refuse
+        names = (CONTROLLER_MANAGER, f"/{jtc_name}")
+        self._clients = [AsyncParameterClient(node, name) for name in names]
+        self._rates: list = [None, None]
+        self._queries = 0
+        self._timer = node.create_timer(1.0, self.query)
+
+    def query(self) -> None:
+        self._queries += 1
+        if self._queries > RATE_QUERIES:
+            self._timer.cancel()
+            self._node.get_logger().warn(
+                f"no update_rate from {CONTROLLER_MANAGER} or /{self._jtc_name} in "
+                f"{RATE_QUERIES} s; the JTC is assumed to tick every "
+                f"{self._assumed_period} s (velocity_loop.yaml), unchecked."
+            )
+            return
+        for slot, client in enumerate(self._clients):
+            if self._rates[slot] is None and client.services_are_ready():
+                client.get_parameters(
+                    ["update_rate"],
+                    callback=lambda future, slot=slot: self.on_rate(slot, future),
+                )
+
+    def on_rate(self, slot: int, future) -> None:
+        """Adopt one answer; once both are in, refuse a tick off the horizon's."""
+        response = future.result()
+        if response is None or not response.values:
+            return
+        self._rates[slot] = int(response.values[0].integer_value)
+        if None in self._rates or self._timer.is_canceled():
+            return
+        self._timer.cancel()
+        why = jtc_rate_mismatch(self._assumed_period, *self._rates)
+        if why:
+            self._refuse(why)
 
 
 def _qos(durability=DurabilityPolicy.VOLATILE) -> QoSProfile:
@@ -133,10 +212,11 @@ class MpcNode(Node):
         self._model: CraneModel | None = None
         self._description: str | None = None
         self._configuration_failure = ""
+        #: The canonical eight, in contract order: what the horizon is named by.
+        self._canonical_joints = list(canonical_joints())
+        #: The two joint groups, empty until the description configures this node.
         self._joints: list[str] = []
         self._passive_joints: list[str] = []
-        #: The canonical eight, in contract order: what the horizon is named by.
-        self._canonical_joints: list[str] = []
 
         # By name, never index -- the two stacks publish different `/joint_states` sets.
         self._q_a = np.zeros(ACTUATED_DOF)
@@ -152,12 +232,10 @@ class MpcNode(Node):
         self._jtc_period = 1.0 / load_velocity_loop()[1]
         #: `(stamp_ns, planned-axis output)` from the JTC, oldest first.
         self._jtc_outputs: deque = deque(maxlen=64)
-        self._rates: list = [None, None]
 
         self._reference_message: JointTrajectory | None = None
         self._path_message: JointPath | None = None
         self._payload = Payload()
-        self._payload_estimate: PayloadEstimate | None = None
         self._controller_state: JointTrajectoryControllerState | None = None
         self._last_health: SolverHealth | None = None
         self._last_settled: SwaySettled | None = None
@@ -166,15 +244,9 @@ class MpcNode(Node):
         #: One instant per cycle, shared by every report that cycle writes.
         self._stamp = self.get_clock().now().to_msg()
 
-        #: The action whose accepted goal releases this node, `""` for no gate.
-        self._start_signal_action = str(self._values.start_signal_action)
-        #: Whether that action carries a goal now; `True` with no gate.
-        self._start_signal_open = not self._start_signal_action
-        self._start_signal_topic = (
-            f"{self._start_signal_action}/_action/status"
-            if self._start_signal_action
-            else ""
-        )
+        #: The action whose accepted goal releases this node; no action, no gate.
+        self._gate = StartGate(str(self._values.start_signal_action))
+        self._rate_query: RateQuery | None = None
 
         self._create_publishers()
         self._create_subscriptions()
@@ -191,28 +263,20 @@ class MpcNode(Node):
     def mode(self) -> str:
         return self._cycle.mode
 
-    def axis_names(self) -> list[str]:
-        """Name the six actuated joints, before the description has arrived too."""
-        names = canonical_joints()
-        return [names[row] for row in ACTUATED_INDICES]
-
     def warn_open_loop_axes(self) -> None:
         """Say once, at startup, which axes do not close the velocity loop."""
-        cycle = self._cycle
-        names = self.axis_names()
         open_loop = [
-            names[axis] for axis in range(PLANNED_DOF) if not cycle.dq_a_feedback[axis]
+            self._canonical_joints[ACTUATED_INDICES[axis]]
+            for axis in range(PLANNED_DOF)
+            if not self._cycle.dq_a_feedback[axis]
         ]
         if not open_loop:
             return
         self.get_logger().warn(
-            f"{', '.join(open_loop)} take their velocity in x_0 from the **model** "
-            f"and not from {JOINT_STATE_TOPIC} (dq_a_feedback). That is Marc's "
-            "deployed setting -- his node closes the velocity loop on the slewing "
-            "axis alone -- and it buys quiet on noisy hydraulic velocity signals at "
-            "the cost of an actuator state that can walk away from the machine. "
-            f"dq_a_divergence_max is what watches for that; it is reported on "
-            f"{SHADOW_COMPARISON_TOPIC} and warned about, and never corrected."
+            f"{', '.join(open_loop)} take dq in x_0 from the model, not from "
+            f"{JOINT_STATE_TOPIC} (dq_a_feedback); the state can walk away from the "
+            f"machine. dq_a_divergence_max watches it, on {SHADOW_COMPARISON_TOPIC}, "
+            "and nothing corrects it."
         )
 
     def say_path_source(self) -> None:
@@ -242,14 +306,10 @@ class MpcNode(Node):
                 continue
             # Own call site: rclpy throttles by caller, not shared with `self.warn`.
             self.get_logger().warn(
-                f"The model-carried velocity of {joint} has walked "
-                f"{carry.divergence[axis]:g} away from the measured one, past the "
-                f"{self._cycle.dq_a_divergence_max[axis]:g} dq_a_divergence_max on "
-                "that axis. This axis runs open-loop in velocity by configuration "
-                "(dq_a_feedback), so nothing corrects it and the state the OCP is "
-                "solved from is the model's, not the machine's. Reported and not "
-                "corrected: substituting the measurement on a threshold would be a "
-                "second controller nobody configured.",
+                f"the model-carried velocity of {joint} has walked "
+                f"{carry.divergence[axis]:g} from the measured one, past "
+                f"dq_a_divergence_max {self._cycle.dq_a_divergence_max[axis]:g}; this "
+                "axis runs open-loop (dq_a_feedback), so it is reported, not corrected.",
                 throttle_duration_sec=WARN_PERIOD,
             )
 
@@ -292,21 +352,12 @@ class MpcNode(Node):
         self.create_subscription(
             JointState, JOINT_STATE_TOPIC, self.on_joint_state, _qos()
         )
-        self.create_subscription(
-            PayloadEstimate,
-            PAYLOAD_ESTIMATE_TOPIC,
-            self.on_payload_estimate,
-            _latched(),
-        )
         self.create_service(SetPayload, SET_PAYLOAD_SERVICE, self.on_set_payload)
-        if self._start_signal_action:
+        if self._gate.topic:
             # Status topic, not the action -- latched+reliable so a late-starting
             # node still sees an accepted goal.
             self.create_subscription(
-                GoalStatusArray,
-                self._start_signal_topic,
-                self.on_start_signal,
-                _latched(),
+                GoalStatusArray, self._gate.topic, self.on_start_signal, _latched()
             )
 
     # -- what arrives ------------------------------------------------------------
@@ -346,25 +397,14 @@ class MpcNode(Node):
 
     def on_start_signal(self, message: GoalStatusArray) -> None:
         """Is a goal live on the action this node is gated on."""
-        live = (GoalStatus.STATUS_ACCEPTED, GoalStatus.STATUS_EXECUTING)
-        was_open = self._start_signal_open
-        self._start_signal_open = any(
-            entry.status in live for entry in message.status_list
-        )
-        if self._start_signal_open == was_open:
+        if not self._gate.adopt(message):
             return
-        self.get_logger().info(
-            f"{self._start_signal_action} "
-            + (
-                "accepted a goal, so this node drives"
-                if self._start_signal_open
-                else "has no goal left, so this node stops driving"
-            )
+        drives = (
+            "accepted a goal, so this node drives"
+            if self._gate.open
+            else "has no goal left, so this node stops driving"
         )
-
-    def on_payload_estimate(self, message: PayloadEstimate) -> None:
-        # Stored and reported at startup; the OCP's payload only moves via the service.
-        self._payload_estimate = message
+        self.get_logger().info(f"{self._gate.action} {drives}.")
 
     def on_controller_state(self, message: JointTrajectoryControllerState) -> None:
         # Timber bringup profiles put both trajectory controllers on one topic;
@@ -390,10 +430,9 @@ class MpcNode(Node):
             return
         try:
             self._model = CraneModel(self._description, Tool(problem.TOOL))
-            names = canonical_joints()
+            names = self._canonical_joints
             self._joints = [names[row] for row in ACTUATED_INDICES]
             self._passive_joints = [names[row] for row in PASSIVE_INDICES]
-            self._canonical_joints = list(names)
             # `Ocp.__init__` runs `config.check_settings`, which is where
             # `delay == Ts` is refused -- inside this `try`, so it is a reported
             # configuration failure and not a dead process in `MpcNode.__init__`.
@@ -421,49 +460,19 @@ class MpcNode(Node):
         }
         if patched:
             self.get_logger().warning(
-                f"the acados backend is patched by {problem.TUNING_ENV}: {patched}. "
-                "This is a swept solver, not the one this package ships."
+                f"the acados backend is patched by {problem.TUNING_ENV}: {patched} -- "
+                "a swept solver, not the one this package ships."
             )
         self.adopt_reference()
         self.adopt_path()
-        self.ask_jtc_rate()
+        self._rate_query = RateQuery(
+            self, str(self._values.jtc_name), self._jtc_period, self.refuse
+        )
 
-    def ask_jtc_rate(self) -> None:
-        """Read the JTC's tick off the controllers; a mismatch is refused."""
-        names = (CONTROLLER_MANAGER, "/" + str(self._values.jtc_name))
-        self._rate_clients = [AsyncParameterClient(self, name) for name in names]
-        self._rate_queries = 0
-        self._rate_timer = self.create_timer(1.0, self.query_jtc_rate)
-
-    def query_jtc_rate(self) -> None:
-        self._rate_queries += 1
-        if self._rate_queries > RATE_QUERIES:
-            self._rate_timer.cancel()
-            self.get_logger().warn(
-                f"No update_rate from {CONTROLLER_MANAGER} and /{self._values.jtc_name} "
-                f"in {RATE_QUERIES} s, so the JTC is assumed to tick every "
-                f"{self._jtc_period} s (velocity_loop.yaml) -- unchecked."
-            )
-            return
-        for slot, client in enumerate(self._rate_clients):
-            if self._rates[slot] is None and client.services_are_ready():
-                client.get_parameters(
-                    ["update_rate"],
-                    callback=lambda future, slot=slot: self.on_rate(slot, future),
-                )
-
-    def on_rate(self, slot: int, future) -> None:
-        response = future.result()
-        if response is None or not response.values:
-            return
-        self._rates[slot] = int(response.values[0].integer_value)
-        if None in self._rates or self._rate_timer.is_canceled():
-            return
-        self._rate_timer.cancel()
-        why = jtc_rate_mismatch(self._jtc_period, *self._rates)
-        if why:
-            self._configuration_failure = why
-            self.get_logger().error(f"The MPC refuses its configuration: {why}.")
+    def refuse(self, why: str) -> None:
+        """Stop driving on a configuration this node cannot honour."""
+        self._configuration_failure = why
+        self.get_logger().error(f"the MPC refuses its configuration: {why}.")
 
     def ready(self) -> bool:
         return (
@@ -480,8 +489,8 @@ class MpcNode(Node):
         )
         if reference is None:
             self.get_logger().warn(
-                f"The reference on {REFERENCE_TOPIC} was refused and the previous "
-                f"one stands: {why}."
+                f"the reference on {REFERENCE_TOPIC} was refused, the previous one "
+                f"stands: {why}."
             )
             self._reference_message = None
             return
@@ -505,7 +514,7 @@ class MpcNode(Node):
         )
         if samples is None:
             self.get_logger().warn(
-                f"The path on {JOINT_PATH_TOPIC} was refused, so the horizon's own "
+                f"the path on {JOINT_PATH_TOPIC} was refused, so the horizon's own "
                 f"knots are the path this node follows: {why}."
             )
             self._path_message = None
@@ -520,8 +529,8 @@ class MpcNode(Node):
     def adopt_mode(self, requested: str) -> None:
         previous = self._cycle.adopt_mode(requested)
         self.get_logger().info(
-            f"crane_mpc moved from {previous} to {requested}; the next solve cold "
-            "starts, because a mode change is this node's reactivation."
+            f"crane_mpc moved from {previous} to {requested}; a mode change is this "
+            "node's reactivation, so the next solve cold starts."
         )
 
     def refresh_parameters(self) -> None:
@@ -627,18 +636,15 @@ class MpcNode(Node):
         if not self._cycle.progress_stalled:
             return text
         text += (
-            "; and the plan has not progressed: virtual time has advanced by less "
-            f"than {self._values.min_progress_rate} of nominal for "
-            f"{self._values.max_stall_time} s of wall clock, so this plan is stalled "
-            "rather than merely slow"
+            "; and the plan is stalled, not merely slow: virtual time advanced by "
+            f"less than {self._values.min_progress_rate} of nominal for "
+            f"{self._values.max_stall_time} s of wall clock"
         )
         if not was_stalled:
             self.get_logger().error(
-                f"{text}. The horizon still goes out -- the machine is where the plan "
-                "says, it is just not moving through it -- but "
-                f"{SOLVER_HEALTH_TOPIC} now carries FAULT_SOLVER. This node reports "
-                "the stall and does not recover from it: releasing the arm claim is "
-                "the supervisor's and re-planning is the task layer's."
+                f"{text}. The horizon still goes out, but {SOLVER_HEALTH_TOPIC} now "
+                "carries FAULT_SOLVER; this node reports the stall, it does not "
+                "recover from it."
             )
         return text
 
@@ -653,39 +659,26 @@ class MpcNode(Node):
     def unconfigured(self, why: str) -> Silence:
         return Silence(
             why,
-            f"The MPC is not configured ({why}), so nothing is published on "
-            f"{HORIZON_TOPIC}. Configuration requires one latched message on "
-            f"{ROBOT_DESCRIPTION_TOPIC} and nothing else.",
+            f"the MPC is not configured ({why}), so nothing goes out on "
+            f"{HORIZON_TOPIC}; it needs one latched {ROBOT_DESCRIPTION_TOPIC}.",
         )
 
     def start_signal_still_open(self) -> bool:
-        """
-        Read the gate, and close it if its publisher has gone.
-
-        A status topic reports goals, not liveness, so a vanished publisher's
-        gate is closed here rather than driven on -- fails closed.
-        """
-        if not self._start_signal_open:
-            return False
-        if self._start_signal_topic and not self.count_publishers(
-            self._start_signal_topic
-        ):
-            self._start_signal_open = False
+        """Read the gate; its publisher having gone closes it, fail-closed."""
+        gate = self._gate
+        if gate.closed_with_its_publisher(self.count_publishers):
             self.get_logger().warn(
-                f"{self._start_signal_action} has no status publisher left, so its "
-                "goal cannot still be live and this node stops driving."
+                f"{gate.action} has no status publisher left, so its goal cannot "
+                "still be live and this node stops driving."
             )
-            return False
-        return True
+        return gate.open
 
     def ungated(self) -> Silence:
         return Silence(
-            f"no goal is live on {self._start_signal_action}",
-            f"{self._start_signal_action} carries no goal, so nothing is published "
-            f"on {HORIZON_TOPIC}. This node runs gated on that action "
-            "(start_signal_action): a reference is held, unanchored and unspent, "
-            "until the controller is given a goal -- which is what the panel's "
-            "'Start trajectory' button sends.",
+            f"no goal is live on {self._gate.action}",
+            f"{self._gate.action} carries no goal, so nothing goes out on "
+            f"{HORIZON_TOPIC}; the reference is held unanchored (start_signal_action) "
+            "until the controller is given one.",
         )
 
     def fall_silent(self, silence) -> None:
@@ -721,48 +714,14 @@ class MpcNode(Node):
         return np.mean(window, axis=0)
 
     def follower_command(self, now_ns: int) -> FollowerCommand:
-        """Read what the velocity controller is actually doing, per axis."""
-        follower = FollowerCommand()
-        state = self._controller_state
-        if self.mode != "shadow" or state is None:
-            return follower
-        follower.age = (now_ns - Time.from_msg(state.header.stamp).nanoseconds) / 1e9
-        if -follower.age > float(self._values.max_clock_skew):
-            follower.source = "future"
-            return follower
-        if follower.age > float(self._values.max_state_age):
-            follower.source = "stale"
-            return follower
-
-        names = list(state.joint_names)
-        sources = set()
-        complete = True
-        for axis, joint in enumerate(self._joints):
-            if joint not in names:
-                complete = False
-                continue
-            row = names.index(joint)
-            taken = None
-            for field in ("output", "reference"):
-                velocities = getattr(state, field).velocities
-                if row < len(velocities) and np.isfinite(velocities[row]):
-                    follower.velocity[axis] = velocities[row]
-                    taken = f"{field}.velocities"
-                    break
-            if taken is None:
-                complete = False
-            else:
-                follower.have_velocity[axis] = True
-                sources.add(taken)
-            errors = state.error.velocities
-            if row < len(errors) and np.isfinite(errors[row]):
-                follower.velocity_error[axis] = errors[row]
-                follower.have_velocity_error[axis] = True
-        follower.complete = complete
-        follower.source = (
-            "mixed" if len(sources) > 1 else (sources.pop() if sources else "none")
+        """Read what the velocity controller is doing; only shadow mode compares."""
+        return reports.follower_command(
+            self._controller_state if self.mode == "shadow" else None,
+            self._joints,
+            now_ns,
+            float(self._values.max_clock_skew),
+            float(self._values.max_state_age),
         )
-        return follower
 
     def warn(self, message: str) -> None:
         self.get_logger().warn(message, throttle_duration_sec=WARN_PERIOD)
@@ -869,9 +828,8 @@ class MpcNode(Node):
         if not self.ready():
             response.success = False
             response.message = (
-                f"the MPC is not configured -- no robot description on "
-                f"{ROBOT_DESCRIPTION_TOPIC} yet -- so there is no optimal control "
-                "problem to set a payload on"
+                f"the MPC is not configured -- nothing on {ROBOT_DESCRIPTION_TOPIC} "
+                "yet -- so there is no problem to set a payload on"
             )
             self.get_logger().warn(
                 f"{SET_PAYLOAD_SERVICE} was called before configuration and refused."
@@ -904,8 +862,7 @@ class MpcNode(Node):
         com = payload.center_of_mass_k8_m
         response.message = (
             f"the payload is now {payload.mass_kg} kg at ({com[0]}, {com[1]}, "
-            f"{com[2]}) m in K8, on every stage of the next horizon. The next solve "
-            "cold starts"
+            f"{com[2]}) m in K8, on every stage of the next horizon, which cold starts"
         )
         self.get_logger().info(response.message)
         return response

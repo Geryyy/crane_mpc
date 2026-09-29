@@ -14,7 +14,7 @@ from control_msgs.msg import JointTrajectoryControllerState
 from crane_model import canonical_joints, hydraulic_limits
 from crane_model import symbolic as cs
 from crane_mpc import config, problem
-from crane_mpc.node import MpcNode, jtc_rate_mismatch
+from crane_mpc.node import MpcNode, StartGate, jtc_rate_mismatch
 from crane_msgs.msg import JointPath, SolverHealth
 from rcl_interfaces.msg import ParameterValue
 from rcl_interfaces.srv import GetParameters
@@ -43,9 +43,37 @@ def context():
     rclpy.shutdown()
 
 
+class Ticks:
+    """
+    The node's clock, moved by hand: one `Ts` per `update`.
+
+    Every age the node computes is a difference against `get_clock().now()`, so
+    under real time a loaded host ages a measurement past `max_state_age`
+    between the message and the cycle that reads it -- and which test fails then
+    depends on the load, not on the code. The tick runs *after* `update`, so a
+    message stamped just before a cycle is that cycle's, age zero.
+    """
+
+    def __init__(self, node):
+        self.now_ns = 1_000_000_000_000
+        step = int(node.Ts * 1e9)
+        cycle = node.update
+        node.get_clock = lambda: self
+
+        def update():
+            cycle()
+            self.now_ns += step
+
+        node.update = update
+
+    def now(self) -> Time:
+        return Time(nanoseconds=self.now_ns)
+
+
 @pytest.fixture
 def node(context, export_base):
     node = MpcNode()
+    Ticks(node)
     # Every assertion below is on the configuration the repo ships: the
     # declaration carries no defaults, so `context` hands the node
     # `config/crane_mpc.yaml` and there is no second controller to run. The
@@ -261,14 +289,12 @@ def gated(node, action="/trajectory_controller_a2b/follow_joint_trajectory"):
     the constructor, so a fixture cannot move it afterwards.
     """
     configured(node)
-    node._start_signal_action = action
-    node._start_signal_topic = f"{action}/_action/status"
-    node._start_signal_open = False
-    # Stand-in for the controller's status publisher; gate closes when it
-    # goes away, so tests need one to exist.
-    node._status_publisher = node.create_publisher(
-        GoalStatusArray, node._start_signal_topic, 1
-    )
+    node._gate = StartGate(action)
+    node._gate.open = False
+    # The graph's count for the controller's status publisher. Stubbed and not
+    # published for real: rmw counts publishers asynchronously, so a real one
+    # is a discovery race that drops the gate shut under host load.
+    node.count_publishers = lambda topic: 1
     return node
 
 
@@ -309,16 +335,19 @@ def test_a_held_plan_is_not_spent_while_the_gate_is_closed(node):
     Reference waits for a human, so it may not age while it waits.
 
     `max_reference_age` counts from a plan that has begun spending; 30 gated
-    cycles = 1.2 s against a 0.5 s bound and a 4 s plan, so a gate running
-    after `Cycle.gates` would anchor here and refuse the held plan.
+    cycles = 1.8 s against a 0.5 s bound and a 4 s plan, so a gate running
+    after `Cycle.gates` would anchor here and refuse the held plan. The joint
+    state is fed each cycle because the machine keeps publishing while gated.
     """
     one = gated(node)
     for _ in range(30):
+        one.on_joint_state(joint_state(one))
         one.update()
     assert one.published == {}
     assert not one._cycle.reference_anchored
 
     one.on_start_signal(goal_status(GoalStatus.STATUS_EXECUTING))
+    one.on_joint_state(joint_state(one))
     one.update()
     assert len(one.published["_shadow_horizon_publisher"]) == 1
 
@@ -333,13 +362,12 @@ def test_a_vanished_controller_closes_the_gate_it_had_opened(node):
     """
     one = gated(node)
     one.on_start_signal(goal_status(GoalStatus.STATUS_EXECUTING))
-    assert one._start_signal_open
+    assert one._gate.open
 
-    # Graph's own publisher count. Set here, not by destroying the publisher
-    # above: rmw updates it asynchronously, so waiting on discovery flakes.
+    # The graph going quiet, as `gated`'s stub reports it.
     one.count_publishers = lambda topic: 0
     one.update()
-    assert not one._start_signal_open
+    assert not one._gate.open
     assert one.published == {}
 
 
@@ -444,8 +472,8 @@ def test_a_jtc_off_the_assumed_tick_is_refused(node):
     assert jtc_rate_mismatch(0.01, 50, 100) == ""
     assert jtc_rate_mismatch(0.01, 100, 20)
     configured(node)
-    node.on_rate(0, rate(100))
-    node.on_rate(1, rate(20))
+    node._rate_query.on_rate(0, rate(100))
+    node._rate_query.on_rate(1, rate(20))
     node.update()
     assert node.published == {}
     assert "20 Hz" in node._last_silence
