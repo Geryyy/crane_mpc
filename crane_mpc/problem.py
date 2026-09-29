@@ -45,11 +45,10 @@ def chamber_forces(model, relief_pa: float, actuated_dof: int) -> tuple:
 
 # --- the acados backend, and the one place it is written down -----------------
 #
-# Every setting that is compiled into the solver and is a choice rather than a
-# consequence. A variant layers over this through
-# `CRANE_MPC_OCP_OPTIONS`, and `solver.solver_signature` hashes the result --
-# without that a variant opens its predecessor's `.so` and reads as a null
-# result, which is how a sweep measures the baseline 33 times.
+# Every setting compiled into the solver that is a choice rather than a
+# consequence. A variant layers over this through `CRANE_MPC_OCP_OPTIONS` and
+# `solver.export_key` hashes the result, so a variant cannot open its
+# predecessor's `.so` and read as a null result.
 #
 #     CRANE_MPC_OCP_OPTIONS='{"nlp_solver_type": "SQP", "nlp_solver_max_iter": 3}'
 #
@@ -57,45 +56,30 @@ SOLVER_TUNING = {
     # One Newton step per cycle: deterministic solve time, worth more than a
     # converged step since the plant moves between cycles anyway.
     "nlp_solver_type": "SQP_RTI",
-    # Read only when `nlp_solver_type` is not RTI, which is what makes a
-    # converging variant comparable against one Newton step.
+    # Read only when `nlp_solver_type` is not RTI, so a converging variant is
+    # comparable against one Newton step.
     "nlp_solver_max_iter": 1,
     "qp_solver": "PARTIAL_CONDENSING_HPIPM",
     "hpipm_mode": "BALANCE",
-    # None is acados' default, `N`: issue 129 measured smaller blocks worse
-    # (10.3 ms QP at `N`, 61-81 ms at 1).
+    # None is acados' default, `N`; smaller blocks measured worse.
     "qp_solver_cond_N": None,
     "qp_solver_iter_max": 50,
-    # Primal **and** dual. Reachable only because `solver.py` keeps HPIPM's
-    # memory across a warm cycle; with the memory dropped every cycle this flag
-    # measured exactly the baseline, which is a null result that reads as "no
-    # effect". 2 against 0: QP iterations 15 -> 5 median, 18 -> 11 at p90.
+    # Primal **and** dual, worth 15 -> 5 median QP iterations -- but only because
+    # `solver.py` keeps HPIPM's memory across a warm cycle.
     "qp_solver_warm_start": 2,
     "qp_solver_ric_alg": 1,
-    # C3's actuator lag makes the model stiff: linearised fastest eigenvalue
-    # `|lambda| T_s = 8.5` at an ordinary pose (telescope `k = 3.5e6 N/m` vs
-    # effective mass), where ERK4 is stable only to ~2.8 and diverges in three
-    # intervals (HPIPM status 3). Two implicit stages carry that comfortably.
+    # C3's actuator lag makes the model stiff: `|lambda| T_s = 8.5` at an ordinary
+    # pose, where ERK4 is stable only to ~2.8 and diverges in three intervals.
     "integrator_type": "IRK",
     "sim_method_num_stages": 2,
     "sim_method_num_steps": 1,
     "sim_method_newton_iter": 3,
-    # Not for speed -- for what happens at a pose stiffer than the one above.
-    # Legendre is A-stable with `R(z) -> 1` as `z -> -inf`, so the stiff mode is
-    # bounded but undamped and rings; Radau IIA is L-stable (`R -> 0`) at one
-    # order less (3 against 4). At `z = -8.5` that is `|R|` 0.098 against 0.25,
-    # and the gap widens with the telescope out and a payload on.
-    #
-    # The order it gives up costs nothing measurable at `T_s`: 25 moves / 7k
-    # cycles, terminal error 0.434 -> 0.432, sway/pump identical, force 0.557 ->
-    # 0.556. It is not slower either (below).
+    # For a pose stiffer than that one: Radau IIA is L-stable where Legendre only
+    # bounds the stiff mode undamped (`|R(-8.5)|` 0.098 against 0.25). The order it
+    # gives up costs nothing measurable at `T_s`.
     "collocation_type": "GAUSS_RADAU_IIA",
-    # Reuse the IRK Jacobian across a step's Newton iterations instead of
-    # re-forming and re-factorising it three times. Same corpus: solve 4.96 ->
-    # 3.85 ms median and 16.1 -> 10.1 ms at p90 against Legendre without reuse,
-    # with `qp_iter` 5/11 unmoved -- this is integrator cost, not QP cost -- and
-    # every quality column within a digit. Two runs agree on the median; read
-    # the p90 with the load average the sweep recorded, not on its own.
+    # Reuse the IRK Jacobian across a step's Newton iterations: integrator cost,
+    # worth 4.96 -> 3.85 ms median with `qp_iter` unmoved.
     "sim_method_jac_reuse": 1,
     # Gauss-Newton, so `J' W J` is positive semi-definite by construction and
     # the exact nonlinear-cost Hessians acados would emit go unused.
@@ -106,10 +90,9 @@ SOLVER_TUNING = {
     "regularize_method": "NO_REGULARIZE",
     "qpscaling_scale_constraints": "NO_CONSTRAINT_SCALING",
     "qpscaling_scale_objective": "NO_OBJECTIVE_SCALING",
-    # Unread under RTI, which never checks convergence. Here so that an
-    # `nlp_solver_type` variant can be swept honestly: at acados' 1e-6 a
-    # four-iteration SQP answers `ACADOS_MAXITER` and every cycle of it is
-    # scored as a failed one.
+    # Unread under RTI, which never checks convergence. Here so an
+    # `nlp_solver_type` variant can be swept honestly: at a tighter tolerance a
+    # four-iteration SQP answers `ACADOS_MAXITER` and every cycle scores as failed.
     "nlp_solver_tol_stat": 1.0e-6,
     "nlp_solver_tol_eq": 1.0e-6,
     "nlp_solver_tol_ineq": 1.0e-6,
@@ -264,9 +247,8 @@ def shooting_intervals(parameters: dict) -> int:
     """
     Return `N`, the shooting-interval count, from the yaml's knot count.
 
-    `horizon_length` counts knots (fifty = two seconds); `mpc_node.cpp:
-    214-219` subtracts the terminal knot, which ends no interval. Same
-    arithmetic here or the shipped solver is one interval too long.
+    `horizon_length` counts knots (fifty = two seconds); the terminal knot ends
+    no interval.
     """
     knots = int(parameters["horizon_length"])
     if knots < 2:
@@ -352,11 +334,9 @@ def build_ocp(description_xml: str, parameters: dict, hydraulics: dict) -> tuple
     # Tool coordinate: not planned (gripper driven by low-level controller),
     # but its inertia is in `M(q)`, so it's evaluated at the incoming state's
     # gripper value each cycle.
-    # Payload: set via `crane_msgs/SetPayload` at grasp/release;
-    # `ocp_solver.cpp` treats a change as discrete and drops the warm start.
-    #
-    # `ocp_solver.cpp` writes both every stage; export ships zero default
-    # (empty gripper).
+    # Payload: set via `crane_msgs/SetPayload` at grasp/release; `Ocp` treats a
+    # change as discrete and drops the warm start. Both are written every stage;
+    # the export ships a zero default (empty gripper).
     xdot = model.xdot
     tau_a = model.tau_a
     output = model.z
@@ -369,8 +349,7 @@ def build_ocp(description_xml: str, parameters: dict, hydraulics: dict) -> tuple
     dq_a = x[cs.X_PLANNED_VELOCITY : cs.X_PLANNED_VELOCITY + cs.K_PLANNED_DOF]
     dq_u = x[cs.X_PASSIVE_VELOCITY : cs.X_PASSIVE_VELOCITY + cs.K_PASSIVE_DOF]
 
-    # Progress pair: `s` virtual time, `s_nom` what it'd be unslipped, `ds`
-    # how far the plan moved off clock.
+    # Progress pair: `s` the path parameter this cycle spends, `v_s` its rate.
     progress = x[cs.X_PROGRESS]
     progress_rate = x[cs.X_PROGRESS_RATE]
     reference_parameters = ca.SX.sym("p_ref", NP - cs.NP)
@@ -491,9 +470,6 @@ def build_ocp(description_xml: str, parameters: dict, hydraulics: dict) -> tuple
     ocp.model = acados_model
     ocp.parameter_values = np.zeros(NP)
 
-    # `horizon_length` counts knots, not intervals: `mpc_node.cpp` passes
-    # `horizon_length - 1` (last knot ends no interval); fifty knots is
-    # forty-nine.
     horizon = shooting_intervals(parameters)
     step = float(parameters["Ts"])
     ocp.solver_options.N_horizon = horizon
@@ -505,8 +481,8 @@ def build_ocp(description_xml: str, parameters: dict, hydraulics: dict) -> tuple
 
     # --- the cost data ---------------------------------------------------------
     #
-    # Placeholders, overwritten by `ocp_solver.cpp` from deployment
-    # parameters before the first solve; written here only for shape.
+    # Placeholders, written here only for shape: `solver.configure_fixed_data`
+    # overwrites them from the deployment's parameters before the first solve.
     ocp.cost.cost_type_0 = "NONLINEAR_LS"
     ocp.cost.cost_type = "NONLINEAR_LS"
     ocp.cost.cost_type_e = "NONLINEAR_LS"
@@ -516,7 +492,7 @@ def build_ocp(description_xml: str, parameters: dict, hydraulics: dict) -> tuple
         raise ValueError(
             f"the residual is {ny} rows against the offsets' "
             f"{residual_rows(parameters)} and the terminal "
-            f"{ny_e} against {NY_TERMINAL}; the offsets are what the C++ reads"
+            f"{ny_e} against {NY_TERMINAL}; the offsets are what `solver.py` reads"
         )
     ocp.cost.W_0 = np.eye(ny)
     ocp.cost.W = np.eye(ny)

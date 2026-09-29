@@ -17,8 +17,8 @@ The node is Python and the solver is generated C:
 | `crane_mpc/solver.py` | the solver wrapper: what is written before a solve and read after, the dead-time predictor and the static hold force |
 | `crane_mpc/horizon.py` | the reference read off the wire, resampled, and written back |
 | `crane_mpc/problem.py` | the OCP itself, as an `AcadosOcp` |
-| `crane_mpc/hunting.py` | is the chain off, or oscillating? The two scores, kept apart |
 | `scripts/export_ocp.py` | **run this first**: the same problem generated, compiled and recorded |
+| `scripts/trials/hunting.py` | is the chain off, or oscillating? A trial score, kept out of goal error |
 | `scripts/trials/wire_chain.py` | the node's `Cycle` offline, through the published horizon, the JTC's playback and MuJoCo; `sweep_robust.py` sweeps it over plant samples |
 
 `problem.py` is imported by both the node and the exporter, so the solver a
@@ -261,8 +261,10 @@ only knot 0 is ever executed.
 On the model-matched plant the shifted loop walks away from the goal,
 0.139 → 0.209 rad over 29 s, monotonically, every solve converged; unshifted
 decays to 1.4e-4 rad. Over twenty moves the endpoint median halves and so does
-the worst. `Ocp.shifted` remains, for the fallback: there a shift is not a guess
-but the answer, and those knots are published against instants that have moved.
+the worst. The fallback below still shifts, but there a shift is not a guess: it
+is the answer, because those knots are published against instants that moved.
+It works on the published `Knots` (`Cycle.shift_previous_horizon`), not on a
+solver iterate.
 
 **Cold start.** On the first cycle and after any silence, from a rollout holding
 `u = 0` (`Ocp.cold_start`) — `N` steps of an acados integrator over the same

@@ -47,7 +47,6 @@ def test_past_the_plan_the_goal_is_held_at_rest():
     assert rejection is None
     assert np.allclose(horizon.q_a_ref[1:], reference.q_a_ref[-1])
     assert np.allclose(horizon.dq_a_ref[1:], 0.0)
-    assert np.allclose(horizon.ddq_a_ref[1:], 0.0)
 
 
 @pytest.mark.parametrize(
@@ -99,7 +98,6 @@ def test_a_reference_missing_a_joint_is_refused_whole():
 
 def test_the_wire_form_carries_positions_velocities_and_no_accelerations():
     horizon = ramp([0.0, 0.04, 0.08])
-    horizon.ddq_a_ref[:] = 7.0
     from builtin_interfaces.msg import Time
 
     message = horizon_to_message(horizon, CANONICAL, Time(sec=3, nanosec=0))

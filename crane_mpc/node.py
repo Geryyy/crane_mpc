@@ -1,9 +1,8 @@
 """
-The `crane_mpc` node: `src/mpc_node.cpp` in Python.
+The `crane_mpc` node.
 
-Wire (topics, types, QoS, 25 Hz cadence) is unchanged; state now stays in the
-OCP's 25-row `x` end to end instead of C++'s 16-wide `crane_model::State`
-rebuilt each crossing. An adapter: `cycle.py` decides, `reports.py` marshals.
+An adapter and nothing else: `cycle.py` decides, `reports.py` marshals. State
+stays in the OCP's own `x` end to end, never rebuilt at a crossing.
 """
 
 from __future__ import annotations
@@ -171,8 +170,8 @@ def _measured(message: JointState, index: dict, names: list):
     `(q, dq)` for `names`, or `None` if the message doesn't carry them finitely.
 
     `dq` is `None` where the message carries no velocity (last one stands). A
-    non-finite row is dropped, not written through (`mpc_node.cpp:360-364`): it
-    surfaces as staleness via `max_state_age` instead of a solve failure.
+    non-finite row is dropped, not written through: it surfaces as staleness via
+    `max_state_age` instead of a solve failure.
     """
     rows = [index.get(name) for name in names]
     if any(row is None for row in rows) or len(message.position) <= max(rows):

@@ -19,7 +19,7 @@ phase included -- the five faults behind the 2026-09-25 Gazebo divergence
 window closes. `--random N` chains N moves, each from where the last ended.
 
 Plan, plant mismatch and solver flags are `harness.add_arguments`'. Exit 1 on
-divergence or hunting (`crane_mpc.hunting`: u0 reversing on half the cycles).
+divergence or hunting (`hunting.py`: u0 reversing on half the cycles).
 
 Levers: `--set weights.du=30 --set dq_a_feedback=false` overrides crane_mpc.yaml
 (yaml value; a scalar on a list key fills every axis). A key in
@@ -50,9 +50,9 @@ from crane_model.symbolic import PAYLOAD_MOUNT_LINK
 from crane_model.viewing import SpaceGate
 from crane_mpc import cycle as cy
 from crane_mpc import horizon as hz
-from crane_mpc.hunting import REVERSAL_FRACTION, reversal_fraction
 from growth import growth
 from harness import ACTUATED, PASSIVE, PLANNED, cs, tune_planner
+from hunting import REVERSAL_FRACTION, reversal_fraction
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 
 ROTATOR = 4

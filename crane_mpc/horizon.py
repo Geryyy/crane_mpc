@@ -2,9 +2,8 @@
 Carry the horizon as data.
 
 Read off the wire, resampled onto the OCP's grid, written back as
-`trajectory_msgs/JointTrajectory`. Python port of `src/horizon_source.cpp`,
-knot-for-knot: arrays, not a vector of structs, since resample is one
-Hermite evaluation over all N knots, not N of them. ROS-free apart from the
+`trajectory_msgs/JointTrajectory`. Arrays, not a vector of structs: resample is
+one Hermite evaluation over all N knots, not N of them. ROS-free apart from the
 marshalling functions, so the maths is tested offline.
 """
 
@@ -57,15 +56,13 @@ class Knots:
     """
     N knots. In a reference `t` is time_from_start; in a horizon, index*Ts.
 
-    Sway pair is the solved one, shifted by `Cycle.adopt_solution`; a
-    reference carries no sway, so it stays zero there. `u` is likewise the
-    solved command and stays zero on a reference, which carries none.
+    The sway pair and `u` are written by `Cycle.adopt_solution`; a reference
+    carries neither, so both stay zero there.
     """
 
     t: np.ndarray  # (N,)
     q_a_ref: np.ndarray  # (N, 6)
     dq_a_ref: np.ndarray  # (N, 6)
-    ddq_a_ref: np.ndarray  # (N, 6)
     q_u_ref: np.ndarray  # (N, 2)
     dq_u_ref: np.ndarray  # (N, 2)
     u: np.ndarray  # (N, 6) -- joint velocity command at Psi's input
@@ -79,7 +76,6 @@ class Knots:
             np.zeros(count),
             np.zeros((count, ACTUATED_DOF)),
             np.zeros((count, ACTUATED_DOF)),
-            np.zeros((count, ACTUATED_DOF)),
             np.zeros((count, PASSIVE_DOF)),
             np.zeros((count, PASSIVE_DOF)),
             np.zeros((count, ACTUATED_DOF)),
@@ -90,7 +86,6 @@ class Knots:
             self.t.copy(),
             self.q_a_ref.copy(),
             self.dq_a_ref.copy(),
-            self.ddq_a_ref.copy(),
             self.q_u_ref.copy(),
             self.dq_u_ref.copy(),
             self.u.copy(),
@@ -150,8 +145,6 @@ def resample(reference: Knots, offset: float, grid: Grid):
 
     live = ~hold
     if np.any(live):
-        # C++ walks `segment` forward while ref[segment+1].t <= t, stops at
-        # len-2; searchsorted on increasing t gives the same index.
         left = np.clip(
             np.searchsorted(reference.t, t[live], side="right") - 1,
             0,
@@ -181,14 +174,9 @@ def _hermite(reference: Knots, left: np.ndarray, t: np.ndarray, out: Knots, rows
     d10 = 3.0 * s2 - 4.0 * s + 1.0
     d01 = -6.0 * s2 + 6.0 * s
     d11 = 3.0 * s2 - 2.0 * s
-    e00 = 12.0 * s - 6.0
-    e10 = 6.0 * s - 4.0
-    e01 = -12.0 * s + 6.0
-    e11 = 6.0 * s - 2.0
 
     out.q_a_ref[rows] = h00 * q0 + h10 * dt * v0 + h01 * q1 + h11 * dt * v1
     out.dq_a_ref[rows] = (d00 * q0 + d01 * q1) / dt + d10 * v0 + d11 * v1
-    out.ddq_a_ref[rows] = (e00 * q0 + e01 * q1) / (dt * dt) + (e10 * v0 + e11 * v1) / dt
 
 
 def reference_from_message(message: JointTrajectory, joints):
@@ -295,34 +283,29 @@ def horizon_to_message(
     """
     Write the horizon as a `JointTrajectory`.
 
-    `joints` is the canonical eight, in contract order; JTC's `dof_` list is
-    eight wide, and `allow_partial_joints_goal: false` rejects six names
-    whole. The two passive columns are the solved sway -- a fill, not a
-    computation.
+    `joints` is the canonical eight, in contract order: JTC's `dof_` list is
+    eight wide and `allow_partial_joints_goal: false` rejects six names whole.
+    The passive columns are the solved sway, a fill. No accelerations.
 
-    No accelerations: `ddq_a_ref` is the OCP's stage residual, not a command.
+    `lead > 0` is the live form: `stamp` is the measurement instant,
+    `in_flight_u` the command published last cycle (`in_flight` its horizon, for
+    the positions), and `_command_message` encodes the horizon so the JTC
+    (`period` its tick) replays what the OCP assumed -- counting the dead time
+    on the command as well put `u` 30-60 ms late against ~10 ms of margin
+    (issue 161). Without a lead the plain knot-per-point form goes out: shadow
+    and the offline paths. `linear` (C4): `u` is the command state at each knot,
+    ramped between them.
 
-    `lead` is the plant's own dead time. When it is non-zero, `stamp` is the
-    measurement instant, `in_flight_u` the command published last cycle (the
-    JTC plays it until knot 0, one `Ts` on; `in_flight` is its horizon, for
-    the positions) and the message is `_command_message`'s, which the
-    JTC (`period` its tick) plays back exactly as the OCP assumes. Issue 161
-    placed knot 0 at `lead` with the in-flight knot prepended instead: that
-    counted the dead time twice on the command, and with the JTC's linear
-    effort ramp and one-tick feedforward lookahead it put `u` 30-60 ms late
-    against a loop with ~10 ms of margin -- the Gazebo divergence.
-    Without a lead the plain form below goes out (shadow and offline paths).
-    `linear` (C4): `u` is the command state at each knot, ramped between them,
-    and `in_flight_u` the in-flight segment's start command.
-
-    `effort` carries a feed-forward *velocity*, not a torque, read under the
-    JTC's `effort_field_is_feedforward`. `u - dq_a_ref` is the same identity
-    `crane_planning` writes: the plugin adds `ff_velocity_scale*dq_ref` whether
-    or not anyone wants it, so the difference is what makes the open-loop branch
-    the OCP's own `u`. Without it the machine is commanded the reference velocity
-    and C3's force state never charges -- `tau_dot = k*(u_f - dq)` is zero at
-    `u == dq`. The tool row falls out at zero: it is pinned, so both terms are.
+    `effort` carries a feed-forward *velocity* under the JTC's
+    `effort_field_is_feedforward`, so `u - dq_a_ref` -- `crane_planning`'s
+    identity -- is what makes the open-loop branch the OCP's own `u`: the plugin
+    adds `ff_velocity_scale*dq_ref` regardless, and at `u == dq` C3's force never
+    charges (`tau_dot = k*(u_f - dq)`). The tool is pinned, so both terms are 0.
     """
+    if lead > 0.0:
+        return _command_message(
+            horizon, joints, stamp, period, in_flight, in_flight_u, linear
+        )
     position = np.zeros((len(horizon), cs.K_GENERALIZED_DOF))
     velocity = np.zeros_like(position)
     position[:, cs.K_ACTUATED_ROWS] = horizon.q_a_ref
@@ -344,10 +327,6 @@ def horizon_to_message(
         )
         for index in range(len(horizon))
     ]
-    if lead > 0.0:
-        return _command_message(
-            horizon, joints, stamp, period, in_flight, in_flight_u, linear
-        )
     return message
 
 

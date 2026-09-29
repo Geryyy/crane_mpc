@@ -17,9 +17,9 @@
   <depend>diagnostic_msgs</depend>
   <depend>nav_msgs</depend>
     <depend>acados</depend>
-  <!-- The node builds the OCP through acados_template at startup, so both are
-       runtime dependencies. Neither has a rosdep key here; the image provides
-       them. -->
+  <!-- The node poses the OCP through acados_template and casadi to open the
+       pre-compiled export; it compiles nothing. Runtime dependencies either way.
+       Neither has a rosdep key here; the image provides them. -->
   <depend>casadi</depend>
   <depend>generate_parameter_library</depend>
   <depend>rclpy</depend>
@@ -35,10 +35,7 @@
   <!-- `test_launch_contract.py` parses the shipped config yaml. -->
   <test_depend>python3-yaml</test_depend>
   <!-- `crane_mpc/solver.py` opens the exported solver through
-       `crane_ocp_export`, so this is a runtime dependency now, not the
-       test-only source-tree import it was: the module moved out of
-       `crane_ocp/scripts/` and is installed. Nothing links the C++ capsule any
-       more; issue 132 deleted the one target that did. -->
+       `crane_ocp_export`, which `crane_ocp` installs. -->
   <exec_depend>crane_ocp</exec_depend>
 
   <export>

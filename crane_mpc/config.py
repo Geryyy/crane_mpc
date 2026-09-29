@@ -1,19 +1,14 @@
 """
 What `crane_mpc` refuses to start on.
 
-Python port of `src/ocp_solver.cpp`'s `check_settings` (`:479-616`) and
-`check_payload` (`:253-276`): a bad configuration is a refusal at startup,
-not a NaN blamed on the solver.
+A bad configuration is a refusal at startup, not a NaN blamed on the solver, and
+every message names the quantity, its value and why the bound exists.
 
-Reasons are the deliverable, not the predicates: every message names the
-quantity, its value, and why the bound exists.
-
-`parameter_dict` reshapes the generated `Params` object into the plain
-dicts `problem`/`solver` read; a yaml on disk arrives in the same shape.
-`control_safe_box` and `command_domain` are where this node asks
-`crane_model` for a number -- neither is a declared parameter, so no
-deployment can carry a second copy of the machine. The hydraulic constants
-are read the same way, straight off `crane_model.hydraulic_limits()`.
+`parameter_dict` reshapes the generated `Params` object into the plain dicts
+`problem`/`solver` read; a yaml on disk arrives in the same shape.
+`control_safe_box`, `command_domain` and the hydraulic constants are asked of
+`crane_model` rather than declared, so no deployment carries a second copy of
+the machine.
 """
 
 from __future__ import annotations
@@ -30,9 +25,8 @@ from crane_model.conventions import (
 )
 from crane_model.velocity_loop import load_velocity_loop
 
-#: Vector-valued fields and how wide each must be: in C++, `std::array`
-#: widths the compiler checked; out of a yaml, a short list silently covers
-#: fewer axes than rows.
+#: Vector-valued fields and how wide each must be: out of a yaml, a short list
+#: silently covers fewer axes than the problem has rows.
 WIDTHS = {
     "weights": {
         "q_a": cs.K_ACTUATED_DOF,
@@ -91,11 +85,10 @@ WEIGHTS = (
 #: limits with the same rows, so a second copy here is how the two stacks drift.
 BOX = ("q_a_lower", "q_a_upper", "q_a_margin", "dq_a_max")
 
-#: Constraint 5's bound, derived rather than written: `u` is a velocity at
-#: Psi's input, so the smaller of Psi's identified domain and the control-safe
-#: speed bounds it. Both tables are crane_model's, the derivation is recorded
-#: under `derived.u_max` in control_safe_limits.yaml, and typing the product in
-#: is how it survives a narrowing of either factor.
+#: Constraint 5's bound, derived rather than written: `u` is a velocity at Psi's
+#: input, so the smaller of Psi's identified domain and the control-safe speed
+#: bounds it. Both tables are crane_model's, so a written product would not
+#: survive a narrowing of either factor.
 DERIVED = ("u_max",)
 
 #: Declared limits, i.e. the ones a deployment still writes.
@@ -154,18 +147,13 @@ def command_domain(dq_a_max) -> list:
     """
     Constraint 5's `u^+`: the smaller of Psi's domain and the speed bound.
 
-    `u_clamp_min`/`u_clamp_max` in crane_model's velocity loop are Psi's
-    identified domain, and `crane_planning` reads the same pair as
-    `command_u_min`/`command_u_max`. Asymmetric there and one magnitude here,
-    so the smaller side is taken -- the direction issue 128 took on `dq_a_max`.
-    The tool carries no clamp (no campaign covers that axis), so its row is the
-    speed bound alone.
+    `u_clamp_min`/`u_clamp_max` are Psi's identified domain, asymmetric there and
+    one magnitude here, so the smaller side is taken. The tool carries no clamp,
+    so its row is the speed bound alone.
 
     **This bounds what the MPC asks for, not what reaches Psi.** The deployed
     clamp is on the inner loop's PI term alone and the feedforward is added
-    outside it (`crane_model/velocity_loop.py`), so a stalled axis can still
-    hand Psi more than its domain. Keeping `u` inside it is the part this node
-    owns; the rest is the inner loop's.
+    outside it, so a stalled axis can still hand Psi more than its domain.
     """
     gains, _rate_hz = load_velocity_loop()
     joints = canonical_joints()
@@ -191,8 +179,7 @@ def _offender(block: dict, names, ok) -> str:
     """
     `field[row] = value` of the first entry `ok` rejects, or `""` if none is.
 
-    One helper so a refusal over six weight vectors still names the entry
-    that caused it; the C++ only named the group.
+    One helper so a refusal over six weight vectors names the entry, not the group.
     """
     for name in names:
         values = np.atleast_1d(np.asarray(block[name], dtype=float)).ravel()
@@ -221,15 +208,13 @@ def check_settings(parameters: dict, hydraulics: dict) -> None:
             if got != width:
                 raise MpcConfigError(
                     f"{block}.{name} carries {got} entries and the problem is posed "
-                    f"on {width}; a short list is not a shorter machine, it is a "
-                    "bound that covers fewer axes than there are rows"
+                    f"on {width}; a short list covers fewer axes than there are rows"
                 )
 
     _refuse(
         _offender(parameters, ("Ts",), _positive),
-        "T_s must be finite and positive; it is the control cycle of `mpc` §4, the "
-        "knot spacing of the horizon and the integrator step, and those are one "
-        "number rather than three",
+        "T_s must be finite and positive: it is the control cycle of `mpc` §4, the "
+        "horizon's knot spacing and the integrator step, all one number",
     )
     _refuse(
         _offender(parameters, ("solve_budget",), _positive),
@@ -237,29 +222,26 @@ def check_settings(parameters: dict, hydraulics: dict) -> None:
     )
     _refuse(
         _offender(parameters, ("levenberg_marquardt",), _non_negative),
-        "the Levenberg-Marquardt regularisation must be finite and >= 0; it is added "
-        "to the Hessian on every cycle and a negative one subtracts from it",
+        "the Levenberg-Marquardt regularisation is added to the Hessian every cycle "
+        "and must be finite and >= 0; a negative one subtracts from it",
     )
-    # The one timing invariant, checked once and nowhere else. `Ocp` rolls the
-    # dead time as a single `Ts` step and the state carried into the next cycle
-    # is stage 0 of this solve; neither holds at any other delay. It used to be
-    # assumed in five places and refused in one, so `sensor_to_valve_delay=0.04`
-    # ran silently wrong everywhere but the node.
+    # The one timing invariant, checked once and nowhere else: `Ocp` rolls the
+    # dead time as a single `Ts` step and the next cycle measures at stage 0 of
+    # this solve, and neither holds at any other delay.
     Ts = float(parameters["Ts"])
     delay = float(parameters["sensor_to_valve_delay"])
     if not math.isclose(delay, Ts, rel_tol=1e-9):
         raise MpcConfigError(
-            f"sensor_to_valve_delay = {delay:g} s must equal Ts = {Ts:g} s: the dead "
-            "time is rolled as one interval and the next cycle measures at stage 0 "
-            "of this solve. At any other delay the state enters the next roll off "
-            "its own measurement instant -- one-signed in C3's force rows"
+            f"sensor_to_valve_delay = {delay:g} s must equal Ts = {Ts:g} s; at any "
+            "other delay the state enters the next roll off its own measurement "
+            "instant -- one-signed in C3's force rows"
         )
     ticks = Ts * load_velocity_loop()[1]
     if ticks < 1.0 or not math.isclose(ticks, round(ticks), rel_tol=1e-9):
         raise MpcConfigError(
             f"Ts = {Ts:g} s is {ticks:g} JTC ticks (velocity_loop.yaml rate_hz) and "
-            "must be a whole number of them: the horizon's knots are what the JTC "
-            "samples, and off-tick knots are sampled by interpolation instead"
+            "must be a whole number of them; off-tick knots are sampled by "
+            "interpolation rather than played"
         )
 
     weights = parameters["weights"]
@@ -270,8 +252,7 @@ def check_settings(parameters: dict, hydraulics: dict) -> None:
             _non_negative,
         ),
         "every weight of `mpc` §2 must be finite and non-negative: the Gauss-Newton "
-        "Hessian is J' W J and a negative entry is what turns 'positive semi-definite "
-        "by construction' into a hope",
+        "Hessian is J' W J, which a negative entry stops being semi-definite",
     )
     _refuse(
         _offender(weights, ("terminal_scale",), _non_negative),
@@ -281,9 +262,8 @@ def check_settings(parameters: dict, hydraulics: dict) -> None:
     _refuse(
         _offender(weights, ("progress",), _positive),
         "the progress weight must be finite and **positive**: the progress state is "
-        "the path parameter, so this is the whole price on getting anywhere, and at "
-        "zero the machine sits on the path rather than travelling it -- a controller "
-        "that never arrives",
+        "the path parameter, so at zero the machine sits on the path rather than "
+        "travelling it -- a controller that never arrives",
     )
 
     limits = parameters["limits"]
@@ -297,8 +277,8 @@ def check_settings(parameters: dict, hydraulics: dict) -> None:
     )
     _refuse(
         _offender(limits, ("q_a_margin",), _non_negative),
-        "constraint 1's safety margin must be finite and >= 0 on every row; zero is "
-        "legal and means the bound is the control-safe limit itself",
+        "constraint 1's safety margin must be finite and >= 0 on every row; zero means "
+        "the bound is the control-safe limit itself",
     )
     for row in range(cs.K_ACTUATED_DOF):
         if not lower[row] < upper[row]:
@@ -318,46 +298,38 @@ def check_settings(parameters: dict, hydraulics: dict) -> None:
             limits, ("dq_a_max", "q_u_max", "dq_u_max", "u_max", "du_max"), _positive
         ),
         "constraints 2 to 5 of `mpc` §3 each need a finite positive bound; an invented "
-        "or absent one is the silent stub the model API's contract 5 exists to prevent",
+        "or absent one is a silent stub",
     )
-    # Headroom is a multiple of the plan's own pace, so the floor is a clean
-    # one and needs no grid to interpret. Declared as an absolute rate this
-    # compared against `K_PROGRESS_RATE_REFERENCE`, a path coordinate, and at
-    # the shipped grid that floor sat at 2.34x nominal -- it forbade every
-    # honest catch-up ceiling rather than the dishonest ones.
+    # A multiple of the plan's own pace, so the floor is one whatever the grid is.
+    # Declared as an absolute rate the floor sat at 2.34x nominal at the shipped
+    # grid, which forbade every honest catch-up ceiling.
     headroom = float(limits["progress_rate_headroom"])
     if not math.isfinite(headroom) or headroom < 1.0:
         raise MpcConfigError(
             f"progress_rate_headroom = {headroom:g} is below one, so the reference "
-            "could never be spent at its own pace, which is the behaviour every "
-            "other page in the wiki describes"
+            "could never be spent at its own pace"
         )
     _refuse(
         _offender(limits, ("progress_accel_max",), _positive),
         "the progress-acceleration bound must be finite and positive; at zero the "
-        "progress rate is frozen at whatever it was carried in with and the state is "
-        "decoration",
+        "progress rate is frozen at whatever it was carried in with",
     )
 
     _refuse(
         _offender(hydraulics, ("pump_flow_max",), _positive),
         "constraint 7 of `mpc` §3 needs a finite positive Q_P^max; `parameters.md` §4 "
-        "states it once, at 1.4e-3 m^3/s measured 2023 pre-retrofit and not "
-        "re-verified, and a weak number with its provenance recorded is worth more "
-        "than an absent constraint",
+        "states it once, weak (measured 2023 pre-retrofit) but with its provenance",
     )
     factor = float(hydraulics["pump_flow_planning_factor"])
     if not _positive(factor) or factor > 1.0:
         raise MpcConfigError(
             f"pump_flow_planning_factor = {factor:g} is outside (0, 1]; it is "
-            "`parameters.md` §4's 0.95x discount on Q_P^max, it is not a second kappa "
-            "and it is not a place to buy margin back"
+            "`parameters.md` §4's discount on Q_P^max, not a second kappa"
         )
     _refuse(
         _offender(hydraulics, ("system_pressure_pa",), _positive),
         "constraint 6 of `mpc` §3 needs a finite positive relief pressure to derive "
-        "F_i^max from (`robot_model` §4.6); it is the one number that cannot come off "
-        "the description",
+        "F_i^max from (`robot_model` §4.6); it cannot come off the description",
     )
 
     _refuse(
@@ -367,8 +339,7 @@ def check_settings(parameters: dict, hydraulics: dict) -> None:
             _positive,
         ),
         "every L1 slack price of `mpc` §3.2 must be finite and positive; a soft "
-        "constraint priced at zero is not a soft constraint, it is an absent one, and "
-        "it would be absent silently",
+        "constraint priced at zero is silently an absent one",
     )
 
 
@@ -376,22 +347,20 @@ def check_payload(mass_kg: float, com_m) -> None:
     """
     Refuse a payload the dynamics cannot carry.
 
-    No `valid` flag or inertia, unlike the C++: `crane_msgs/Payload` carries
-    neither, so an undeclared payload is refused where it's declared
-    (`reports.payload_from_message`); the body bound into `p` is a point
-    mass.
+    `crane_msgs/Payload` carries no `valid` flag and no inertia, so an undeclared
+    payload is refused where it is declared (`reports.payload_from_message`) and
+    the body bound into `p` is a point mass.
     """
     mass = float(mass_kg)
     if not _non_negative(mass):
         raise MpcConfigError(
-            f"the payload mass is {mass:g} kg, and a mass must be finite and >= 0: a "
-            "negative one is not a light load, and a non-finite one reaches every "
-            "stage of the horizon at once through `p`"
+            f"the payload mass is {mass:g} kg and must be finite and >= 0: a negative "
+            "one is not a light load, and a non-finite one reaches every stage "
+            "through `p`"
         )
     com = np.asarray(com_m, dtype=float).ravel()
     if com.size != 3 or not np.all(np.isfinite(com)):
         raise MpcConfigError(
             f"the payload's centre of mass is {com.tolist()} and must be three finite "
-            "numbers; it is the moment arm the dynamics carry, and a non-finite entry "
-            "is a solve that answers NaN"
+            "numbers; it is the moment arm the dynamics carry"
         )

@@ -1,10 +1,10 @@
 """
-The generated acados solver, opened and driven: `src/ocp_solver.cpp`'s Python counterpart.
+The generated acados solver, opened and driven.
 
-The binding around acados' unchanged artifact: what is written before a solve, read
-back after, plus the dead-time predictor and static hold force. State is the OCP's
-own 25 rows end to end, unlike the C++'s 16-wide truncated `crane_model::State`,
-which coasted its dead-time predictor at a frozen force (issue 125).
+The binding around acados' unchanged artifact: what is written before a solve,
+read back after, plus the dead-time predictor and static hold force. State is the
+OCP's own rows end to end -- a truncation that drops the actuator rows coasts the
+predictor at a frozen force (issue 125).
 """
 
 from __future__ import annotations
@@ -22,10 +22,10 @@ from crane_model import symbolic as cs
 
 from . import bspline, config, problem
 
-#: Slack below this is round-off, not a violation (`ocp_solver.hpp` kSlackNoticeable).
+#: Slack below this is round-off, not a violation.
 SLACK_NOTICEABLE = 1e-6
 
-#: acados' own return codes, spelled as `crane_ocp::status_word` spells them.
+#: acados' own return codes, by name.
 STATUS_WORDS = {
     0: "ACADOS_SUCCESS",
     1: "ACADOS_NAN_DETECTED",
@@ -304,9 +304,9 @@ def stage_equilibrium(q_eq: np.ndarray, stage: int) -> np.ndarray:
     """
     Return this stage's sway equilibrium: one held vector, or one row per stage.
 
-    The node reads one equilibrium at the measured state and holds it
-    (`ocp_solver.cpp`'s trade); a harness that knows the whole path can solve one
-    per stage. Taking either here is what lets the two share a cycle.
+    The node reads one equilibrium at the measured state and holds it; a harness
+    that knows the whole path can solve one per stage. Taking either here is what
+    lets the two share a cycle.
     """
     table = np.asarray(q_eq, dtype=float)
     return table if table.ndim == 1 else table[stage]
@@ -634,7 +634,7 @@ class Ocp:
     # -- what the problem is, checked against what was compiled -----------------
 
     def _check_dimensions(self) -> None:
-        """Check dims `ocp_solver.cpp:48-71` asserts: a stale solver is one for another problem."""
+        """Check every dimension: a stale solver is one for another problem."""
         expected = {
             "nx": self.nx,
             "nbx": self._boxed.size,
@@ -717,7 +717,7 @@ class Ocp:
                 f"the dead-time predictor answered {status_word(status)}"
             )
         predicted = predictor.get("x")
-        # acados can report success with a NaN state (`ocp_solver.cpp:1156-1162`).
+        # acados can report success with a NaN state.
         if not np.all(np.isfinite(predicted)):
             raise RuntimeError(
                 "propagating the measured state forward under the applied command "
@@ -791,39 +791,14 @@ class Ocp:
         """
         Return the next cycle's warm start: the last solution, **not** shifted.
 
-        Shifting is the textbook RTI move and it is the wrong one here. One
-        Newton step per cycle is a small budget and the shift spends it:
-        dropping knot 0 and duplicating knot N perturbs the iterate, and the
-        single iteration goes on repairing that perturbation instead of
-        improving the plan. The result is a plan that defers its own correction
-        one knot further every cycle, and since only knot 0 is ever executed,
-        the correction never happens.
-
-        Measured on the model-matched plant (`mpc_a2b.py`, 25 s settle): shifted
-        walks *away* from the goal, 0.139 -> 0.209 rad over 29 s, monotonically,
-        with every solve converged and no fallback; unshifted decays to
-        1.4e-4 rad. The QP's own numbers say the same -- shifted, it moves `u0`
-        by 9e-5 per cycle against a 0.039 gap to the converged answer.
-
-        Over `sim_chain --random 10` on two seeds the endpoint median halves
-        (18.3 -> 9.5 mm, 42.8 -> 16.3 mm) and -- unlike buying more iterations --
-        so does the worst (40.2 -> 21.1 mm, 74.3 -> 24.9 mm), with path error a
-        shade better and six refused cycles gone. Sway median moves 0.142 ->
-        0.155 rad on one seed, which is the one column that pays.
-
-        `shifted` stays for the fallback below, where a shift is not a guess but
-        the answer: those knots get published against instants that have moved.
+        The textbook RTI shift is the wrong move at one Newton step per cycle: it
+        perturbs the iterate and the single iteration spends itself repairing that
+        instead of improving the plan, so the correction is deferred one knot
+        further every cycle while only knot 0 is executed. Measured, the shifted
+        loop walks away from the goal (0.139 -> 0.209 rad over 29 s) where this
+        decays to 1.4e-4 rad.
         """
         return Guess(states=solution.states.copy(), inputs=solution.inputs.copy())
-
-    def shifted(self, solution: Solution) -> Guess:
-        """Shift the horizon one knot left as the next warm start; progress row re-origined."""
-        states = np.vstack([solution.states[1:], solution.states[-1:]])
-        inputs = np.vstack([solution.inputs[1:], solution.inputs[-1:]])
-        states[:, cs.X_PROGRESS] = np.maximum(
-            states[:, cs.X_PROGRESS] - max(solution.progress_advance, 0.0), 0.0
-        )
-        return Guess(states, inputs)
 
     def _origined_x0(self, x0: np.ndarray, path: PathCycle) -> np.ndarray:
         """
@@ -879,19 +854,19 @@ class Ocp:
                 f"the horizon carries {len(horizon)} knots and the problem is posed "
                 f"on {intervals + 1}"
             )
-        # Curvature is the sharp one: Hermite's 2nd derivative carries `1/dt^2` (unbounded below).
+        # acados answers a NaN reference with status 0, so nothing downstream
+        # would tell this from a solver fault.
         if not all(
             np.all(np.isfinite(block))
             for block in (
                 horizon.q_a_ref,
                 horizon.dq_a_ref,
-                horizon.ddq_a_ref,
                 np.asarray(q_eq, dtype=float),
             )
         ):
             raise ValueError(
-                "the reference, its curvature or the sway equilibrium carries a "
-                "value that is not finite"
+                "the reference or the sway equilibrium carries a value that is "
+                "not finite"
             )
         return x0
 

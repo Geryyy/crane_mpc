@@ -249,7 +249,6 @@ class Cycle:
         self.prepared = False
         self.prepared_horizon: hz.Knots | None = None
         self.prepared_in_flight: np.ndarray | None = None
-        self.last_solution = None
         self.measured: np.ndarray | None = None
         self.x0: np.ndarray | None = None
         self.q_eq = np.zeros(PASSIVE_DOF)
@@ -474,11 +473,9 @@ class Cycle:
         """
         Knot 0 takes effect `command_delay` after this cycle's measurement.
 
-        A grid anchored once and advanced by `Ts` keeps the first tick's phase:
-        the timer ticks on its own grid, so every stamp then sat a fixed 0-60 ms
-        off the real measurement instant -- random per run, against a loop with
-        ~10 ms of timing margin. That was which runs diverged. The tick itself
-        still sat 0-10 ms after the sample the predictor rolls from (issue 172).
+        Re-anchored every cycle, not once and advanced by `Ts`: the timer ticks on
+        its own grid, so a once-anchored stamp sat a fixed 0-60 ms off the real
+        measurement instant, random per run, against ~10 ms of timing margin.
         """
         self.next_first_knot_ns = measured_ns + int(self.command_delay * NANOSECONDS)
 
@@ -649,7 +646,6 @@ class Cycle:
             and self.latency_s > self.ocp.solve_budget_s
         ):
             solution = replace(solution, outcome=Outcome.BUDGET_EXCEEDED)
-        self.last_solution = solution
         self.guess = (
             None if solution.outcome is Outcome.FAILED else self.ocp.carried(solution)
         )
@@ -683,7 +679,7 @@ class Cycle:
             np.array_equal(
                 getattr(self.prepared_horizon, block), getattr(self.horizon, block)
             )
-            for block in ("t", "q_a_ref", "dq_a_ref", "ddq_a_ref")
+            for block in ("t", "q_a_ref", "dq_a_ref")
         )
 
     def prepare_next(self, solution) -> None:
@@ -810,24 +806,14 @@ class Cycle:
         """
         Write the solved horizon as the canonical eight the wire carries.
 
-        The planned positions are never the **solved states**. That re-anchored
-        them on the measurement every cycle -- stage 0 is `x0` pinned -- so
-        `p e_pos`, which on a velocity command interface *is* the integral action,
-        saw no error to integrate and the machine parked on the solver's
-        steady-state offset (11 mrad, measured, not decaying over 30 s).
-
-        What they are is the plan, and which plan depends on what drove the cycle.
-        On the window fit, `gates` already put it there (`hz.resample` of the
-        reference at `reference_progress`) and it stays. On the planner's curve it
-        is the point the solve chose, `c(origin + s)` per knot: the same quantity
-        the cost was written against, so the JTC chases the place the optimizer
-        planned to be rather than where the plan's own timing said to be at that
-        instant. Still a plan quantity and still not the measurement, so the
-        integral action above keeps its error.
-
-        `dq_a_ref` stays the solver's, so `effort = u - dq_a_ref` still makes the
-        two open-loop branches sum to `u`; what changes is only what the position
-        error is measured against.
+        The planned positions are a **plan** quantity, never the solved states:
+        those pin stage 0 to the measurement, which leaves the JTC's `p e_pos` --
+        the integral action on a velocity interface -- no error to integrate, and
+        the machine parks on the solver's offset (11 mrad, measured, not
+        decaying). The plan is `gates`' resampled reference on the window fit, and
+        `c(origin + s)` per knot on the planner's curve, which is the quantity the
+        cost was written against. `dq_a_ref` stays the solver's so that
+        `effort = u - dq_a_ref` keeps the two open-loop branches summing to `u`.
         """
         states = solution.states
         self.horizon.dq_a_ref[:, :PLANNED_DOF] = states[
@@ -924,41 +910,27 @@ class Cycle:
             self.last_input = np.zeros(cs.NU_PROGRESS)
             self.last_input[:PLANNED_DOF] = self.horizon.u[0, :PLANNED_DOF]
         if solution.outcome is not Outcome.FAILED:
-            # Two kinds of unmeasured row, and they want different stages.
-            #
-            # C3's command lag and force are physical. `read_state` puts them
-            # beside a `/joint_states` sample stamped at `now`, and `propagate`
-            # then rolls the lot over the dead time -- so they have to enter that
-            # roll at the next cycle's *measurement* instant. Under
-            # `command_delay` that instant is `x_next`, not a stage of this
-            # solution; `states[0]` is it only before the first propagation.
-            #
-            # The progress pair is not physical and no sensor overwrites it, so
-            # it wants the stage that stands where the next `x0` does -- that is
-            # `states[1]`, and `Ocp.propagate` holds it out of the roll.
+            # C3's lag and force rows are physical, so they enter next cycle's
+            # roll at its *measurement* instant -- `x_next`, not a stage of this
+            # solution. The progress pair is not physical and no sensor overwrites
+            # it, so it wants the stage standing where the next `x0` will:
+            # `states[1]`, which `Ocp.propagate` holds out of the roll.
             self.carried = (
                 self.x_next if self.x_next is not None else solution.states[0]
             ).copy()
             self.carried[PROGRESS_ROWS] = solution.states[1][PROGRESS_ROWS]
 
         # `s` is a path parameter, not seconds, so `path_span` converts -- one
-        # window for the window fit, the whole plan for the planner's curve. It
-        # was virtual time until the progress state became the path parameter
-        # (86ec918) and this consumer was not moved with it -- the plan then
-        # advanced at `s` per cycle, a factor short, and only ran at all because
-        # the old cost pinned `s` to its ceiling every cycle.
+        # window for the window fit, the whole plan for the planner's curve. Both
+        # readings move off the one number: `path_origin` is where on the curve
+        # the next cycle starts, `reference_progress` the same place as the plan's
+        # own time, which places the fallback's window.
         #
-        # Both quantities move off the one number: `path_origin` is where on the
-        # curve the next cycle starts, `reference_progress` the same place read as
-        # the plan's own time, which is what the fallback's window is placed by.
-        #
-        # Only a converged solve gets to say how much plan it bought. On the
-        # other rungs `ladder` published the previous horizon shifted by one
-        # knot, so what the machine consumes is one interval of *that* plan --
-        # the same nominal interval `stay_silent_after_failure` charges. Reading
-        # `s` off a refused iterate instead let the window run up to 0.21 s of
-        # plan per cycle ahead of the machine, and `max_consecutive_failures`
-        # allows five in a row before the publisher stops.
+        # Only a converged solve says how much plan it bought. The other rungs
+        # published the previous horizon shifted one knot, so the machine consumes
+        # one nominal interval of *that* plan -- what
+        # `stay_silent_after_failure` charges. Off a refused iterate the window
+        # ran up to 0.21 s of plan per cycle ahead of the machine.
         span = self.path_span()
         nominal = self.Ts / span if span > 0.0 else 0.0
         bought = (
@@ -1039,18 +1011,13 @@ class Cycle:
     def forget_plan(self) -> None:
         """Drop the warm start and the horizon a shift would be taken from."""
         # Every break in output -- gate, escalation, payload step, mode change,
-        # failure -- reaches here, and a preparation never outlives one of them.
+        # failure -- reaches here, and none of this may outlive one: a break is
+        # reactivation, so the next cycle re-seeds from the measurement rather
+        # than a state that kept integrating unmanned. `seed_force` is what makes
+        # that true of `carried`: `read_state` rebuilds the force row from
+        # `static_hold_force` at the measured pose, which after §6's escalation
+        # released the arm claim is the only pose still known to hold.
         self.forget_preparation()
-        # Carry goes with them: a break in output (gate, escalation, payload
-        # step, mode change) is reactivation, so next cycle re-seeds from the
-        # measurement, not a state that kept integrating unmanned.
-        #
-        # `seed_force` is what makes that true of `carried` itself: `read_state`
-        # rebuilds the force row from `static_hold_force` at the measured pose
-        # and takes `carried` from it. Without it the first cycle back seeded the
-        # force that held the machine up from before the break -- and after §6's
-        # escalation the arm claim is released precisely so something else can
-        # move the boom, so that pose is the one least likely to still hold.
         self.seed_force = True
         self.dq_a_carried = None
         self.velocity_carry = VelocityCarry()

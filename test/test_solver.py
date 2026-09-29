@@ -153,32 +153,30 @@ def test_the_cost_split_names_where_the_plan_spent(ocp, state):
     assert all(np.isfinite(value) and value >= 0.0 for value in terms.__dict__.values())
 
 
-def test_the_warm_start_is_the_last_horizon_shifted(ocp, state):
+def test_the_warm_start_is_the_last_solution_unshifted(ocp, state):
+    """`Ocp.carried`: knot 0 is kept, not dropped -- a shift spends the one step."""
     position = state[cs.X_PLANNED_POSITION : cs.X_PLANNED_POSITION + PLANNED]
     horizon = horizon_holding(ocp, position)
     q_eq = state[cs.X_PASSIVE_POSITION : cs.X_PASSIVE_POSITION + cs.K_PASSIVE_DOF]
 
     solution = ocp.solve(state, horizon, q_eq)
-    guess = ocp.shifted(solution)
+    guess = ocp.carried(solution)
     assert guess.warm(ocp.intervals)
-    rows = [row for row in range(cs.NX) if row != cs.X_PROGRESS]
-    assert np.allclose(guess.states[0][rows], solution.states[1][rows])
-    # `s` restarts every cycle: shifted plan re-origins by spend, not the old origin.
-    assert guess.states[0, cs.X_PROGRESS] <= solution.states[1, cs.X_PROGRESS] + 1e-12
+    assert np.array_equal(guess.states, solution.states)
+    assert np.array_equal(guess.inputs, solution.inputs)
     assert ocp.solve(solution.states[1], horizon, q_eq, guess).warm_started
 
 
 def test_a_payload_step_drops_the_warm_start_whatever_the_caller_passes(ocp, state):
     """
     `h_eff` jumps discontinuously at a grasp; a warm plan is then for another
-    model. Held in the solver, not left to caller's `guess=None`
-    (`ocp_solver.cpp:1396-1400`).
+    model. Held in the solver, not left to the caller's `guess=None`.
     """
     position = state[cs.X_PLANNED_POSITION : cs.X_PLANNED_POSITION + PLANNED]
     horizon = horizon_holding(ocp, position)
     q_eq = state[cs.X_PASSIVE_POSITION : cs.X_PASSIVE_POSITION + cs.K_PASSIVE_DOF]
 
-    guess = ocp.shifted(ocp.solve(state, horizon, q_eq))
+    guess = ocp.carried(ocp.solve(state, horizon, q_eq))
     assert ocp.solve(state, horizon, q_eq, guess).warm_started
 
     ocp.set_payload(120.0, [0.1, 0.0, -0.4])
@@ -257,9 +255,8 @@ def test_an_unexported_problem_is_refused_and_says_what_differs(parameters, tmp_
 
 def test_a_non_finite_input_never_reaches_a_solve(ocp, state):
     """
-    Both are the same defect: acados returns a NaN state with status 0, so
-    `FAULT_SOLVER` means an unchecked reference. `ddq_a_ref` is the sharp one:
-    resample's second derivative carries unbounded `1/dt^2` of knot spacing.
+    Both are the same defect: acados returns a NaN state with status 0, so a
+    `FAULT_SOLVER` would be the only sign of an unchecked reference.
     """
     broken = state.copy()
     broken[cs.X_PLANNED_VELOCITY] = np.nan
@@ -268,9 +265,9 @@ def test_a_non_finite_input_never_reaches_a_solve(ocp, state):
 
     position = state[cs.X_PLANNED_POSITION : cs.X_PLANNED_POSITION + PLANNED]
     horizon = horizon_holding(ocp, position)
-    horizon.ddq_a_ref[3, 1] = np.nan
+    horizon.dq_a_ref[3, 1] = np.nan
     q_eq = state[cs.X_PASSIVE_POSITION : cs.X_PASSIVE_POSITION + cs.K_PASSIVE_DOF]
-    with pytest.raises(ValueError, match="curvature"):
+    with pytest.raises(ValueError, match="the reference"):
         ocp.solve(state, horizon, q_eq)
 
 
@@ -317,7 +314,7 @@ def test_hpipms_memory_survives_a_warm_cycle_and_not_a_cold_one(ocp, state):
     )[1]
     try:
         # no guess is a cold cycle, and so is the payload step after it
-        guess = ocp.shifted(ocp.solve(state, horizon, q_eq))
+        guess = ocp.carried(ocp.solve(state, horizon, q_eq))
         assert ocp.solve(state, horizon, q_eq, guess).warm_started
         ocp.set_payload(120.0, [0.1, 0.0, -0.4])
         assert not ocp.solve(state, horizon, q_eq, guess).warm_started
