@@ -140,6 +140,29 @@ def test_a_solve_keeps_its_plan_inside_the_boxes_it_was_given(ocp, state):
     assert np.all(np.abs(velocity) <= dq_max + 1e-6)
 
 
+def test_the_solution_reads_flat_the_way_it_reads_per_stage(ocp, state):
+    """
+    `get_flat` is stage-major, which is what reading the solution in one call assumes.
+
+    Pinned because nothing downstream would tell a relaid-out `sl` from a real
+    violation: the slack only feeds the health report (issue 187).
+    """
+    position = state[cs.X_PLANNED_POSITION : cs.X_PLANNED_POSITION + PLANNED]
+    q_eq = state[cs.X_PASSIVE_POSITION : cs.X_PASSIVE_POSITION + cs.K_PASSIVE_DOF]
+    solution = ocp.solve(state, horizon_holding(ocp, position), q_eq)
+
+    stages = range(ocp.intervals + 1)
+    assert np.array_equal(solution.states, [ocp.solver.get(k, "x") for k in stages])
+    assert np.array_equal(
+        solution.inputs, [ocp.solver.get(k, "u") for k in range(ocp.intervals)]
+    )
+    for field in ("sl", "su"):
+        assert np.array_equal(
+            ocp.solver.get_flat(field),
+            np.concatenate([ocp.solver.get(k, field) for k in stages]),
+        )
+
+
 def test_the_cost_split_names_where_the_plan_spent(ocp, state):
     position = state[cs.X_PLANNED_POSITION : cs.X_PLANNED_POSITION + PLANNED]
     horizon = horizon_holding(ocp, position)

@@ -598,7 +598,19 @@ class Ocp:
         self._u_max, self.cylinder_force_max, self.cylinder_force_retract = (
             self._configure_fixed()
         )
-        self._slack_price = slack_prices(parameters)
+        # Priced per stage, held flat: `_slack_taken` reads `sl`/`su` for the
+        # whole horizon in one call and never slices stage by stage.
+        price = slack_prices(parameters)
+        self._slack_price = np.concatenate(
+            [price["initial"]]
+            + [price["path"]] * (self.intervals - 1)
+            + [price["terminal"]]
+        )
+        #: Widths of the two soft blocks: sway pair + sway-rate pair, and the
+        #: cylinder-force rows + the pump row. Stage 0 carries the second alone,
+        #: the terminal stage the first alone, every stage between both.
+        self._soft_state = 2 * cs.K_PASSIVE_DOF
+        self._soft_nonlinear = cs.NU + 1
 
         def predictor(seconds: float):
             return ox.open_sim(
@@ -935,6 +947,11 @@ class Ocp:
         run it against a predicted state one cycle early. `in_flight`: the command
         the JTC plays over [t, t+Ts), what stage 0's move cost prices against;
         `None` leaves it out.
+
+        Boxes, references and the seed are built for the whole horizon at once and
+        `p`/`x`/`u` go down flat: at N = 80 the per-stage Python cost 7 ms of the
+        timer callback, which is not on the command's path but is on the next
+        cycle's (issue 187).
         """
         intervals = self.intervals
 
@@ -962,23 +979,42 @@ class Ocp:
         force_reference = self.static_hold_force(x0)
         measured = x0[cs.X_PLANNED_POSITION : cs.X_PLANNED_POSITION + cs.K_PLANNED_DOF]
         rate_max = self.progress_rate_max(path)
-        # Same box but for two entries: `s`'s ceiling, and the sway rows when the
-        # caller knows an equilibrium per stage. Built once, moved per stage.
+        equilibrium = np.asarray(q_eq, dtype=float)
+        elapsed = np.arange(intervals + 1) * self.Ts
+        # One box per stage, all the same but for two entries: `s`'s ceiling, and
+        # the sway rows when the caller knows an equilibrium per stage.
         lower, upper = state_bounds(
             self.parameters, stage_equilibrium(q_eq, 0), measured, rate_max
         )
-        sway = slice(cs.X_PASSIVE_POSITION, cs.X_PASSIVE_POSITION + cs.K_PASSIVE_DOF)
-        travelling = np.asarray(q_eq, dtype=float).ndim > 1
-        q_u_max = np.asarray(self.parameters["limits"]["q_u_max"], dtype=float)
+        lower = np.repeat(lower[None], intervals + 1, axis=0)
+        upper = np.repeat(upper[None], intervals + 1, axis=0)
+        if equilibrium.ndim > 1:
+            sway = slice(
+                cs.X_PASSIVE_POSITION, cs.X_PASSIVE_POSITION + cs.K_PASSIVE_DOF
+            )
+            q_u_max = np.asarray(self.parameters["limits"]["q_u_max"], dtype=float)
+            lower[:, sway] = equilibrium - q_u_max
+            upper[:, sway] = equilibrium + q_u_max
+        # `progress_ceiling` per stage: as far as the rate reaches, or the path's end.
+        upper[:, cs.X_PROGRESS] = np.minimum(elapsed * rate_max, path.remaining())
 
-        def box(stage: int) -> tuple[np.ndarray, np.ndarray]:
-            """Return the box at this stage; only the travelling entries move."""
-            if travelling:
-                equilibrium = stage_equilibrium(q_eq, stage)
-                lower[sway] = equilibrium - q_u_max
-                upper[sway] = equilibrium + q_u_max
-            upper[cs.X_PROGRESS] = self.progress_ceiling(stage, path)
-            return lower, upper
+        # `stage_reference` per stage: the tracking rows ride in `p` and stay zero,
+        # the terminal row set is the leading `NY_TERMINAL` of a stage's.
+        reference = np.zeros((intervals + 1, self._ny))
+        passive = slice(
+            problem.Y_PASSIVE_POSITION,
+            problem.Y_PASSIVE_POSITION + cs.K_PASSIVE_DOF,
+        )
+        reference[:, passive] = equilibrium
+        # `nominal_progress` per stage: where the plan's own pace reaches by then.
+        reference[:, problem.Y_PROGRESS] = np.minimum(
+            problem.K_PROGRESS_RATE_REFERENCE,
+            float(path.origin) + elapsed * float(path.nominal_rate),
+        )
+        reference[
+            :intervals,
+            problem.Y_ACTUATED_FORCE : problem.Y_ACTUATED_FORCE + cs.K_PLANNED_DOF,
+        ] = force_reference
 
         # Kept because `cost_terms` has to score against the path this cycle was
         # written to, not a refit of it.
@@ -990,46 +1026,34 @@ class Ocp:
             if in_flight is None or not self.suppresses_moves
             else np.array(in_flight, dtype=float)
         )
-        for stage in range(intervals + 1):
-            self.solver.set(stage, "p", parameter)
-            reference = stage_reference(
-                stage_equilibrium(q_eq, stage),
-                force_reference,
-                stage == intervals,
-                self.nominal_progress(stage, path),
-                self._ny,
-            )
-            if stage == 0 and self.suppresses_moves:
-                weight = self._weight
-                if self._in_flight is not None:
-                    weight, reference = move_suppression(
-                        weight, reference, self._du, self._in_flight
-                    )
-                self.solver.cost_set(0, "W", weight)
-            self.solver.cost_set(stage, "yref", reference)
-            if stage == 0:
-                # Initial condition: every row, actuator states included, pinned at x0.
-                self.solver.constraints_set(0, "lbx", x0)
-                self.solver.constraints_set(0, "ubx", x0)
-                continue
-            self.solver.constraints_set(stage, "lbx", box(stage)[0])
-            self.solver.constraints_set(stage, "ubx", upper)
+        if self.suppresses_moves:
+            weight = self._weight
+            if self._in_flight is not None:
+                weight, reference[0] = move_suppression(
+                    weight, reference[0], self._du, self._in_flight
+                )
+            self.solver.cost_set(0, "W", weight)
+
+        self.solver.set_flat("p", np.tile(parameter, intervals + 1))
+        for stage in range(intervals):
+            self.solver.cost_set(stage, "yref", reference[stage])
+            self.solver.constraints_set(stage + 1, "lbx", lower[stage + 1])
+            self.solver.constraints_set(stage + 1, "ubx", upper[stage + 1])
+        self.solver.cost_set(
+            intervals, "yref", reference[intervals, : problem.NY_TERMINAL]
+        )
+        # Initial condition: every row, actuator states included, pinned at x0.
+        self.solver.constraints_set(0, "lbx", x0)
+        self.solver.constraints_set(0, "ubx", x0)
 
         seed = guess if warm else self.cold_start(x0)
-        for stage in range(intervals + 1):
-            if stage == 0:
-                state = x0
-            else:
-                state = seed.states[stage].copy()
-                box(stage)
-                state[self._boxed] = np.clip(state[self._boxed], lower, upper)
-            self.solver.set(stage, "x", state)
-            if stage < intervals:
-                self.solver.set(
-                    stage,
-                    "u",
-                    np.clip(seed.inputs[stage], -self._u_max, self._u_max),
-                )
+        states = seed.states.copy()
+        states[0] = x0
+        states[1:, self._boxed] = np.clip(states[1:, self._boxed], lower[1:], upper[1:])
+        self.solver.set_flat("x", states.reshape(-1))
+        self.solver.set_flat(
+            "u", np.clip(seed.inputs, -self._u_max, self._u_max).reshape(-1)
+        )
         return warm
 
     def _read_solution(
@@ -1041,10 +1065,10 @@ class Ocp:
         qp_iterations = _last(self.solver.get_stats("qp_iter"))
         iterations = int(self.solver.get_stats("sqp_iter"))
 
-        states = np.array(
-            [self.solver.get(stage, "x") for stage in range(intervals + 1)]
-        )
-        inputs = np.array([self.solver.get(stage, "u") for stage in range(intervals)])
+        # One call per field rather than one per stage: 161 crossings into acados
+        # sat between the solve and the publish (issue 187).
+        states = self.solver.get_flat("x").reshape(intervals + 1, self.nx)
+        inputs = self.solver.get_flat("u").reshape(intervals, cs.NU_PROGRESS)
 
         violation, penalty, used_slack = self._slack_taken()
 
@@ -1198,47 +1222,39 @@ class Ocp:
 
     def _slack_taken(self) -> tuple[Violation, float, bool]:
         """
-        Read what the softened constraints spent, off `sl`/`su` per stage.
+        Read what the softened constraints spent, off `sl`/`su` over the horizon.
 
         Row order (`idxsbx`): sway pair, sway-rate pair, cylinder-force rows, pump row.
+
+        Two `get_flat` calls, not two per stage: this sits between the solve and
+        the publish and only feeds the health report, so at N = 80 the per-stage
+        loop cost 3 ms of the command's own latency (issue 187).
         """
         limits = self.parameters["limits"]
         q_u_max = np.asarray(limits["q_u_max"], dtype=float)
         dq_u_max = np.asarray(limits["dq_u_max"], dtype=float)
-        violation = Violation()
-        penalty = 0.0
-        used = False
-        for stage in range(self.intervals + 1):
-            kind = (
-                "initial"
-                if stage == 0
-                else ("terminal" if stage == self.intervals else "path")
-            )
-            price = self._slack_price[kind]
-            if price.size == 0:
-                continue
-            lower = np.maximum(np.asarray(self.solver.get(stage, "sl")), 0.0)
-            upper = np.maximum(np.asarray(self.solver.get(stage, "su")), 0.0)
-            taken = np.maximum(lower, upper)
-            penalty += float(price @ lower + price @ upper)
-            entry = 0
-            if stage > 0:
-                sway = taken[entry : entry + cs.K_PASSIVE_DOF]
-                entry += cs.K_PASSIVE_DOF
-                rate = taken[entry : entry + cs.K_PASSIVE_DOF]
-                entry += cs.K_PASSIVE_DOF
-                violation.q_u = max(violation.q_u, float(np.max(sway / q_u_max)))
-                violation.dq_u = max(violation.dq_u, float(np.max(rate / dq_u_max)))
-            if stage < self.intervals:
-                force = taken[entry : entry + cs.K_PLANNED_DOF]
-                entry += cs.K_PLANNED_DOF
-                violation.cylinder_force = max(
-                    violation.cylinder_force, float(np.max(force))
-                )
-                violation.pump_flow = max(violation.pump_flow, float(taken[entry]))
-            if float(np.max(taken)) > SLACK_NOTICEABLE:
-                used = True
-        return violation, penalty, used
+        lower = np.maximum(self.solver.get_flat("sl"), 0.0)
+        upper = np.maximum(self.solver.get_flat("su"), 0.0)
+        taken = np.maximum(lower, upper)
+        penalty = float(self._slack_price @ (lower + upper))
+
+        state, nonlinear = self._soft_state, self._soft_nonlinear
+        # The stages between the ends carry both blocks, so they are one rectangle;
+        # stage 0's nonlinear rows and the terminal stage's state rows sit outside it.
+        path = taken[nonlinear : taken.size - state].reshape(-1, state + nonlinear)
+        soft_state = np.concatenate(
+            [path[:, :state], taken[None, taken.size - state :]]
+        )
+        soft_nonlinear = np.concatenate([taken[None, :nonlinear], path[:, state:]])
+
+        passive, planned = cs.K_PASSIVE_DOF, cs.K_PLANNED_DOF
+        violation = Violation(
+            q_u=float(np.max(soft_state[:, :passive] / q_u_max)),
+            dq_u=float(np.max(soft_state[:, passive:] / dq_u_max)),
+            cylinder_force=float(np.max(soft_nonlinear[:, :planned])),
+            pump_flow=float(np.max(soft_nonlinear[:, planned])),
+        )
+        return violation, penalty, bool(np.max(taken) > SLACK_NOTICEABLE)
 
     def cost_terms(self, solution: Solution, q_eq: np.ndarray) -> CostTerms:
         """Cost, term by term: re-evaluated from the residual, since acados reports one number."""

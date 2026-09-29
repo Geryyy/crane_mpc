@@ -38,6 +38,7 @@ import argparse
 import itertools
 import json
 import sys
+import time
 from pathlib import Path
 
 import harness
@@ -302,6 +303,10 @@ def fly(options, parameters, ocp, chain, equilibrium, plan, coast):
     events = {"silence": 0, "handback": 0}
     log = []
     solve_times = []
+    # Wall seconds from the cycle instant to the horizon on the wire -- the
+    # margin the timer callback has left, solve included. Offline wall time is
+    # not the machine's, but what is Python here is Python there (issue 187).
+    tick_to_publish = []
     seconds = options.seconds or float(plan.duration) + 5.0
     diverged = False
     scored = int(round(seconds / Ts))
@@ -336,12 +341,15 @@ def fly(options, parameters, ocp, chain, equilibrium, plan, coast):
                 )
             flight.append((clock + options.latency, message))
             u0 = cycle.horizon.u[0, : cs.K_PLANNED_DOF].copy()
+            tick_to_publish.append(time.perf_counter() - started)
 
+        started = 0.0
         for k in itertools.count():
             now_ns = epoch_ns + k * int(round(Ts * 1e9))
             cycle.begin()
             q, dq = plant.q, plant.dq
             u0 = np.full(cs.K_PLANNED_DOF, np.nan)
+            started = time.perf_counter()
             # Measurement is exact at the cycle instant here, so it is its own stamp.
             step = cycle.step(
                 now_ns,
@@ -467,6 +475,12 @@ def fly(options, parameters, ocp, chain, equilibrium, plan, coast):
             "solve_time_s": (
                 np.percentile(solve_times, [50, 90, 100]).tolist()
                 if solve_times
+                else []
+            ),
+            # p50/p90/p100, cycle instant to publish
+            "tick_to_publish_s": (
+                np.percentile(tick_to_publish, [50, 90, 100]).tolist()
+                if tick_to_publish
                 else []
             ),
         }
