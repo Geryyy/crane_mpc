@@ -11,7 +11,6 @@ from ament_index_python.packages import get_package_share_directory
 from conftest import export_for
 from crane_model import hydraulic_limits
 from crane_model import symbolic as cs
-
 from crane_mpc import problem
 from crane_mpc.config import machine_limits
 from crane_mpc.horizon import Grid, Knots, resample
@@ -21,7 +20,6 @@ from crane_mpc.solver import (
     export_key,
     move_suppression,
     predictor_label,
-    replay_schedule,
     weight_matrices,
 )
 
@@ -52,20 +50,6 @@ def ocp(parameters, export_base):
     description = problem.default_description().read_text()
     export_for(export_base, parameters, parameters["hydraulics"], description)
     return Ocp(description, parameters, parameters["hydraulics"])
-
-
-@pytest.fixture(scope="module")
-def split_delay_ocp(parameters, export_base):
-    """
-    OCP with a step below `sensor_to_valve_delay` (shipped Ts=0.06=delay
-    yields one replay segment). Four knots; nothing here solves.
-    """
-    values = dict(parameters)
-    values["Ts"] = 0.04
-    values["horizon_length"] = 4
-    description = problem.default_description().read_text()
-    export_for(export_base, values, values["hydraulics"], description)
-    return Ocp(description, values, values["hydraulics"])
 
 
 def hold_state(ocp):
@@ -119,53 +103,19 @@ def test_the_predictor_carries_the_command_that_is_in_flight(ocp, state):
     )
 
 
-def test_the_schedule_cuts_the_delay_between_the_commands_in_flight():
+def test_the_prediction_replays_the_one_command_that_covers_the_window(ocp, state):
     """
-    Issue 125, no solver needed. 60 ms over a 40 ms step is 1.5 intervals: the
-    remainder (20 ms) belongs to the older command -- the part worth testing.
+    `delay == Ts`, so one command covers the dead time: `propagate_applied` is
+    `propagate` on the newest entry and an older one never reaches the roll.
+    Empty stays refused -- it is not the same thing as a zero command.
     """
-    schedule = replay_schedule(0.06, 0.04)
-    assert [segment.age for segment in schedule] == [1, 0]
-    assert schedule[0].seconds == pytest.approx(0.02)
-    assert schedule[1].seconds == pytest.approx(0.04)
-
-    # Exact multiple is whole steps only: grid tolerance keeps a one-ulp
-    # remainder from becoming a third command in flight.
-    for delay in (0.08, 0.04 + 0.04):
-        assert [segment.age for segment in replay_schedule(delay, 0.04)] == [1, 0]
-
-    # Shipped grid: Ts equals the delay, so one command covers the window and
-    # nothing older replays. `config/crane_mpc.yaml` may not raise Ts past this.
-    assert [segment.age for segment in replay_schedule(0.06, 0.06)] == [0]
-    assert [segment.age for segment in replay_schedule(0.06, 0.10)] == [0]
-
-    # Nothing to replay, and a delay read in seconds where it was written in ms.
-    assert replay_schedule(0.0, 0.04) == []
-    assert replay_schedule(np.nan, 0.04) == []
-    assert replay_schedule(60.0, 0.04) == []
-
-
-def test_the_prediction_replays_each_command_over_its_own_segment(split_delay_ocp):
-    """Issue 125: two commands are in flight over 60 ms, and both are integrated."""
-    ocp = split_delay_ocp
-    state = hold_state(ocp)
     command = np.zeros(cs.NU_PROGRESS)
     command[0] = 0.4
-    older = -command
-
     held = ocp.propagate(state, command)
-    repeated = ocp.propagate_applied(state, [command, command])
-    clamped = ocp.propagate_applied(state, [command])
-    # Scale everything below is measured against; checked, not assumed.
-    moved = np.max(np.abs(ocp.propagate_applied(state, [command, older]) - held))
-    assert moved > 1.0
-    # Same command in every slot ~= constant hold, but not to the bit: 20+40ms
-    # split differs from one 60ms step, and acados warm-starts IRK Newton from
-    # the last solve. Residues are orders below the older command's worth.
-    assert np.max(np.abs(repeated - held)) < 1e-3 * moved
-    # History shorter than the delay clamps to its oldest entry rather than
-    # inventing one: cycles right after a reset still predict.
-    assert np.max(np.abs(clamped - repeated)) < 1e-3 * moved
+    assert np.allclose(ocp.propagate_applied(state, [command]), held)
+    # An older, opposite command is worth whole units on the force rows; it is
+    # out of the window and must move nothing.
+    assert np.allclose(ocp.propagate_applied(state, [command, -command]), held)
     with pytest.raises(ValueError, match="empty history"):
         ocp.propagate_applied(state, [])
 
@@ -585,7 +535,7 @@ def test_c4_replays_a_command_ramp_from_its_start(c4_ocp):
     moved = c4_ocp.propagate_applied(x, [(start, rate)])
     assert np.allclose(moved[cs.X_COMMAND :], start + c4_ocp.Ts * rate[:PLANNED])
     # ZOH form: `x`'s own `c` is the start. Not to the bit: acados warm-starts
-    # IRK Newton from the last solve (see the split-delay replay test).
+    # IRK Newton from the last solve.
     held = c4_ocp.propagate_applied(c4_state(c4_ocp, start), [rate])
     assert np.allclose(held, moved, rtol=1e-5, atol=1e-5)
 

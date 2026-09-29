@@ -157,10 +157,14 @@ slowest sway period has never been computed and is not presented as a
 measurement.
 
 The state pinned as `x_0` is the measured state propagated under the command
-already applied by `sensor_to_valve_delay`, default 60 ms — C3's transport dead
-time, pinned common to all six axes. This is deliberately not one 40 ms step.
-The prediction is an acados integrator over the same model, so the command in
-flight reaches `ddq` through the rows it actually reaches it through.
+already applied by `sensor_to_valve_delay`, 60 ms — C3's transport dead time,
+pinned common to all six axes. It **must equal `T_s`**, and
+`config.check_settings` refuses any other pair: the dead time is then one
+interval, covered by one command, and the state carried into the next cycle
+stands at that cycle's measurement instant. `T_s` must also be a whole number of
+`velocity_loop.yaml` ticks. The prediction is an acados integrator over the same
+model, so the command in flight reaches `ddq` through the rows it actually
+reaches it through.
 
 The configured solve budget is 30 ms; the solve is not
 interrupted at it, and what it decides is whether the finished step is applied

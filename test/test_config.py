@@ -57,6 +57,23 @@ def test_a_scalar_that_is_not_a_number_is_refused(shipped):
     assert "subtracts from it" in refusal(shipped)
 
 
+def test_a_delay_that_is_not_the_step_is_refused_here_and_only_here(shipped):
+    """
+    The one timing invariant. It used to live in `node.configure` alone, so
+    `Ocp` and `Cycle` took any delay and `--set sensor_to_valve_delay=0.04` ran
+    silently wrong everywhere but the node.
+    """
+    shipped["sensor_to_valve_delay"] = 0.04
+    assert "must equal Ts" in refusal(shipped)
+
+    # Off the JTC's 100 Hz tick: a grid the horizon's knots cannot be sampled on.
+    shipped["Ts"] = shipped["sensor_to_valve_delay"] = 0.065
+    assert "JTC ticks" in refusal(shipped)
+
+    shipped["Ts"] = shipped["sensor_to_valve_delay"] = 0.04
+    check_settings(shipped, shipped["hydraulics"])
+
+
 def test_a_negative_weight_is_refused_and_names_the_entry(shipped):
     shipped["weights"]["dq_a"][2] = -0.4
     message = refusal(shipped)

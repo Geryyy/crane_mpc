@@ -24,9 +24,9 @@ table and digests of the description, `problem.py`, `crane_symbolic.py` and the
 C3 fit. Weights, boxes and slack prices are deliberately absent: they go in
 through the runtime API every cycle, so retuning reuses this solver.
 
-The integrators go in the same export: the cold-start stepper and one per
-dead-time replay segment, from `solver.predictor_intervals`, so the set this
-compiles and the set `Ocp` opens are one list.
+The integrators go in the same export: one `Ts` step, from
+`solver.predictor_sims`, which is the cold start, one horizon stage and the
+dead time alike -- so the set this compiles and the set `Ocp` opens are one list.
 
 ## The C3 fit keeps its own checks
 

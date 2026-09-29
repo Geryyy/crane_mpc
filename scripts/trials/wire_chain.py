@@ -23,9 +23,10 @@ divergence or hunting (`crane_mpc.hunting`: u0 reversing on half the cycles).
 
 Levers: `--set weights.du=30 --set dq_a_feedback=false` overrides crane_mpc.yaml
 (yaml value; a scalar on a list key fills every axis). A key in
-`solver.export_key` (Ts, horizon_length, sensor_to_valve_delay, ...) re-exports
-the solver: minutes, and unlocked, so run that setting once before a parallel
-sweep. Payload: `--payload-mass` is what the OCP believes, `--plant-payload`
+`solver.export_key` (Ts, horizon_length, ...) re-exports the solver: minutes,
+and unlocked, so run that setting once before a parallel sweep. `Ts` moves
+`sensor_to_valve_delay` with it -- `check_settings` refuses any other pair, and
+`harness.create_solver` refuses before the export rather than after it. Payload: `--payload-mass` is what the OCP believes, `--plant-payload`
 what MuJoCo carries (default: the same), both at `--payload-com` in K8.
 
 Not the machine: measurement is exact at the cycle instant, the solve takes no

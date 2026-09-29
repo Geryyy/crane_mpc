@@ -6,8 +6,6 @@ that hands control back, and the shift that keeps driving on a solve that
 did not converge.
 """
 
-from types import SimpleNamespace
-
 import numpy as np
 import pytest
 from crane_model import symbolic as cs
@@ -18,7 +16,6 @@ from crane_mpc.cycle import (
     JOINT_PATH_TOPIC,
     Cycle,
     carry_actuated_velocity,
-    carry_stage,
     watch_progress,
 )
 from crane_mpc.solver import Outcome, Solution, Violation
@@ -31,7 +28,8 @@ Ts = 0.04
 
 
 def cycle(mode="active"):
-    made = Cycle(Ts, hz.Grid(Ts, KNOTS), mode, 0.0)
+    # `delay == Ts` is the one timing invariant `config.check_settings` enforces.
+    made = Cycle(Ts, hz.Grid(Ts, KNOTS), mode, Ts)
     made.horizon = hz.Knots.zeros(KNOTS)
     return made
 
@@ -715,39 +713,6 @@ def test_a_shifted_horizon_records_the_command_it_published():
     assert one.last_input[:DOF] == pytest.approx(published)
 
 
-def test_the_carry_stage_follows_the_delay():
-    """
-    `states[k]` stands at `x_0 + k*Ts`, so the next cycle's measurement instant
-    is `1 - delay/Ts`. Both deployable values, pinned: the machine carries one
-    delay of a step, a graph with no measured transport carries none.
-    """
-    assert carry_stage(0.06, 0.06) == 0
-    assert carry_stage(0.0, 0.06) == 1
-
-
-def test_a_delay_between_zero_and_a_step_is_refused_not_rounded():
-    """
-    Neither stage stands at the measurement instant, and taking the nearer one
-    is the one-signed force error `adopt_solution` records. `replay_schedule`
-    cuts a partial interval happily -- the carry is what cannot.
-    """
-    with pytest.raises(ValueError, match="neither 0 nor Ts"):
-        carry_stage(0.06, 0.04)
-
-
-def test_no_measured_transport_carries_the_stage_the_next_cycle_measures_at():
-    """
-    At zero delay `propagate` is the identity, so the carried state has to be
-    the one a step ahead. Carrying `states[0]` leaves it a whole `Ts` stale --
-    the same defect as the machine's case, with the sign reversed.
-    """
-    made = cycle("active")
-    solved = solution(Outcome.CONVERGED, 1.0)
-    made.advance(solved, NOMINAL_NS, MIN_RATE, MAX_STALL)
-    assert made.carry_stage == 1
-    assert made.carried[0] == pytest.approx(solved.states[1][0])
-
-
 def test_the_machine_carries_force_from_the_next_measurement_and_progress_from_x0_on():
     """
     `propagate` rolls the measurement one `Ts` under the command the plant runs
@@ -755,8 +720,7 @@ def test_the_machine_carries_force_from_the_next_measurement_and_progress_from_x
     published. C3's physical rows enter the next cycle from `x_next`; the
     progress pair from `states[1]`, where the next `x_0` stands.
     """
-    made = Cycle(Ts, hz.Grid(Ts, KNOTS), "active", Ts)
-    made.horizon = hz.Knots.zeros(KNOTS)
+    made = cycle()
     made.x_next = np.full(cs.NX, 7.0)
     solved = solution(Outcome.CONVERGED, 1.0)
     made.advance(solved, NOMINAL_NS, MIN_RATE, MAX_STALL)
@@ -766,22 +730,8 @@ def test_the_machine_carries_force_from_the_next_measurement_and_progress_from_x
     )
 
 
-def test_a_refused_delay_does_not_raise_out_of_the_constructor():
-    """
-    `Cycle` is built in `MpcNode.__init__`, outside `main`'s `try`, so a raise
-    there is a dead process and downstream cannot tell that from a crashed MPC.
-    `check_settings` owns the refusal (test_config) and `configure` reports it;
-    this only pins that the constructor stays quiet and nothing solves on the
-    stage it falls back to.
-    """
-    made = Cycle(0.04, hz.Grid(0.04, KNOTS), "active", 0.06)
-    assert made.carry_stage == 0
-
-
 class ReplayOcp:
     """Records the commands `propagate` replays; the roll itself is the identity."""
-
-    replay = [SimpleNamespace(age=0, seconds=Ts)]
 
     def __init__(self):
         self.replayed = []

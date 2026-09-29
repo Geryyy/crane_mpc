@@ -145,6 +145,9 @@ def settings(overrides=()) -> tuple[dict, dict]:
 
 def create_solver(parameters, hydraulics, rebuild=False, verbose=False):
     """Open the node's `Ocp` for these settings, exporting first if none matches."""
+    # Before the export, not after it: a `--set` the node would refuse otherwise
+    # costs a minute of code generation to find out. `Ocp` checks again anyway.
+    export_ocp.ocp_config.check_settings(parameters, hydraulics)
     xml = description_xml()
     key = ocp_runtime.export_key(parameters, hydraulics, xml)
     base = ocp_runtime.export_base()

@@ -474,12 +474,9 @@ def export_key(parameters: dict, hydraulics: dict, description_xml: str) -> dict
     "the hash differs" is not.
     """
     return {
+        # `Ts` alone names the integrators: the dead time is one `Ts`
+        # (`config.check_settings`), so the delay cannot move the export.
         "Ts": parameters["Ts"],
-        # The delay decides which integrators `predictor_label` names into the
-        # export, so it is compiled in exactly as the acados settings are. It was
-        # missing here, and a changed delay therefore opened its predecessor's
-        # `.so` and read as a null result.
-        "sensor_to_valve_delay": parameters["sensor_to_valve_delay"],
         "command_state": problem.command_state(parameters),
         "horizon_length": parameters["horizon_length"],
         "levenberg_marquardt": parameters["levenberg_marquardt"],
@@ -496,44 +493,6 @@ def export_key(parameters: dict, hydraulics: dict, description_xml: str) -> dict
 def _sub_steps(seconds: float, sample_time: float) -> int:
     """How many integrator steps the interval takes with none longer than `T_s`."""
     return max(1, int(np.ceil(seconds / sample_time)))
-
-
-@dataclass(frozen=True)
-class ReplaySegment:
-    """One command in flight: which history entry it is, and how much it covers."""
-
-    #: Index into the newest-first applied-input history. 0 is what is applied now.
-    age: int
-    #: Seconds of the delay window that entry was the applied command for.
-    seconds: float
-
-
-#: yaml floats: `0.08/0.04` can land just under 2; a one-ulp remainder is round-off.
-GRID_TOLERANCE = 1e-9
-
-#: A delay of a thousand intervals is a unit slip (60 read as seconds for 0.06).
-MAX_REPLAY_INTERVALS = 1024.0
-
-
-def replay_schedule(delay_s: float, step_s: float) -> list[ReplaySegment]:
-    """
-    Cut the dead time into one segment per command the machine was actually given.
-
-    Oldest first; the partial interval is oldest, belonging to entry
-    `floor(delay_s / step_s)`, not the newest. Empty for a non-positive, non-finite
-    or unit-slip-deep delay.
-    """
-    if not (np.isfinite(delay_s) and np.isfinite(step_s)):
-        return []
-    if delay_s <= 0.0 or step_s <= 0.0 or delay_s / step_s > MAX_REPLAY_INTERVALS:
-        return []
-    full = int(np.floor(delay_s / step_s + GRID_TOLERANCE))
-    remainder = delay_s - full * step_s
-    segments = []
-    if remainder > GRID_TOLERANCE * step_s:
-        segments.append(ReplaySegment(full, remainder))
-    segments.extend(ReplaySegment(age, step_s) for age in range(full - 1, -1, -1))
-    return segments
 
 
 def predictor_label(seconds: float, sample_time: float) -> str:
@@ -563,28 +522,14 @@ def predictor_sim(ocp, seconds: float, sample_time: float) -> AcadosSim:
 
 
 def predictor_sims(ocp, parameters: dict) -> list:
-    """Every `(label, AcadosSim)` an export must carry for this configuration."""
+    """Every `(label, AcadosSim)` an export must carry: one `Ts` step, and only one."""
     sample_time = float(parameters["Ts"])
     return [
         (
-            predictor_label(seconds, sample_time),
-            predictor_sim(ocp, seconds, sample_time),
+            predictor_label(sample_time, sample_time),
+            predictor_sim(ocp, sample_time, sample_time),
         )
-        for seconds in predictor_intervals(parameters)
     ]
-
-
-def predictor_intervals(parameters: dict) -> list:
-    """Every interval an `Ocp` will want an integrator for, longest first."""
-    sample_time = float(parameters["Ts"])
-    delay = float(parameters["sensor_to_valve_delay"])
-    wanted = {sample_time}
-    if delay > 0.0:
-        wanted.add(delay)
-        wanted.update(
-            segment.seconds for segment in replay_schedule(delay, sample_time)
-        )
-    return sorted(wanted, reverse=True)
 
 
 class Ocp:
@@ -664,21 +609,8 @@ class Ocp:
                 verbose=verbose,
             )
 
+        #: Cold start, one horizon stage, and the dead time -- all one `Ts`.
         self._stepper = predictor(self.Ts)
-        delay = float(parameters["sensor_to_valve_delay"])
-        self._predictor = predictor(delay) if delay > 0.0 else None
-        self.delay_s = delay
-        #: How the delay window splits between the commands in flight (issue 125).
-        self.replay = replay_schedule(delay, self.Ts)
-        # One integrator per segment, built here not in the cycle (too slow for a callback).
-        self._segment_predictor = {
-            segment.seconds: (
-                self._stepper
-                if segment.seconds == self.Ts
-                else predictor(segment.seconds)
-            )
-            for segment in self.replay
-        }
 
         self._base_parameter = np.zeros(cs.NP)
         self.payload_mass_kg = 0.0
@@ -795,7 +727,7 @@ class Ocp:
 
     def propagate(self, x: np.ndarray, u: np.ndarray) -> np.ndarray:
         """
-        `x` carried forward through the transport dead time under `u`.
+        `x` carried forward through the transport dead time -- one `Ts` -- under `u`.
 
         Whole state, actuator rows included: under C3, `u` reaches `ddq` only via
         lag/force rows, so dropping them would return one state for every command
@@ -809,20 +741,19 @@ class Ocp:
         `_origined_x0`'s clamp load-bearing rather than a backstop.
         """
         x, u = _finite(x, u)
-        if self._predictor is None:
-            return x.copy()
-        moved = self._integrate(self._predictor, x, u)
+        moved = self._integrate(self._stepper, x, u)
         moved[PROGRESS_ROWS] = x[PROGRESS_ROWS]
         return moved
 
     def propagate_applied(self, x: np.ndarray, applied) -> np.ndarray:
         """
-        Carry `x` under the commands actually applied over the delay, newest first.
+        Carry `x` under the command in flight, newest first.
 
-        One hold per command (`self.replay`); a short history clamps oldest, empty is refused.
+        The dead time is one `Ts`, so one command covers it and only `applied[0]`
+        is read -- the caller keeps the rest for its next roll. Empty is refused.
 
         An entry is an input (ZOH), or C4's `(start, input)`: `start` is `c` at the
-        entry's first instant, written into `x` before its segment; `None` keeps `x`'s.
+        entry's first instant, written into `x` before the roll; `None` keeps `x`'s.
         """
         if len(applied) == 0:
             raise ValueError(
@@ -830,37 +761,13 @@ class Ocp:
                 "now; an empty history is not the same thing as a zero command "
                 "and is not guessed at here"
             )
-        pairs = [
-            entry if isinstance(entry, tuple) else (None, entry) for entry in applied
-        ]
-        starts = [None if start is None else _finite(start)[0] for start, _ in pairs]
-        state, *history = _finite(x, *[command for _, command in pairs])
-        command = slice(cs.X_COMMAND, cs.X_COMMAND + cs.K_PLANNED_DOF)
-
-        def started(state, entry):
-            if starts[entry] is None:
-                return state
+        entry = applied[0]
+        start, command = entry if isinstance(entry, tuple) else (None, entry)
+        state, command = _finite(x, command)
+        if start is not None:
             state = state.copy()
-            state[command] = starts[entry]
-            return state
-
-        if not self.replay:
-            # Nothing to cut up: zero delay, or the single-input path complains.
-            return self.propagate(started(state, 0), history[0])
-        # Held back across the whole replay, same reason as `propagate`.
-        progress = state[PROGRESS_ROWS].copy()
-        previous = None
-        for segment in self.replay:
-            entry = min(segment.age, len(history) - 1)
-            # A clamped entry replayed twice continues its ramp, not restarts it.
-            if entry != previous:
-                state = started(state, entry)
-            previous = entry
-            state = self._integrate(
-                self._segment_predictor[segment.seconds], state, history[entry]
-            )
-        state[PROGRESS_ROWS] = progress
-        return state
+            state[cs.X_COMMAND : cs.X_COMMAND + cs.K_PLANNED_DOF] = _finite(start)[0]
+        return self.propagate(state, command)
 
     # -- one cycle ---------------------------------------------------------------
 

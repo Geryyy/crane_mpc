@@ -257,12 +257,27 @@ def check_settings(parameters: dict, hydraulics: dict) -> None:
         "the Levenberg-Marquardt regularisation must be finite and >= 0; it is added "
         "to the Hessian on every cycle and a negative one subtracts from it",
     )
-    _refuse(
-        _offender(parameters, ("sensor_to_valve_delay",), _non_negative),
-        "the transport dead time must be finite and >= 0; zero means none has been "
-        "measured and nothing is propagated, which is honest, whereas a negative one "
-        "is a plan for the past",
-    )
+    # The one timing invariant, checked once and nowhere else. `Ocp` rolls the
+    # dead time as a single `Ts` step and the state carried into the next cycle
+    # is stage 0 of this solve; neither holds at any other delay. It used to be
+    # assumed in five places and refused in one, so `sensor_to_valve_delay=0.04`
+    # ran silently wrong everywhere but the node.
+    Ts = float(parameters["Ts"])
+    delay = float(parameters["sensor_to_valve_delay"])
+    if not math.isclose(delay, Ts, rel_tol=1e-9):
+        raise MpcConfigError(
+            f"sensor_to_valve_delay = {delay:g} s must equal Ts = {Ts:g} s: the dead "
+            "time is rolled as one interval and the next cycle measures at stage 0 "
+            "of this solve. At any other delay the state enters the next roll off "
+            "its own measurement instant -- one-signed in C3's force rows"
+        )
+    ticks = Ts * load_velocity_loop()[1]
+    if ticks < 1.0 or not math.isclose(ticks, round(ticks), rel_tol=1e-9):
+        raise MpcConfigError(
+            f"Ts = {Ts:g} s is {ticks:g} JTC ticks (velocity_loop.yaml rate_hz) and "
+            "must be a whole number of them: the horizon's knots are what the JTC "
+            "samples, and off-tick knots are sampled by interpolation instead"
+        )
 
     weights = parameters["weights"]
     _refuse(

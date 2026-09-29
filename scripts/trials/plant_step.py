@@ -83,7 +83,8 @@ def ocp_model(hold, amplitude, parameters):
         x = ocp._integrate(ocp._stepper, x, u)
         t.append((k + 1) * ocp.Ts)
         dq.append(float(x[VEL][0]) / amplitude)
-    return np.array([float(np.interp(max(f - ocp.delay_s, 0.0), t, dq)) for f in TIMES])
+    # The dead time is one `Ts` (`config.check_settings`), so shift by that.
+    return np.array([float(np.interp(max(f - ocp.Ts, 0.0), t, dq)) for f in TIMES])
 
 
 def main():

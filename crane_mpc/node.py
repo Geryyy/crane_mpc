@@ -54,7 +54,6 @@ from .cycle import (
     FollowerCommand,
     Measurement,
     Silence,
-    carry_stage,
 )
 from .parameters import crane_mpc as parameter_library
 from .solver import Ocp, path_control
@@ -400,21 +399,9 @@ class MpcNode(Node):
             self._joints = [names[row] for row in ACTUATED_INDICES]
             self._passive_joints = [names[row] for row in PASSIVE_INDICES]
             self._canonical_joints = list(names)
-            # `Cycle.carry_stage` cannot express a delay that is neither 0 nor
-            # `Ts`, and `Cycle` is constructed in `__init__`, outside `main`'s
-            # `try`. Refusing here makes it a reported configuration failure
-            # instead of a dead process the supervisor cannot tell from a crash.
-            # `Ocp` is not the one constrained -- `replay_schedule` cuts a
-            # partial interval happily -- so this is the cycle's refusal, raised
-            # where the node reports.
-            self._cycle.carry_stage = carry_stage(self.delay, self.Ts)
-            if self._cycle.carry_stage != 0:
-                # `Cycle.command_delay` rolls the dead time with the `Ts`-long
-                # replay integrator; at zero delay x0 would stand a `Ts` short.
-                raise ValueError(
-                    f"sensor_to_valve_delay {self.delay} s must equal Ts {self.Ts} s: "
-                    "the command schedule rolls the dead time as one interval"
-                )
+            # `Ocp.__init__` runs `config.check_settings`, which is where
+            # `delay == Ts` is refused -- inside this `try`, so it is a reported
+            # configuration failure and not a dead process in `MpcNode.__init__`.
             self._ocp = Ocp(
                 problem.default_description().read_text(),
                 config.parameter_dict(self._values),
