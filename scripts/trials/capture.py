@@ -9,6 +9,7 @@ import rclpy
 from control_msgs.msg import JointTrajectoryControllerState
 from crane_msgs.msg import SolverHealth
 from rclpy.node import Node
+from rclpy.parameter import Parameter
 from sensor_msgs.msg import JointState
 from trajectory_msgs.msg import JointTrajectory
 
@@ -24,7 +25,12 @@ def stamp_ns(h):
 
 class Cap(Node):
     def __init__(self):
-        super().__init__("cap")
+        # `rx` is only comparable with a header stamp on the same clock, and in
+        # sim the stamps are sim time. Without this every latency reads as the
+        # wall-to-sim epoch offset (issue 189).
+        super().__init__(
+            "cap", parameter_overrides=[Parameter("use_sim_time", value=True)]
+        )
         self.health, self.js, self.hz = [], [], []
         self.ref_stamps, self.path_stamps = [], []
         self.ref = {}
@@ -52,6 +58,10 @@ class Cap(Node):
         if JointPath is not None:
             self.create_subscription(JointPath, "/crane/joint_path", self.on_path, 10)
 
+    def rx(self):
+        """Receipt on the stamps' own clock. `sim - rx` is the delivery latency."""
+        return self.get_clock().now().nanoseconds * 1e-9
+
     def on_h(self, m):
         self.health.append(
             dict(
@@ -77,6 +87,7 @@ class Cap(Node):
         self.js.append(
             dict(
                 t=time.time(),
+                rx=self.rx(),
                 sim=stamp_ns(m.header) * 1e-9,
                 names=list(m.name),
                 pos=list(m.position),
@@ -91,6 +102,11 @@ class Cap(Node):
         self.hz.append(
             dict(
                 t=time.time(),
+                rx=self.rx(),
+                # `Timing.stamp_ns`: the measurement instant knot 0 counts from.
+                # Latency and cadence phase are both measured off this, so a
+                # capture without it cannot answer issue 189 at all.
+                sim=stamp_ns(m.header) * 1e-9,
                 names=list(m.joint_names),
                 pos=list(p.positions),
                 vel=list(p.velocities),
@@ -104,6 +120,8 @@ class Cap(Node):
         self.ctrl.append(
             dict(
                 t=time.time(),
+                rx=self.rx(),
+                sim=stamp_ns(m.header) * 1e-9,
                 src=source,
                 names=list(m.joint_names),
                 out=list(m.output.velocities),
@@ -156,6 +174,10 @@ def main():
         f"health={len(n.health)} js={len(n.js)} hz={len(n.hz)} ctrl={len(n.ctrl)} "
         f"ref={n.ref_stamps} path={n.path_stamps}"
     )
+    # No /clock: `rx` is 0 and no latency can be measured from this capture.
+    # Say it now -- discovering it after the sim is torn down costs the run.
+    if n.hz and not any(r["rx"] for r in n.hz):
+        print("WARNING: no /clock, so rx=0 -- looptiming.py cannot measure latency")
     rclpy.shutdown()
 
 

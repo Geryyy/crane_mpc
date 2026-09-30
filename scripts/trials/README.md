@@ -26,7 +26,36 @@ then withdrawn on that metric. Score on the growth rate instead.
   activate `trajectory_controller_a2b`, call `/a2b_movement`, capture.
   `CTRL=pid MOVE=<script>` swaps the arm. ~3 min.
 - `capture.py` — records `/joint_states`, `/crane/mpc/horizon` knot 0 and
-  `/crane/mpc/solver_health`. Joints by `name[]`, never by index.
+  `/crane/mpc/solver_health`. Joints by `name[]`, never by index. Each row
+  carries three times: wall `t`, the header stamp `sim` and the receipt `rx` on
+  the stamps' own clock (`use_sim_time`, so sim time in sim). `sim - rx` is the
+  only way to a latency — wall and sim are different clocks.
+- `looptiming.py <cap.json>` — of the four numbers issue 189 wants, the two a
+  capture actually contains: delivery latency (`--latency`) and the
+  controller-state publish rate, with the share of cycles under
+  `Timing.jtc_output`'s quorum — taken against the **nominal** tick count, because
+  against the measured rate a uniformly decimated stream reads as a healthy slow
+  one. Offline; the recording is the live part. It refuses the other two and says
+  why:
+  - **cadence phase is not observable.** `node.py` stamps the horizon with
+    `Timing.stamp_ns()`, which `Timing.anchor` makes identically the measurement
+    stamp — so the horizon stamp *is* a `/joint_states` stamp and any offset
+    against that set is 0 by construction, on a once-anchored loop as much as a
+    healthy one. The live quantity is the age of the state at the node's timer
+    tick, and no tick instant is recorded.
+  - **dead time is not measurable from a capture**, and `sensor_to_valve_delay`
+    is not a free lever — `config.check_settings` refuses any value but `Ts`.
+    Only the *sum* of dead time and `tau_v` is identified, so the lever is
+    `--lag-shift` (constant sum) and the instrument is `steptest.py`, open loop
+    with the MPC out. A correlation of `out` against `/joint_states` `vel` would
+    measure the closed loop's dominant phase — `out` carries the PI term, so it
+    carries the measurement — plus `tau_v` plus the body's own lag.
+
+  Two caveats on the latency it does report: arrival is the capture node's, not
+  the JTC's (same transport, different callback queue, and the recorder's own
+  `spin_once` backlog is inside the number), and `rx` is a held sim-clock value,
+  so the resolution is one `/clock` period and a lagging capture clock can read
+  negative.
 - `growth.py <cap.json> <label> ...` — the score: fit `log|q_u - q_eq|` against
   sim time over the first rise. `<= 0` is stable. Two runs per arm, worst reported.
 - `steptest.py <out.json>` — one open-loop velocity step per axis on a live
@@ -43,3 +72,60 @@ then withdrawn on that metric. Score on the growth rate instead.
   same run the latter reads 20x worse.
 - `score.py` — cadence, command chatter, travel, arrival. Context, not the score.
 - `pid_move.py` — the same plan with the MPC off: the stable reference arm.
+
+## Matching `wire_chain` to the live Gazebo loop — issue 189
+
+A robustness answer from standalone MuJoCo transfers only if its loop matches
+the live one. `--latency` and `--cadence-phase` are free parameters and have
+**never been fitted to Gazebo**; Gazebo has read ~3x faster than the identified
+model before, and the wire has ~10 ms of margin, so an unmatched harness can
+call a live instability stable. Until the table below is filled, treat a
+`wire_chain` stability verdict as unvalidated against Gazebo.
+
+The recording is human-run — it needs a live Gazebo, which the loop may not
+start (PRD §14). The measurement after it is offline.
+
+    ./scripts/trials/trial.sh /tmp/a2b-loaded     # one live A2B move, ~3 min
+    ./scripts/trials/looptiming.py /tmp/a2b-loaded/cap.json
+    ./scripts/trials/wire_chain.py --goal out --latency <L>
+    ./scripts/trials/steptest.py /tmp/step.json     # open loop, for the lag
+    ./scripts/trials/plant_step.py /tmp/step.json   # Gazebo / MuJoCo / OCP
+
+Once loaded at 800 kg and once empty (`--payload-mass`/`--plant-payload` on the
+replay side), then compare sway peak and path error against the recording.
+
+| quantity                | Gazebo measured | `wire_chain` set       | how                |
+| ----------------------- | --------------- | ---------------------- | ------------------ |
+| tick-to-arrival latency | *unmeasured*    | `--latency 0.0`        | `looptiming.py`    |
+| controller-state rate   | *unmeasured*    | `harness` `jtc_period` | `looptiming.py`    |
+| dead time + `tau_v`     | *unmeasured*    | `--lag-shift 0.0`      | `steptest.py`      |
+| cadence phase           | **not observable from a capture** | `--cadence-phase 0.0` | — |
+
+Fill a cell only from the instrument named in the last column. A wrong number
+here does not leave the harness unvalidated — it declares it validated, which is
+worse than an empty cell. In particular a command-to-response correlation on a
+`cap.json` is not the dead time (see `looptiming.py`), and `--cadence-phase`
+stays at its default because the capture cannot say otherwise.
+
+Known gaps in `wire_chain` that no argument closes, and whether they bear on
+stability rather than tracking:
+
+- **The solve takes no time.** `--latency` is delivery only and the budget is
+  off, so a late solve never lands late. Live, `applied_previous_solution` is a
+  different closed loop — stability, not tracking.
+- **Measurement is exact at the cycle instant.** No encoder quantisation, no
+  sensor age, and the passive state is read rather than estimated. The live
+  passive state comes from a complementary filter whose lag is inside the sway
+  loop — stability.
+- **Arrival is measured at a second subscriber.** The JTC's own callback
+  scheduling adds to it under load, and the issue's own note records
+  controller-state starvation at load avg 20-28 — stability. `--latency` is one
+  number, so it cannot carry the jitter either: the p90 and the p50 are set
+  separately or not at all.
+- **The cadence anchor is exact.** `wire_chain` measures at the cycle instant,
+  so the state is never stale; live it is up to a `/joint_states` period old at
+  the timer tick. This is the gap `--cadence-phase` was meant to stand for and
+  the one the capture cannot measure — stability, and currently unbounded.
+- **The tool axis is not driven**, and the JTC's tolerance checks, goal handling
+  and angle wraparound are skipped — tracking, except where a tolerance abort
+  would have stopped the move.
