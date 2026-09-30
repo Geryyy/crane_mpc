@@ -35,6 +35,7 @@ TCP_HORIZON_FRAME = "K0_mounting_base"
 SET_PAYLOAD_SERVICE = "/crane/mpc/set_payload"
 SHADOW_HORIZON_TOPIC = "~/shadow_horizon"
 SHADOW_COMPARISON_TOPIC = "~/shadow_comparison"
+PUMP_FLOW_TOPIC = "~/pump_flow"
 
 #: Where the canonical eight carry the six actuated and the two passive.
 ACTUATED_INDICES = cs.K_ACTUATED_ROWS

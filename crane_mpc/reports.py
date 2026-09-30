@@ -1,12 +1,13 @@
 """
 What the cycle says about itself, as messages.
 
-Pure marshalling: solver health, shadow comparison, TCP horizon, payload. Every
+Pure marshalling: solver health, shadow comparison, TCP horizon, payload, pump flow. Every
 function takes a `Cycle` and returns a message; nothing publishes here.
 """
 
 from __future__ import annotations
 
+import casadi as ca
 import numpy as np
 from crane_model import Frame, Payload
 from crane_model import symbolic as cs
@@ -373,3 +374,45 @@ def payload_from_message(message):
     payload.mass_kg = float(message.mass)
     payload.center_of_mass_k8_m = com
     return payload, ""
+
+
+class PumpFlow:
+    """
+    `Q_i = A^±_i |J_c,i(q) dq_i|` on all six actuated axes, from the measurement.
+
+    Constraint 7's summands without its smoothing, and with the tool the OCP
+    leaves out (it is held still there, not here -- nomenclature §8).
+    """
+
+    def __init__(self, hydraulics: dict, constants=None):
+        constants = constants if constants is not None else cs.load_constants()
+        q2, q3 = ca.SX.sym("q2"), ca.SX.sym("q3")
+        self._ratio = ca.Function(
+            "J_c", [q2, q3], [ca.vertcat(*cs.jacobian_diagonal(constants, q2, q3))]
+        )
+        areas = cs.axis_areas(constants)
+        self._extend = np.array([area.a_eff_pos for area in areas])
+        self._retract = np.array([area.a_eff_neg for area in areas])
+        self.q_pump_max = float(hydraulics["pump_flow_max"])
+        #: Where constraint 7 binds, as a share: the planning factor, not 1.
+        self.planned_share = float(hydraulics["pump_flow_planning_factor"])
+
+    def __call__(self, q_a, dq_a) -> np.ndarray:
+        ratio = np.asarray(self._ratio(q_a[1], q_a[2]), dtype=float).reshape(-1)
+        velocity = ratio * np.asarray(dq_a, dtype=float)
+        return np.where(velocity >= 0.0, self._extend, self._retract) * np.abs(velocity)
+
+
+def pump_flow(flow: np.ndarray, pump: PumpFlow, joints, stamp) -> DiagnosticArray:
+    """`Q_pump`, its share of `Q_pump_max`, the share the MPC binds at, each axis' `Q`."""
+    message = DiagnosticArray()
+    message.header.stamp = stamp
+    status = DiagnosticStatus(name="pump", level=DiagnosticStatus.OK)
+    total = float(np.sum(flow))
+    status.values = [
+        KeyValue(key="Q_pump", value=_text(total)),
+        KeyValue(key="Q_pump_share", value=_text(total / pump.q_pump_max)),
+        KeyValue(key="Q_pump_share_planned", value=_text(pump.planned_share)),
+    ] + [KeyValue(key=f"Q.{joint}", value=_text(q)) for joint, q in zip(joints, flow)]
+    message.status = [status]
+    return message

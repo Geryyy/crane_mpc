@@ -36,6 +36,7 @@ from .cycle import (
     PASSIVE_DOF,
     PASSIVE_INDICES,
     PLANNED_DOF,
+    PUMP_FLOW_TOPIC,
     REFERENCE_TOPIC,
     ROBOT_DESCRIPTION_TOPIC,
     SET_PAYLOAD_SERVICE,
@@ -322,6 +323,14 @@ class MpcNode(Node):
         self._comparison_publisher = self.create_publisher(
             DiagnosticArray, SHADOW_COMPARISON_TOPIC, _qos()
         )
+        # Sim only: on the machine `pump_flow_estimator` owns pump flow, and a bad
+        # hydraulics file must not stop the node over a diagnostic it never uses.
+        self._pump_flow_publisher = None
+        if self.get_parameter("use_sim_time").value:
+            self._pump_flow = reports.PumpFlow(hydraulic_limits())
+            self._pump_flow_publisher = self.create_publisher(
+                DiagnosticArray, PUMP_FLOW_TOPIC, _qos()
+            )
 
     def _create_subscriptions(self) -> None:
         self.create_subscription(
@@ -541,6 +550,7 @@ class MpcNode(Node):
         self._stamp = clock.to_msg()
         # Before every gate: measures the machine, not the command path.
         self.report_sway_settled(now)
+        self.report_pump_flow(now)
 
         if not self.ready():
             why = (
@@ -746,6 +756,21 @@ class MpcNode(Node):
             return
         self._settled_publisher.publish(verdict)
         self._last_settled = verdict
+
+    def report_pump_flow(self, now_ns: int) -> None:
+        """Pump draw of the measured motion, whoever drives it: JTC-only moves count."""
+        stamp = self._actuated_stamp
+        if (
+            self._pump_flow_publisher is None
+            or not self._joints
+            or stamp is None
+            or (now_ns - stamp.nanoseconds) / 1e9 > float(self._values.max_state_age)
+        ):
+            return
+        flow = self._pump_flow(self._q_a, self._dq_a)
+        self._pump_flow_publisher.publish(
+            reports.pump_flow(flow, self._pump_flow, self._joints, self._stamp)
+        )
 
     def report(self, solution, why: str) -> None:
         """Write both reports, in the order every exit from `update` writes them."""

@@ -157,6 +157,13 @@ def test_the_node_runs_on_the_shipped_values(node):
     assert list(node._values.weights.q_a) == shipped["weights"]["q_a"]
 
 
+def test_off_sim_this_node_publishes_no_pump_flow(node):
+    """On the crane `pump_flow_estimator` owns pump flow; a second source would contend."""
+    assert node.get_parameter("use_sim_time").value is False
+    assert node._pump_flow_publisher is None
+    assert not node.get_publishers_info_by_topic("/crane_mpc/pump_flow")
+
+
 def test_without_a_description_nothing_is_published(node):
     node.update()
     assert node.published == {}
