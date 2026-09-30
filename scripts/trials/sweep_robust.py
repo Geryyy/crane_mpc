@@ -6,7 +6,9 @@ Sweep MPC levers over moves x plant samples on wire_chain; report the worst cell
         --lever weights.du=0,10,30 --lever pi-scale=1,2 --samples 4 --jobs 3
 
 Plant samples: the nominal plant, every band corner, then `--samples` random
-draws (`k`/`psi` per axis, independently). A lever key with a hyphen is a
+draws (`k`/`psi` per axis, independently). A band takes any number of values,
+not only two, so `--band payload=80,400,1200,1600 --samples 0` is a grid and
+`--by-plant` prints it a row at a time. A lever key with a hyphen is a
 wire_chain flag (`pi-scale`), else a `--set` on crane_mpc.yaml. Levers vary one
 at a time against the shipped settings unless `--cartesian`. Flags not named
 here go to every run (e.g. `--latency 0.03`); a band on the same flag wins.
@@ -35,11 +37,15 @@ MOVES = ["--goal out", "--random 1 --seed 1", "--random 1 --seed 2"]
 BANDS = {  # band -> wire_chain flags it sets
     "k": ["--k-scale", "--d-scale"],  # k and d are one identification
     "psi": ["--psi-gain-positive", "--psi-gain-negative"],
+    "tau_v": ["--tau-v-scale"],
+    "dead_time": ["--dead-time"],  # seconds, absolute; the fit's is 0.06
     "payload": ["--plant-payload"],
+    "com": ["--plant-payload-com"],  # m in K8, three components
     "ocp_payload": ["--payload-mass"],
     "latency": ["--latency"],
 }
-PER_AXIS = ("k", "psi")
+#: How many numbers a band's flags take; 1 where it is absent.
+WIDTH = {"k": AXES, "psi": AXES, "tau_v": AXES, "com": 3}
 #: One run spreads over ~4 cores for a slower wall clock; one core each scales.
 ONE_THREAD = {**os.environ, "OMP_NUM_THREADS": "1", "OPENBLAS_NUM_THREADS": "1"}
 
@@ -53,10 +59,7 @@ def samples(bands, count, seed):
     corners = [dict(zip(bands, c)) for c in itertools.product(*bands.values())]
     rng = np.random.default_rng(seed)
     draws = [
-        {
-            b: rng.uniform(lo, hi, AXES if b in PER_AXIS else None)
-            for b, (lo, hi) in bands.items()
-        }
+        {b: rng.uniform(lo, hi, WIDTH.get(b)) for b, (lo, hi) in bands.items()}
         for _ in range(count)
     ]
     return (
@@ -69,7 +72,7 @@ def samples(bands, count, seed):
 def plant_flags(sample):
     flags = []
     for band, value in sample.items():
-        size = AXES if band in PER_AXIS else 1
+        size = WIDTH.get(band, 1)
         text = [f"{v:.6g}" for v in np.broadcast_to(np.asarray(value, float), size)]
         for flag in BANDS[band]:
             flags += [flag, *text]
@@ -109,6 +112,9 @@ def main() -> int:
     )
     parser.add_argument("--lever", action="append", default=[], help="key=v1,v2")
     parser.add_argument("--cartesian", action="store_true")
+    parser.add_argument(
+        "--by-plant", action="store_true", help="a row per plant sample, not just worst"
+    )
     parser.add_argument("--samples", type=int, default=0, help="random plant draws")
     parser.add_argument("--seed", type=int, default=0, help="the draws' stream")
     parser.add_argument("--jobs", type=int, default=2)
@@ -183,17 +189,38 @@ def main() -> int:
             + (f" {sorted(set(failed))}" if failed else "")
         )
 
+    def one(value):
+        """Render a band's value for a cell label; spell it out only if not uniform."""
+        v = np.atleast_1d(np.asarray(value, float))
+        if np.all(v == v[0]):
+            return f"{v[0]:g}"
+        return "[" + ",".join(f"{x:g}" for x in v) + "]"
+
+    # The cell label a `--by-plant` row carries: the sample, not its index, so
+    # the row reads as one square of a mismatch x knob map on its own. The
+    # header names the bands in the order the label joins them.
+    label = {
+        p: "nominal" if kind == "nominal" else ",".join(map(one, sample.values()))
+        for p, (kind, sample) in enumerate(plants)
+    }
+    head = ",".join(bands) or "cell"
+    w = max(len(head), *(len(text) for text in label.values()))
     print(
-        f"\n{'setting':<28} {'cell':<8} {'err rad':>8} {'sway pk':>7} "
+        f"\n{'setting':<28} {head:<{w}} {'err rad':>8} {'sway pk':>7} "
         f"{'late':>7} {'rev':>6} {'dq/clp':>6} {'grow/s':>6}"
     )
     for name in dict.fromkeys(r["setting"] for r in rows):
         mine = [r for r in rows if r["setting"] == name]
         print(
-            f"{name:<28} {'nominal':<8} "
+            f"{name:<28} {'nominal':<{w}} "
             + summary([r for r in mine if r["kind"] == "nominal"])
         )
-        print(f"{'':<28} {'worst':<8} " + summary(mine))
+        if args.by_plant:
+            for p in dict.fromkeys(r["plant"] for r in mine):
+                if label[p] != "nominal":
+                    cell = [r for r in mine if r["plant"] == p]
+                    print(f"{'':<28} {label[p]:<{w}} " + summary(cell))
+        print(f"{'':<28} {'worst':<{w}} " + summary(mine))
     print(f"Wrote: {args.csv}")
     return 0
 

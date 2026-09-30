@@ -18,6 +18,11 @@ phase included -- the five faults behind the 2026-09-25 Gazebo divergence
 `--viewer` keeps the chain running past the plan, unscored, until space or the
 window closes. `--random N` chains N moves, each from where the last ended.
 
+Plant against OCP, i.e. the mismatch: `--plant-payload`/`--plant-payload-com`
+against `--payload-mass`/`--payload-com`, `--k-scale`/`--d-scale`,
+`--tau-v-scale`, `--dead-time`, `--psi-gain-*`. The robustness map they were
+cut for is `robustness.md`.
+
 Plan, plant mismatch and solver flags are `harness.add_arguments`'. Exit 1 on
 divergence or hunting (`hunting.py`: u0 reversing on half the cycles).
 
@@ -35,6 +40,7 @@ the JTC's tolerance checks, goal handling and angle wraparound are skipped.
 """
 
 import argparse
+import dataclasses
 import itertools
 import json
 import sys
@@ -137,6 +143,22 @@ def carry_payload(plant, mass, com):
     plant.forward()
 
 
+def scale_tau_v(fit, scale):
+    """
+    Plant `tau_v` under a per-axis multiplier; the OCP keeps the shipped fit.
+
+    Not `perturb_fit`'s `lag_shift_s`, which moves `tau_v` and the dead time at
+    constant sum: the shipped arm sits at `tau_v = 0`, so every shift is refused
+    (`mismatch.py`). A multiplier keeps 0 at 0, so `lag_axes` -- hence NX and the
+    export key -- does not move, and what it changes is the dead time + lag
+    *sum*, which is the half the staircase campaign never separated.
+    """
+    scale = np.asarray(scale, float)
+    if not np.all(np.isfinite(scale) & (scale > 0.0)):
+        raise SystemExit(f"--tau-v-scale wants positive finite multipliers: {scale}")
+    return dataclasses.replace(fit, tau_v=tuple(np.asarray(fit.tau_v, float) * scale))
+
+
 def wire_161(horizon, joints, stamp, lead, in_flight):
     """Issue 161's encoding: knot i at lead + t_i, the in-flight knot at 0, u - dq per knot."""
     message = hz.horizon_to_message(horizon, joints, stamp)
@@ -173,6 +195,22 @@ def main(argv=None) -> int:
         "--plant-payload", type=float, default=None, help="kg; default --payload-mass"
     )
     parser.add_argument(
+        "--plant-payload-com",
+        type=float,
+        nargs=3,
+        default=None,
+        metavar="M",
+        help="m in K8, what MuJoCo hangs; default --payload-com",
+    )
+    parser.add_argument(
+        "--tau-v-scale",
+        type=float,
+        nargs=harness.AXES,
+        default=None,
+        metavar="S",
+        help="plant C3 tau_v multiplier per planned axis",
+    )
+    parser.add_argument(
         "--json", type=Path, default=None, help="scores; a list per move if chained"
     )
     parser.add_argument("--viewer", action="store_true", help="MuJoCo passive viewer")
@@ -196,6 +234,8 @@ def main(argv=None) -> int:
     plant_fit, damping_scale = perturb_fit(
         k=options.k_scale, d=options.d_scale, lag_shift_s=options.lag_shift
     )
+    if options.tau_v_scale is not None:
+        plant_fit = scale_tau_v(plant_fit, options.tau_v_scale)
     ocp = harness.create_solver(
         parameters, hydraulics, options.rebuild, options.verbose_build
     )
@@ -206,8 +246,16 @@ def main(argv=None) -> int:
     carried = (
         options.payload_mass if options.plant_payload is None else options.plant_payload
     )
-    carry_payload(plant, carried, options.payload_com)
-    payload = Payload(carried, np.asarray(options.payload_com, float), valid=True)
+    # The plant's COM, not the OCP's: `equilibrium` scores sway against where the
+    # load actually hangs, so a COM mismatch must not move the reference too.
+    carried_com = np.asarray(
+        options.payload_com
+        if options.plant_payload_com is None
+        else options.plant_payload_com,
+        float,
+    )
+    carry_payload(plant, carried, carried_com)
+    payload = Payload(carried, carried_com, valid=True)
 
     def equilibrium(q_a):
         return planner.model.passive_equilibrium(q_a, payload)

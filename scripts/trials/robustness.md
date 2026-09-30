@@ -1,0 +1,471 @@
+# How much plant mismatch the MPC survives — issue 190
+
+The first live run with the MPC driving went unstable carrying a block: the sim
+block weighed 80 kg and the behaviour tree had declared 800 kg. That is one
+point of a map nobody had drawn. This is the map: **which plant mismatch breaks
+the loop, and which knob widens the region that holds.**
+
+Everything here is offline, `trials/wire_chain.py` through `trials/sweep_robust.py`,
+MuJoCo under C3 and the JTC's velocity loop. Nothing was launched.
+
+## Read this before you use a number
+
+- **The harness is still unvalidated against Gazebo.** Issue 189's live half was
+  never run, so `--latency`, the cadence phase and the tick rate are unfitted —
+  see `README.md`'s table, whose cells are still empty. Every run below uses
+  `--latency 0.06`, the value the 190 issue text quotes from the live run, not a
+  measured one. A stability verdict here is a verdict about `wire_chain`.
+- **`growth_per_s` cannot be the score on its own.** `growth.py` fits the first
+  rise through `2e-3 < dev < 0.2` and wants ten samples inside it, so a
+  deviation that crosses 0.2 quickly — which is what a hard mismatch produces —
+  returns `nan`. Over all 997 runs in this study the rule is one-directional and
+  exact: every one of the 439 `nan`s has a sway peak above 0.2, and no run that
+  stays under 0.2 ever returns one — but 117 runs cross 0.2 and still get a
+  slope, so a finite `growth_per_s` is not evidence that a run was quiet.
+  `sweep_robust`'s worst column takes `max(..., key=np.nan_to_num)`, so a single
+  `nan` propagates to it. Read `exit`, `sway pk` and `dq/clp` with it, never the
+  slope alone.
+- **`sway_late` is the discriminator the issue asked `growth.py` for.** It is
+  the sway peak over the *last 3 s* (`wire_chain.py:469`), so `late ≈ peak`
+  means the largest swing of the whole run is still happening when the run
+  ends, and `late << peak` means the move excited a swing and the loop damped
+  it. It is a *strictly* more conservative reading than the failure count, not
+  an agreeing one: `late/peak` is exactly 1.00 on five cells of §1 and
+  0.10..0.91 on the other eighteen (not a clean gap — `k` x0.5 sits at 0.91),
+  but only two of those five cells contain a failing run. It flags payload 80,
+  `k` x2 and Psi x0.7 as unsettled where the exit column says `ok` three times
+  over. Treat it as "did not settle", which is what it measures, and not as a
+  prediction of the gate. It is still better than `growth_per_s`, which one cell
+  of §3's payload
+  family (`weights.du=10` at 400 kg) scores `+8.0/s` with `peak 0.215,
+  late 0.015` and no failure — the "growth" there is the first swing rising out
+  of the band at the move's start, fitted as if it were a divergence. **Rank on
+  `late` and the failure count; keep the slope as a cross-check on the cells
+  where `late ≈ peak`.**
+- **The runs are deterministic**, so a `4/27` against an `8/27` is exact for
+  those moves — and those moves are three (`--goal out` and two random seeds),
+  which is a small sample of the move space, not of the noise.
+- **`past_clamp` — which is what "failed" almost always means here — is scored
+  on the wrong variable, and this limits every conclusion below.**
+  `wire_chain.py:491` takes `dq[PLANNED]`, the plant's *measured joint
+  velocity*, and tests it against `chain.high`/`low`, which are
+  `u_clamp_max`/`min`. Two things are wrong with that pairing. `u_clamp_*` is
+  Psi's fitted domain on `u`, the *commanded* joint velocity, and `u != dq` —
+  the command runs 5-8 % RMS ahead of the velocity. And in the loop that ships
+  (`velocity_loop.py:9, 14, 22`) `u_clamp_*` bounds the **PI correction alone,
+  never the total command**. So `past_clamp` is an overspeed test wearing a
+  Psi-domain label, and the `dq/clp` column is a fraction of a bound that does
+  not apply to the quantity in its numerator.
+  This bites hardest on the Psi rows. `chain.psi.apply(command)` multiplies the
+  command on its way into the plant, so a Psi gain of x1.3 raises the achieved
+  joint velocity by roughly 30 % for the same command — and then trips a
+  threshold on achieved joint velocity. §3's headline result about Psi is
+  therefore not yet separable from the gate that measures it. The harness cannot
+  currently resolve this: the only command it logs is the MPC's `u0`, already
+  inside `command_domain`, never the JTC's `forward + correction` that Psi
+  actually receives.
+- **The ranking is the `past_clamp` count and nothing else.** Over all 997 runs:
+  831 `ok`, 149 `past_clamp`, 17 `diverged`, and **`hunting` never fired once** —
+  the u0-reversal gate contributed no information to any table, although `rev` is
+  a column in all of them. `diverged`, the one unambiguous failure, runs 0-2 per
+  setting and does not track the ranking: `weights.q_a=4` is the worst weight at
+  10/27 with *zero* divergences. §3 splits it out.
+- **The node goes silent on a third to a half of the cycles on exactly the
+  mismatched runs, and no table reports it.** `Step.silence` is a pre-solve gate
+  trip (clock skew / reference age / state age / `propagate`), after which
+  nothing is published and the JTC flies the last horizon until it times out.
+  Median 0 % on the nominal plant (p90 6 %, max 26 %); on mismatched plants p90
+  is 46 % and the max 56 %, and 48 % of mismatched runs have a nonzero count —
+  including runs that exit `ok`. So on the cells that decide the ranking, part
+  of what is being scored is the stale-horizon/hold path, not the MPC law.
+  This also hollows out the `max_consecutive_failures` row of §2:
+  `wire_chain.py:243` sets `solve_budget_s = 10.0`, so the solver never times
+  out, and a silent cycle does not count toward the consecutive-failure counter.
+  That knob had almost nothing to act on.
+
+## 1. One mismatch at a time, at the shipped settings
+
+    ./scripts/trials/sweep_robust.py --latency 0.06 --payload-mass 800 \
+        --samples 0 --jobs 7 --by-plant --band <family>=<values>
+
+OCP payload 800 kg throughout; the band is what the *plant* got. Three moves per
+cell, worst of the three.
+
+`late/pk` is the stability column: 1.00 means the run ended at its own worst
+moment — nothing settled. It does not say *why*, so read it with the two
+columns beside it: `late/pk = 1.00` with a large `rev`/`dq/clp` is a swing the
+loop is not damping, `late/pk = 1.00` with a large final error and `rev ≈ 0`
+(Psi x0.7) is the machine still crawling toward a goal it never reaches. Bold
+marks a cell that is one of the two.
+
+| mismatch | value | sway pk | late | late/pk | final err | rev | dq/clp | growth /s | failed |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| *(none)* | nominal | 0.148 | 0.029 | 0.20 | 0.002 | 0.01 | 0.27 | −0.10 | 0/3 |
+| payload mass | 80 kg (0.1x) | **0.692** | **0.692** | **1.00** | 0.217 | 0.15 | 0.92 | **+0.51** | 0/3 |
+| | 400 kg (0.5x) | 0.195 | 0.020 | 0.10 | 0.002 | 0.01 | 0.31 | −0.11 | 0/3 |
+| | 1200 kg (1.5x) | 0.128 | 0.052 | 0.41 | 0.022 | 0.01 | 0.27 | −0.03 | 0/3 |
+| | 1600 kg (2x) | 0.120 | 0.069 | 0.58 | 0.026 | 0.01 | 0.28 | +0.02 | 0/3 |
+| C3 `k`, `d` | x0.5 | 0.114 | 0.104 | 0.91 | 0.014 | 0.01 | 0.29 | 0.00 | 0/3 |
+| | x0.7 | 0.120 | 0.064 | 0.53 | 0.005 | 0.01 | 0.27 | +0.01 | 0/3 |
+| | x1.5 | 0.189 | 0.023 | 0.12 | 0.002 | 0.01 | 0.29 | −0.10 | 0/3 |
+| | x2 | **0.426** | **0.426** | **1.00** | 0.089 | 0.24 | 0.74 | **+0.30** | 0/3 |
+| C3 `tau_v` | x0.5 | 0.172 | 0.032 | 0.19 | 0.005 | 0.01 | 0.29 | −0.10 | 0/3 |
+| | x0.7 | 0.160 | 0.024 | 0.15 | 0.003 | 0.01 | 0.28 | −0.10 | 0/3 |
+| | x1.5 | 0.135 | 0.072 | 0.53 | 0.005 | 0.01 | 0.25 | −0.06 | 0/3 |
+| | x2 | 0.124 | 0.099 | 0.80 | 0.030 | 0.01 | 0.25 | −0.03 | 0/3 |
+| dead time | 30 ms (−30) | 0.173 | 0.024 | 0.14 | 0.002 | 0.01 | 0.28 | −0.11 | 0/3 |
+| | 90 ms (+30) | 0.140 | 0.056 | 0.40 | 0.003 | 0.01 | 0.25 | −0.08 | 0/3 |
+| Psi gain | x0.7 | 0.209 | **0.209** | **1.00** | **4.128** | 0.06 | 0.22 | +0.05 | 0/3 |
+| | x0.85 | 0.122 | 0.080 | 0.66 | **2.376** | 0.01 | 0.20 | −0.04 | 0/3 |
+| | x1.15 | 0.258 | 0.109 | 0.42 | 0.011 | 0.08 | 0.77 | **+0.27** | 0/3 |
+| | x1.3 | **0.791** | **0.791** | **1.00** | 0.909 | 0.42 | 1.12 | +0.13 | 1/3 |
+| payload COM | +0.25 m x | 0.210 | 0.072 | 0.34 | 0.194 | 0.11 | 0.81 | nan | 0/3 |
+| | +0.50 m x | **0.389** | **0.389** | **1.00** | 0.843 | 0.16 | 1.35 | nan | 2/3 |
+| | +0.25 m z | 0.150 | 0.033 | 0.22 | 0.004 | 0.01 | 0.27 | −0.06 | 0/3 |
+| | +0.50 m z | 0.155 | 0.039 | 0.25 | 0.004 | 0.01 | 0.27 | −0.03 | 0/3 |
+
+What that says:
+
+- **Payload mismatch is one-sided.** Believing the load *heavier* than it is, is
+  what destabilises: 0.1x grows at +0.51/s and swings 4.7x the nominal peak. The
+  other direction — a plant twice as heavy as declared — costs 26 mm of final
+  error and nothing else. The 2026-09-30 live failure is exactly the bad
+  direction, and it is the direction a released-but-not-noticed grasp produces.
+- **Command-path gain is the sharpest single lever**, and also one-sided, but
+  the *other* way round: too much gain (x1.15, x1.3) destabilises, too little
+  (x0.85, x0.7) is stable and simply never arrives — 2.4 and 4.1 rad of final
+  error is the machine crawling, not swinging. This confirms the earlier "MPC
+  weights buy no robustness to a command-path gain error" finding from its
+  failure side.
+- **`tau_v` and the dead time do not matter over x0.5..x2 and ±30 ms** — with a
+  caveat that empties part of the `tau_v` row. `scale_tau_v` is a *multiplier*,
+  and the shipped fit is `tau_v = [0.1, 0.025, 0.0, 0.05, 0.125]`: axis 2,
+  `theta3_arm_joint`, is fitted at exactly zero, so **every `tau_v` row above
+  left the arm's lag untouched.** The arm carries the payload moment arm, so the
+  family covers four of the five axes and not the most interesting one. The
+  multiplier was chosen over `perturb_fit`'s `lag_shift_s` precisely because a
+  shift at `tau_v = 0` is refused (`mismatch.py`) — which is the same wall from
+  the other side, not a way round it.
+  On the four axes it does reach, nothing fails and no `late/pk` reaches 1, and
+  both knobs move `late/pk` monotonically in the *slower*-plant direction
+  (`tau_v` x2 -> 0.80, dead time 90 ms -> 0.40, `k` x0.5 -> 0.91), so margin is
+  being spent, just not to exhaustion. Perturbing the arm's lag needs an
+  *additive* offset, and that run has not been made.
+- **A payload COM error matters only in the swing plane.** 0.5 m along z (down
+  the sling) is invisible; 0.5 m along x pushes two of three moves past the
+  command clamp. Read these two rows knowing that `wire_chain` scores sway
+  against the **plant's** equilibrium — it passes the plant's mass and COM to
+  `passive_equilibrium`, so a COM offset moves the reference with it. The rows
+  therefore measure *swinging*, not the static hang offset the OCP is wrong
+  about; that offset is what the 0.19 and 0.84 rad of final error are.
+- **C3 `k` is asymmetric too**: a *stiffer* plant than modelled (x2) is the bad
+  side — sustained 0.43 rad of sway and a quarter of the cycles reversing. x0.5
+  costs only a small residual (0.10 rad, not growing).
+
+So the mismatch envelope that holds at the shipped settings is roughly
+
+    payload  >= 0.5x declared      Psi gain  <= ~1.15x
+    C3 k     <= ~1.5x              COM error <= ~0.25 m in the swing plane
+    tau_v    x0.5 .. x2            dead time 60 +- 30 ms
+
+## 2. Which knob widens it
+
+Same three moves, against the eight corners of payload x{800, 80} kg,
+C3 `k` x{1, 2} and Psi gain x{1, 1.3} — one at a time and paired — plus the
+nominal plant. 27 runs per setting.
+
+    ./scripts/trials/sweep_robust.py --latency 0.06 --payload-mass 800 \
+        --samples 0 --jobs 7 --by-plant \
+        --band payload=800,80 --band k=1,2 --band psi=1,1.3 --lever <knob>=<v>
+
+| setting | failed | worst sway pk | worst late | worst rev | nominal sway pk | nominal err |
+| --- | --- | --- | --- | --- | --- | --- |
+| `horizon_length=20` | **4/27** | 1.232 | 1.232 | 0.29 | 0.269 | 0.0005 |
+| `weights.du=10` | **4/27** | 1.383 | 1.383 | 0.26 | 0.168 | 0.0015 |
+| `max_consecutive_failures=1` | 6/27 | 0.983 | 0.814 | 0.25 | 0.148 | 0.0017 |
+| `horizon_length=60` | 7/27 | 1.241 | 1.241 | 0.26 | 0.175 | 0.0024 |
+| shipped | 8/27 | 1.205 | 1.205 | 0.42 | 0.148 | 0.0017 |
+| `weights.dq_u=256` | 8/27 | 1.254 | 1.254 | 0.43 | 0.143 | 0.0062 |
+| `weights.q_u=20` | 8/27 | 1.267 | 1.267 | 0.40 | 0.149 | 0.0012 |
+| `weights.u=10` | 8/27 | 1.212 | 1.212 | 0.39 | 0.148 | 0.0016 |
+| `kappa=0.5` (planner) | 8/27 | 1.185 | 0.942 | 0.40 | 0.149 | 0.0014 |
+| `kappa=0.65` (planner) | 8/27 | 1.293 | 1.293 | 0.29 | 0.146 | 0.0017 |
+| `weights.dq_u=16` | 9/27 | 1.030 | 0.819 | 0.46 | 0.153 | 0.0018 |
+| `weights.q_a=80` | 9/27 | 1.334 | 1.334 | 0.31 | 0.148 | 0.0019 |
+| `max_consecutive_failures=20` | 9/27 | 1.204 | 1.204 | 0.33 | 0.148 | 0.0017 |
+| `weights.q_a=4` | 10/27 | 0.998 | 0.828 | 0.26 | 0.148 | 0.0008 |
+| `command_state=false`, `du=10` (C3) | 12/27 | 1.375 | 1.375 | 0.49 | 0.165 | 0.0015 |
+| `dq_a_feedback=false` | **19/27** | 1.284 | 1.284 | 0.42 | 0.238 | 0.0907 |
+
+- **The worst amplitude does not rank the settings; the failure count does.**
+  Twelve of the sixteen rows have `worst late = worst pk`, i.e. their worst cell
+  never settles; the other four (`max_consecutive_failures=1`, `dq_u=16`,
+  `q_a=4`, `kappa=0.5`) come in strictly under, so at least there the peak and
+  the residual are different cells. Either way the amplitude is a saturation
+  level, not a margin — it moves 0.98..1.38 with no relation to the failure
+  count, and `q_a=4` has the *smallest* worst peak with the *most* failures.
+  What separates the settings is how many of the 27 runs end in `past_clamp` or
+  `diverged` — which, per the caveats above, is in practice the `past_clamp`
+  count, on a gate that is measuring the wrong variable.
+- **No weight buys tolerance.** `q_a` flattened to 4 and to 80 (it ships 40 on
+  the four arm rows, 10 on rotator and tool), `dq_u` x0.25 and x4, `q_u` from 0
+  to 20, `u` x10 — every one of them lands between 8 and 10 failures of 27,
+  against the shipped 8. The earlier sweep's conclusion holds under payload and
+  Psi mismatch too: **cost weights move tracking, not the stable region.**
+- **`weights.du` is the exception, and it is not really a weight** — it is the
+  price of command *rate*, i.e. of the chatter the mismatch excites. 1 -> 10
+  halves the failures (8 -> 4) and takes a third off the worst reversal
+  fraction (0.42 -> 0.26), for 0.148 -> 0.168 of nominal sway peak and nothing
+  else — nominal `late` and final error come out unchanged or better.
+- **A shorter horizon is the other 4/27, but the trend in N is not monotone and
+  the mechanism is not isolated.** `horizon_length=20` (1.2 s against 2.34 s)
+  wins on the mismatched cells: at payload 80 kg the sway peak drops
+  0.692 -> 0.371 and the growth +0.51 -> +0.19; at Psi x1.3 it drops
+  0.791 -> 0.394 with no failure. But in N the failure count goes
+  **20 -> 4/27, 40 -> 8/27, 60 -> 7/27** — N=60 ranks *above* shipped, so this
+  is not "short good, long bad" and `horizon_length=60` is not the same
+  statement from the other side. Three mechanisms are confounded and this study
+  separates none of them:
+  1. N=20 *damps the nominal plant less*, not more — nominal sway peak
+     0.148 -> 0.269. A setting that swings more on the plant it was tuned for is
+     not obviously widening a stable region.
+  2. 1.2 s may be shorter than the dominant sway period, in which case the MPC
+     cannot shape that mode and simply commands less. The `dq/clp` numbers say
+     it does command less (payload family, worst 0.92 -> 0.70) — and commanding
+     less is exactly what the `past_clamp` gate rewards, per the caveats above.
+  3. `horizon_length` is in the solver's export key, so N=20 re-exports; the
+     terminal-to-stage cost ratio moves with N and nothing here holds it fixed.
+
+  So read this row as "N=20 scores best on this gate", not as a demonstration
+  that less horizon buys model-mismatch tolerance. §3 runs it together with
+  `weights.du=10`.
+- **`dq_a_feedback=false` is the worst thing in the table**, by a wide margin
+  (19/27, and it breaks the *nominal* plant: 0.09 rad of final error and a
+  positive growth rate). The lever ships all-true and there is no headroom left
+  in it; the earlier note that it "was the only lever" was about switching it
+  on, and that has already been spent.
+- **C3 command encoding is worse than C4** under mismatch: 12/27, the worst in
+  the table bar `dq_a_feedback`, and every *mismatched* cell reverses on
+  0.38-0.49 of its cycles against 0.01 on the nominal plant — i.e. C3's hunting
+  is switched on by the mismatch, not present throughout. Same verdict as
+  `README.md`'s `--wire 161` regression check, which catches it on the nominal
+  plant only because it pairs C3 with the old knot encoding.
+- **`max_consecutive_failures` and the planner's `kappa` are not robustness
+  levers.** They move individual cells by more than the ranking does but not in
+  one direction, and neither improves on shipped outside noise.
+
+## 3. Does the recommendation hold
+
+§2 ranks knobs on one hard grid. The two that won there — `horizon_length=20`
+and `weights.du=10` — are taken back to §1's one-at-a-time families here, alone
+and together, to see whether the win is a property of that grid or of the
+mismatch. "both" is `--set weights.du=10 --lever horizon_length=20`.
+
+    ./scripts/trials/sweep_robust.py --latency 0.06 --payload-mass 800 \
+        --samples 0 --jobs 7 --by-plant --band <family>=<values> \
+        --set weights.du=10 --lever horizon_length=20
+
+Payload and Psi ran five moves (`--goal out` plus seeds 1-4), `k` and COM three
+(seeds 1-2) — compare down a block, not across.
+
+**These rows are not a cell.** Unlike §1's, which are grouped per plant,
+`sweep_robust`'s worst line maxes *each column independently* over the whole
+family, so one row can mix plants. The Psi/shipped row is the clearest case:
+`sway pk`, `late`, `rev` and `dq/clp` all come from the Psi-x1.3 cell while
+`final err 4.128` comes from Psi-**x0.7**, the crawling one. Likewise the
+payload/shipped row's `rev 0.25` is the 1600 kg cell, not the 80 kg cell (0.15).
+Do not read a row across.
+
+| family | setting | sway pk | late | final err | rev | dq/clp | failed |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| payload | shipped | 0.692 | 0.692 | 0.358 | 0.25 | 0.92 | 0/25 |
+| 0.1x..2x | `horizon_length=20` | 0.587 | 0.497 | 0.215 | 0.23 | 0.70 | 0/25 |
+| | `weights.du=10` | **0.532** | **0.463** | 0.156 | **0.06** | 0.75 | 0/25 |
+| | both | 0.804 | 0.804 | 0.514 | 0.21 | 1.00 | 0/25 |
+| Psi gain | shipped | 0.791 | 0.791 | 4.128 | 0.42 | 1.50 | 3/25 |
+| 0.7..1.3 | `horizon_length=20` | 0.583 | 0.583 | 3.939 | 0.13 | 1.06 | 1/25 |
+| | `weights.du=10` | 0.865 | 0.865 | 3.668 | 0.19 | 1.33 | 2/25 |
+| | both | **0.473** | **0.352** | 3.629 | **0.06** | **0.74** | **0/25** |
+| C3 `k` | shipped | 0.426 | 0.426 | 0.089 | 0.24 | 0.74 | 0/15 |
+| x0.5..x2 | `horizon_length=20` | 0.372 | 0.092 | 0.045 | 0.03 | 0.37 | 0/15 |
+| | `weights.du=10` | **0.229** | **0.084** | 0.011 | 0.01 | 0.45 | 0/15 |
+| | both | 0.362 | 0.096 | 0.039 | 0.01 | 0.37 | 0/15 |
+| COM | shipped | 0.389 | 0.389 | 0.843 | 0.16 | 1.35 | 2/15 |
+| 0.25/0.5 m | `horizon_length=20` | 0.534 | 0.217 | 0.441 | 0.22 | 1.31 | 1/15 |
+| | `weights.du=10` | **0.290** | **0.173** | 0.163 | 0.03 | **0.55** | **0/15** |
+| | both | 0.508 | 0.193 | 0.211 | 0.04 | 0.58 | **0/15** |
+
+and back on §2's paired grid, where "both" had not been run — split by exit
+reason, because the aggregate hides the one that matters:
+
+| setting | failed | `past_clamp` | `diverged` | which cells |
+| --- | --- | --- | --- | --- |
+| shipped | 8/27 | 7 | 1 | all four Psi-1.3 cells, plus payload-80 / `k`-x2 |
+| `horizon_length=20` | 4/27 | 3 | 1 | payload-80 x Psi-1.3, both `k` |
+| `weights.du=10` | 4/27 | 3 | 1 | all four Psi-1.3 cells, one move each |
+| both | **3/27** | 1 | **2** | payload-80 x Psi-1.3, both `k` |
+
+What that says:
+
+- **Psi gain x1.3 is in every failing cell of every tuned setting — but this is
+  the finding the gate is least able to support.** All three tuned settings keep
+  their whole Psi-x1 column clean (shipped is the only one that fails in it, at
+  payload-80 x `k`-x2), and no setting clears the two payload-80 x Psi-x1.3
+  cells. Taken at face value that says command-path gain is the one mismatch no
+  tuning survives. Taken with the first caveat at the top of this document, it
+  may say much less: the failures are `past_clamp`, `past_clamp` tests the
+  achieved joint velocity, and a Psi gain of x1.3 raises the achieved joint
+  velocity by ~30 % by construction. **The two are not separated here.** The
+  test that would separate them is a one-line harness change plus a re-run
+  (§4, first bullet): log the JTC's `forward + correction`, the signal
+  `u_clamp` is actually the domain of, and re-score `past_clamp` on it. Until
+  then, treat "Psi is the axis no tuning survives" as this study's leading
+  *hypothesis*, not its result.
+- **The two levers are nested, not complementary, and "both" is not clearly
+  better than the horizon alone.** Both settings fail 4/27, but the *cells* are
+  not different parts of the grid: `horizon_length=20` fails in
+  {payload-80 x Psi-1.3, both `k`}, and `weights.du=10` fails in those two plus
+  both payload-800 Psi-1.3 cells. The first set is a **strict subset** of the
+  second — there is no cell `h20` fails and `du=10` passes. Adding `du=10` to
+  `h20` removes one run of 27, which is inside the resolution this study sets
+  for itself two bullets down. On the *severe* exit it goes the other way:
+  "both" is the only setting in the study with two divergences.
+  Across all four §3 families plus the grid (107 runs) the totals are `h20` 6
+  failures, "both" 3 — a 2x gap, and the only real argument for the pair.
+- **But "both" is not uniformly better, and the payload family is where it
+  loses.** At payload 80 kg alone it is worse than *either* lever on its own —
+  0.804 rad of unsettled sway against 0.463 and 0.497, and it is the only one of
+  the four that puts a joint on its clamp (`dq/clp` 1.00). Pick it for the
+  paired envelope, not because it dominates.
+- **That reversal only shows up at five moves.** At three moves the same cell
+  reads 0.363/0.332 for "both" — better than either lever, the opposite
+  ranking. Three moves is enough to separate 8/27 from 3/27; it is not enough
+  to rank two settings that are close. Treat any §1-§3 gap under ~2x as
+  unresolved.
+- **The nominal cost of "both" is a faster transient, not a worse one.** Nominal
+  sway peak goes 0.148 -> 0.268 but nominal `late` goes 0.029 -> 0.015 and
+  final error 0.0017 -> 0.0021. The shorter horizon buys its mismatch tolerance
+  by committing harder early; it settles at least as well as shipped.
+
+### The recommendation
+
+    weights.du: 10            (ships 1)
+    horizon_length: 20        (ships 40)
+
+with `command_state` left **true**. `crane_mpc.yaml:28` reads "`du: 10` and
+false is C3", which is the pair issue 161 fitted; `du: 10` on its own under C4
+is a different setting and the better one — the C3 pair is 12/27 in §2, this is
+4/27. Do not carry `command_state: false` along with the `du`.
+
+**It is provisional.** The gate it wins on is measuring the wrong variable, its
+margin over `horizon_length=20` alone is one run in 27, and it carries the
+study's only pair of divergences. It is the best setting *this* study can
+distinguish, which is not the same as the best setting.
+
+Each of these was run one at a time, and no run ends in `past_clamp` or
+`diverged` over
+
+    payload   0.5x .. 2x declared       C3 k      x0.5 .. x2
+    COM error <= 0.5 m, any axis        C3 tau_v  x0.5 .. x2 on 4 of 5 axes
+    dead time 60 +- 30 ms               Psi gain  <= ~1.15x
+
+Paired, only `payload x k x psi` was ever run as a grid, so the envelope closes
+over **those three and no others**. `COM x k`, `COM x payload` and
+`dead time x k` are untested — and COM +0.5 m alone is already 2/3 `past_clamp`
+at shipped settings, which makes it the axis least safe to assume composes.
+`tau_v` excludes `theta3_arm_joint`, whose shipped lag is 0 and which a
+multiplier cannot move.
+
+Two qualifications inside the lines above:
+
+- **payload 0.1x is excluded on purpose**, though it does not fail. It does not
+  settle either — 0.80 rad still swinging when the run ends, worst `dq/clp`
+  0.996, i.e. right up against the gate without tripping it. On a boom of this
+  length that is the block still traversing metres after the move is nominally
+  over. §1 drew the line at 0.5x for the shipped setting and the same line
+  belongs here. If a grasp can silently be a tenth of the declared mass,
+  `weights.du=10` alone is the better setting there (0.46 rad) and the paired
+  envelope is what you trade for it.
+- **Psi x1.15 is the weakest line on the page**, because it is one step below
+  the value whose failures may be a gate artifact. If `past_clamp` is re-scored
+  on the commanded `u` and the Psi failures survive, this line is right; if they
+  do not, the real Psi envelope is wider and unknown.
+
+**No tuning in this study holds Psi gain x1.3**, alone or paired: 3 to 7 of the
+twelve Psi-x1.3 runs end in `past_clamp` or `diverged` at every setting tried,
+the shipped one included. Whether that is a control result or a gate artifact is
+the open question above — but it points the same way either direction. If it is
+real, the answer is not an MPC setting: it is `command_domain`, a Psi refit, or
+feedback on the achieved joint velocity. If it is the gate, then the thing this
+study has actually been ranking settings on is an overspeed test, and the
+rankings need redoing before any of them is used.
+
+The 2026-09-30 live failure was blamed on the payload axis, and the payload axis
+is the tunable one: every setting in §3's first table gets through 0.1x without
+a failure. The gain axis is the one that is not, and it had not been the
+suspect. That inversion is the most useful thing in this document, and it is
+also the thing most dependent on a gate that needs re-scoring. Do not spend a
+machine day on it before doing that.
+
+## 4. What none of this can see
+
+Listed so a later reader does not mistake the map for the machine. The first
+four are cheap and would change conclusions; they should be done before this
+map is used for anything.
+
+- **`past_clamp` re-scored on the commanded `u`.** The gate that produces 149 of
+  the 166 failures in this study tests `dq[PLANNED]`, the achieved joint
+  velocity, against `u_clamp`, which is Psi's domain on the *command* and which
+  the shipped velocity loop applies to the PI branch alone. Log the JTC's
+  `forward + correction` at `wire_chain.py:429` and re-score `past_clamp` and
+  `dq_clamp_ratio` on it. The command is not in the current logs, so this is a
+  one-line harness change **and a full re-run** of every sweep in this document
+  — about 30 min at `--jobs 7` on 8 cores, not a re-analysis. Until it is done,
+  §2's and §3's rankings are rankings on an overspeed test.
+- **The `silence` fraction as a reported column.** p90 46 % on mismatched
+  plants, max 56 %, 0 % median on nominal. It is in every `score.json` and in
+  every CSV, and in no table. A setting recommended for hardware ought to hold
+  it low inside its own envelope; nothing here checks that.
+- **The exit reason, always split.** `hunting` fired zero times in 997 runs, so
+  the `rev` column informs nothing about pass/fail; `diverged` is 0-2 per
+  setting and does not track the aggregate. §3's second table splits them; §2's
+  does not.
+- **Which gate produces the silences.** `Step.silence` carries a `why`;
+  `wire_chain` counts and discards it. The histogram would say whether the node
+  is tripping on state age, reference age or `propagate` — a supervisor problem
+  rather than a control one.
+- **The scoring equilibrium is a third model.** `sway` is measured against
+  `planner.model.passive_equilibrium`, not against the OCP's model and not
+  against MuJoCo's settled state. If those disagree for a given
+  `(mass, com)`, every sway number carries a constant bias. Not checked.
+- **§3's recommendation is not applied.** `config/crane_mpc.yaml` still ships
+  `weights.du: 1`, `horizon_length: 40`. This issue was asked for the map, and
+  changing the shipped settings on an unvalidated harness (first bullet below)
+  would be changing them on the strength of a simulation nobody has checked
+  against Gazebo. That is a separate decision with a separate gate.
+- `horizon_length=20` is 1.2 s of horizon. Nothing here checks that 1.2 s is
+  still long enough for the *longest* CBS move, only for the moves in the
+  sample — a horizon shorter than the move's own settling time is a different
+  failure and would not show as sway.
+- The gaps `README.md` records for `wire_chain` — the solve takes no time,
+  measurement is exact at the cycle instant, the cadence anchor is exact, the
+  passive state is read rather than estimated. Three of the four are stability
+  gaps, and the cadence one is currently unbounded.
+- The mismatches tested are *static*. A `k` that varies with load pressure, a
+  Psi gain that differs per axis and per direction (which is the shape
+  `mismatch.py` says it really has), a payload swinging on a sling rather than
+  rigid on the mount — none of them are in the map.
+- Psi gain is applied here as one multiplier on all five axes and both
+  directions. Per-axis draws are what `sweep_robust --samples` does, and they
+  are not in this map.
+- Only `payload x k x psi` was ever run as a grid. `tau_v`, `dead_time` and
+  `com` appear one at a time only, so no statement here covers them paired with
+  anything.
+- Nothing here touches the real hydraulics — counterbalance valves, deadband,
+  spool overlap, bore/rod asymmetry, load-sensing flow. C3 lumps the whole
+  chain as velocity-in/joint-force-out by design. The envelope above is an
+  envelope on `wire_chain`, and will be read as one on the machine unless it
+  says otherwise. It says otherwise here.
+- Nothing here validates the path that caused the 2026-09-30 failure. That was a
+  wrong *declaration* — 800 kg for an 80 kg block. This study measures how much
+  wrongness the loop absorbs; it does not stop the declaration being wrong.
