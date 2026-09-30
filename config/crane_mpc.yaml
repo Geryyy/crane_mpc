@@ -12,12 +12,13 @@ crane_mpc:
     start_signal_action: ""
     jtc_name: trajectory_controller_a2b
 
-    # 80 * 0.06 = 4.8 s covers the ~2 s sway period and the 2 s fault-tolerance
-    # budget. Ts must equal sensor_to_valve_delay and be a whole number of
+    # 39 * 0.06 = 2.34 s still covers the ~2 s sway period and the 2 s
+    # fault-tolerance budget. 80 cost 2x the solve for no measured gain
+    # (wire_chain, 4 moves x 4 latencies: final error, peak and end sway equal). Ts must equal sensor_to_valve_delay and be a whole number of
     # velocity_loop.yaml ticks, so lookahead is bought in knots, not in a
     # coarser grid. Publishes at 16.7 Hz against a 25 Hz interface; own issue.
     Ts: 0.06
-    horizon_length: 80
+    horizon_length: 40
 
     # Transport dead time, common to all six axes, modelled in the predictor
     # only -- symbolic.py carries no delay, so a second one double-counts.
@@ -39,7 +40,7 @@ crane_mpc:
     solve_budget: 0.06
     # 12.5 Hz, the largest decimation not running ahead of a 20 Hz consumer.
     solver_health_decimation: 2
-    # 300 ms of fallback horizon against a 4.8 s one.
+    # 300 ms of fallback horizon against a 2.34 s one.
     max_consecutive_failures: 5
 
     sway:
