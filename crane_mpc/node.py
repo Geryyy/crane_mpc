@@ -184,6 +184,8 @@ class MpcNode(Node):
 
         self.Ts = float(self._values.Ts)
         self.grid = hz.Grid(self.Ts, int(self._values.horizon_length))
+        #: `why` of the silence already logged; None once a horizon goes out.
+        self._silent_why: str | None = None
         #: Every instant this node runs on; the cycle reads the same one.
         self._timing = Timing(
             self.Ts,
@@ -570,8 +572,9 @@ class MpcNode(Node):
         )
         if step.silence is not None:
             # `step` already fell silent; this only says so.
-            self.warn(step.silence.warning)
+            self.say_silence(step.silence)
             return
+        self._silent_why = None
         self.say_path_source()
         self.warn_divergence()
 
@@ -652,7 +655,16 @@ class MpcNode(Node):
 
     def fall_silent(self, silence) -> None:
         self._cycle.stay_silent(silence.why)
-        self.warn(silence.warning)
+        self.say_silence(silence)
+
+    def say_silence(self, silence) -> None:
+        # Once per episode, not every cycle: an idle node is silent forever. Still
+        # throttled, so a flapping condition is one line per WARN_PERIOD.
+        # Recorded only once printed, so a reason the throttle ate is said later.
+        if silence.why != self._silent_why and self.get_logger().warn(
+            silence.warning, throttle_duration_sec=WARN_PERIOD
+        ):
+            self._silent_why = silence.why
 
     def measurement(self, now_ns: int) -> Measurement:
         """Collect the two joint groups and the age of each, as the cycle reads them."""

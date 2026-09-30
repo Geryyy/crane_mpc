@@ -413,8 +413,23 @@ class Logs:
     def __getattr__(self, level):
         def say(text, **_):
             self.lines.append((level, text))
+            return True  # as rclpy's, when no filter ate it
 
         return say
+
+
+def test_a_silence_is_said_once_and_not_every_cycle(node):
+    """An idle node is silent forever; it logged that every WARN_PERIOD."""
+    logs = Logs()
+    node.get_logger = lambda: logs
+    for _ in range(3):
+        node.update()
+    assert sum("no robot description" in text for _, text in logs.lines) == 1
+
+    node.on_robot_description(String(data=problem.default_description().read_text()))
+    node.on_reference(reference(node))
+    node.update()
+    assert sum("no measured state" in text for _, text in logs.lines) == 1
 
 
 def test_which_branch_drives_the_position_reference_is_said_out_loud(node):
