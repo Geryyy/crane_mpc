@@ -1162,6 +1162,11 @@ class Cycle:
             # is time at the goal, which is what `max_reference_age` bounds.
             if self.path_origin >= 1.0:
                 bought = nominal
+            elif 1.0 - (self.path_origin + bought) < nominal:
+                # A solve buys a shrinking share of what is left, so the end is
+                # approached geometrically and never reached: the stall watch fired
+                # at every goal and the horizon never expired, hanging the JTC goal.
+                bought = 1.0 - self.path_origin
             self.path_origin = min(self.path_origin + bought, 1.0)
         spent = bought * span
         self.reference_progress += spent

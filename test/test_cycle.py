@@ -608,6 +608,20 @@ def test_the_advance_moves_both_readings_of_where_the_plan_is():
     assert one.reference_progress == pytest.approx(0.5)
 
 
+def test_the_last_sliver_of_path_is_taken_whole_so_the_plan_can_end():
+    """Buying a share of what is left never reaches 1: live, every goal stalled there."""
+    one = curve_cycle(duration=2.0)
+    one.path = one.resolved_path()
+    nominal = one.Ts / one.path_span()
+    one.path_origin = 1.0 - 0.5 * nominal
+    one.advance(
+        solution(Outcome.CONVERGED, progress_advance=0.05 * nominal), 0, 0.0, 1.0
+    )
+    assert one.path_origin == 1.0
+    one.advance(solution(Outcome.CONVERGED, progress_advance=0.0), 0, 0.1, 1.0)
+    assert not one.progress_stalled
+
+
 def test_the_window_fallback_advances_exactly_as_it_did():
     one = cycle()
     one.reference = hz.Knots.zeros(KNOTS)
