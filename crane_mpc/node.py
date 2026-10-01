@@ -11,6 +11,7 @@ import numpy as np
 import rclpy
 from action_msgs.msg import GoalStatus, GoalStatusArray
 from control_msgs.msg import JointTrajectoryControllerState
+from controller_manager_msgs.msg import ControllerManagerActivity
 from crane_model import CraneModel, Payload, Tool, canonical_joints, hydraulic_limits
 from crane_msgs.msg import JointPath, SolverHealth, SwaySettled
 from crane_msgs.srv import SetPayload
@@ -217,7 +218,6 @@ class MpcNode(Node):
         self._dq_a = np.zeros(ACTUATED_DOF)
         self._q_u = np.zeros(PASSIVE_DOF)
         self._dq_u = np.zeros(PASSIVE_DOF)
-        self._settled_since_ns: int | None = None
         self._actuated_stamp: Time | None = None
         self._passive_stamp: Time | None = None
         #: When a passive *velocity* (not pose) was last written; settled verdict ages against this.
@@ -236,6 +236,10 @@ class MpcNode(Node):
 
         #: The action whose accepted goal releases this node; no action, no gate.
         self._gate = StartGate(str(self._values.start_signal_action))
+        #: Off on `~/activity` naming it inactive; unknown reads as active, as before.
+        #: The tree deactivates the JTC when a move is done and its grip goals share it:
+        #: a horizon then replaced them -- live, the jaws never opened.
+        self._jtc_active = True
         self._rate_query: RateQuery | None = None
 
         self._create_publishers()
@@ -357,6 +361,12 @@ class MpcNode(Node):
             self.create_subscription(
                 GoalStatusArray, self._gate.topic, self.on_start_signal, _latched()
             )
+        self.create_subscription(
+            ControllerManagerActivity,
+            f"{CONTROLLER_MANAGER}/activity",
+            self.on_activity,
+            _latched(),
+        )
 
     # -- what arrives ------------------------------------------------------------
 
@@ -403,6 +413,18 @@ class MpcNode(Node):
             else "has no goal left, so this node stops driving"
         )
         self.get_logger().info(f"{self._gate.action} {drives}.")
+
+    def on_activity(self, message: ControllerManagerActivity) -> None:
+        for controller in message.controllers:
+            if controller.name != self._values.jtc_name:
+                continue
+            active = controller.state.label == "active"
+            if self._jtc_active and not active:
+                # The tree took the move as done. A plan still running would wake on
+                # the next activation and replace the descent -- live, it did.
+                self._reference_message = None
+                self._cycle.reference = None
+            self._jtc_active = active
 
     def on_controller_state(self, message: JointTrajectoryControllerState) -> None:
         # Timber bringup profiles put both trajectory controllers on one topic;
@@ -567,6 +589,15 @@ class MpcNode(Node):
         if not self.start_signal_still_open():
             self.fall_silent(self.ungated())
             return
+        if self.mode == "active" and not self._jtc_active:
+            self.fall_silent(
+                Silence(
+                    f"{self._values.jtc_name} is not active",
+                    f"{self._values.jtc_name} is not active, so nothing goes out on "
+                    f"{HORIZON_TOPIC} and a new plan waits unanchored.",
+                )
+            )
+            return
 
         stamp = self._actuated_stamp
         measured = self._timing.measured_ns(
@@ -612,7 +643,6 @@ class MpcNode(Node):
             int(values.max_consecutive_failures),
             float(values.min_progress_rate),
             float(values.max_stall_time),
-            float(values.max_settle_time),
         )
 
     def say_stalled(self, text: str, was_stalled: bool) -> str:
@@ -746,9 +776,6 @@ class MpcNode(Node):
             float(self._values.max_state_age),
             list(self._values.sway.dq_u_settled),
             self._stamp,
-        )
-        self._settled_since_ns, cycle.swinging = reports.still_swinging(
-            self._settled_since_ns, verdict, now_ns
         )
         # Reuses `solver_health_decimation`, not a second knob -- two numbers
         # for one decision could disagree.

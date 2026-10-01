@@ -6,7 +6,6 @@ that hands control back, and the shift that keeps driving on a solve that
 did not converge.
 """
 
-import dataclasses
 from types import SimpleNamespace
 
 import numpy as np
@@ -19,7 +18,6 @@ from crane_mpc.cycle import (
     JOINT_PATH_TOPIC,
     Bounds,
     Cycle,
-    Silence,
     Timing,
     Verdict,
     carry_actuated_velocity,
@@ -706,30 +704,6 @@ def test_a_spent_path_charges_time_so_the_plan_can_still_expire():
     one.advance(solution(Outcome.CONVERGED, progress_advance=0.0), 0, 0.5, 1.0)
     assert one.reference_progress == pytest.approx(Ts)
     assert not one.progress_stalled
-
-
-def test_a_swinging_load_holds_the_goal_past_the_plans_end_up_to_a_cap():
-    """Live, the sway left at the goal never decayed once nothing held it."""
-    one = curve_cycle(duration=2.0)
-    one.reference_progress = 2.0 + 1.0
-    one.gates = lambda now, skew, age, measured: Silence(
-        "expired" if age < 1.0 else "held", ""
-    )
-    hold = dataclasses.replace(BOUNDS, max_settle_time=10.0)
-
-    def gate(swinging, bounds, last_silence=""):
-        one.swinging, one.last_silence = swinging, last_silence
-        return one.step(0, 0, None, bounds).silence.why
-
-    # The tree deactivating the JTC ends the hold: its next trajectory shares it.
-    assert gate(True, hold) == "expired"
-    one.timing.record_output(0, np.zeros(cs.K_PLANNED_DOF))
-
-    assert gate(True, hold) == "held"
-    assert gate(False, hold) == "expired"
-    assert gate(True, BOUNDS) == "expired"
-    # Once silent it stays so: the descent's own swing must not wake this goal.
-    assert gate(True, hold, last_silence="expired") == "expired"
 
 
 def test_a_shifted_horizon_records_the_command_it_published():

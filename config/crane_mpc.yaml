@@ -45,8 +45,10 @@ crane_mpc:
 
     sway:
       # A still machine reads 0.0046 rad/s RMS, max 0.039, over 406 s of
-      # quiescence in the control_recordings bags.
-      dq_u_settled: [0.04, 0.04]
+      # quiescence in the control_recordings bags. 0.02, not 0.04: 0.04 passed a
+      # ~0.02 rad swing, 4 cm at the block, into the descent (sim). Untested on the
+      # machine, whose 0.039 spikes reset the tree's 1 s hold.
+      dq_u_settled: [0.02, 0.02]
 
     weights:
       # 10x from 4.0/1.0: at the old row the machine parked ~0.2 rad off the
@@ -61,7 +63,10 @@ crane_mpc:
       # 16x from 4.0, which had never moved while q_a, tool, progress and
       # terminal_scale rose around it: 4x less residual swing at the end of the
       # move and the path improves with it.
-      dq_u: [64.0, 64.0]
+      # 256 from 64: the residual swing at the goal is what the descent places with.
+      # wire_chain --goal out, latency 26 ms: end sway 0.017 -> 0.008 rad, peak
+      # 0.156 -> 0.121, final error 1.9 -> 2.3 mm, no failed solve.
+      dq_u: [256.0, 256.0]
       tau_a: [1.0e-8, 1.0e-8, 1.0e-8, 1.0e-8, 1.0e-8, 1.0e-8]
       u: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
       # C4's rate cost: 0.1 kicks, 3 is no better.
@@ -102,10 +107,10 @@ crane_mpc:
       cylinder_force: [1.0e4, 1.0e4, 1.0e4, 1.0e4, 1.0e4, 1.0e4]
       pump_flow: 1.0e4
 
-    max_reference_age: 0.5
-    # Run 6 live: 0.03 rad left at the end of the carry never decayed, and the
-    # block slipped in the jaws 12 s into the BT's settle wait.
-    max_settle_time: 10.0
+    # 4 s, not 0.5: the machine lags the plan and the JTC played the last horizon
+    # open-loop, a stop nobody damped (live: 0.06 rad left at every goal). The tree
+    # deactivating the JTC ends it sooner; that drops the plan.
+    max_reference_age: 4.0
 
     # Liveness pair, wall clock. 0.1 is a third of the lowest legitimate
     # over-ask measured; 2.0 s is a horizon spent without moving through the

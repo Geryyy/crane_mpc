@@ -11,6 +11,7 @@ from action_msgs.msg import GoalStatus, GoalStatusArray
 from builtin_interfaces.msg import Duration
 from conftest import export_for, shipped_config, shipped_init_args
 from control_msgs.msg import JointTrajectoryControllerState
+from controller_manager_msgs.msg import ControllerManagerActivity, NamedLifecycleState
 from crane_model import canonical_joints, hydraulic_limits
 from crane_model import symbolic as cs
 from crane_mpc import config, problem
@@ -336,6 +337,28 @@ def test_a_finished_goal_closes_the_gate_again(node):
     published = len(one.published["_shadow_horizon_publisher"])
     one.update()
     assert len(one.published["_shadow_horizon_publisher"]) == published
+
+
+def test_an_inactive_jtc_gets_nothing_and_the_plan_waits(node):
+    """The tree's grip goals share the JTC; a horizon replaced them, jaws shut."""
+    one = configured(node)
+    one.set_parameters([Parameter("mode", Parameter.Type.STRING, "active")])
+
+    def activity(label):
+        message = ControllerManagerActivity()
+        controller = NamedLifecycleState(name=one._values.jtc_name)
+        controller.state.label = label
+        message.controllers.append(controller)
+        one.on_activity(message)
+
+    activity("inactive")
+    one.update()
+    assert "is not active" in one._last_silence
+    assert one._cycle.reference_progress == 0.0
+    # The tree took the move as done: the plan is dropped, not resumed over its next goal.
+    activity("active")
+    one.update()
+    assert "no reference" in one._last_silence
 
 
 def test_a_held_plan_is_not_spent_while_the_gate_is_closed(node):

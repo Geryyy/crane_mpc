@@ -153,11 +153,6 @@ class Timing:
         self._said.discard("no jtc output")
         return np.mean(window, axis=0)
 
-    def jtc_ticking(self, measured_ns: int) -> bool:
-        """Any JTC tick in the last two cycles: a deactivated JTC publishes none."""
-        start = measured_ns - int(2 * self.Ts * NANOSECONDS)
-        return any(t >= start for t, _ in self._outputs)
-
     # -- what the controllers promise --------------------------------------------
 
     def rate_mismatch(self, manager_rate: int, jtc_rate: int) -> str:
@@ -211,7 +206,6 @@ class Bounds:
     max_consecutive_failures: int
     min_progress_rate: float
     max_stall_time: float
-    max_settle_time: float = 0.0
 
 
 @dataclass
@@ -367,8 +361,6 @@ class Cycle:
         # `watch_progress` state; only published cycles feed it.
         self.progress_held = 0.0
         self.progress_stalled = False
-        #: Not SETTLED_YES this cycle; the caller sets it, `gates` holds the goal on it.
-        self.swinging = False
         self.progress_mark_ns = 0
         self.progress_marked = False
 
@@ -533,16 +525,9 @@ class Cycle:
         ones a node refuses before it is configured. A gate silences the cycle
         here, so the caller only reports the `Silence` it gets back.
         """
-        # Only while still publishing and while the JTC runs: the tree deactivates it
-        # when it takes the move as done, and its next trajectory (the grip) shares
-        # this JTC -- a hold past that replaced it, and the jaws never opened.
-        held = (
-            self.swinging
-            and not self.last_silence
-            and self.timing.jtc_ticking(now_ns if measured_ns is None else measured_ns)
+        silence = self.gates(
+            now_ns, bounds.max_clock_skew, bounds.max_reference_age, measured_ns
         )
-        hold = bounds.max_reference_age + (bounds.max_settle_time if held else 0.0)
-        silence = self.gates(now_ns, bounds.max_clock_skew, hold, measured_ns)
         if silence is None:
             silence = self.read_state(measurement, bounds.max_state_age)
         if silence is None:

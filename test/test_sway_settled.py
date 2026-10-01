@@ -35,18 +35,6 @@ def test_rates_inside_the_threshold_are_settled():
     assert list(settled.velocity) == [0.01, -0.039]
 
 
-def test_a_turning_point_is_not_settled_until_it_has_held_a_second():
-    """The MPC holds the goal on this; one YES at a turning point ended the hold."""
-    yes, no = verdict([0.0, 0.0]), verdict([0.0, 0.09])
-    since, swinging = reports.still_swinging(None, yes, 0)
-    assert swinging
-    since, swinging = reports.still_swinging(since, no, 300_000_000)
-    assert since is None and swinging
-    since, _ = reports.still_swinging(since, yes, 500_000_000)
-    assert reports.still_swinging(since, yes, 1_400_000_000)[1]
-    assert not reports.still_swinging(since, yes, 1_500_000_000)[1]
-
-
 def test_one_row_over_the_threshold_is_enough_to_be_unsettled():
     settled = verdict([0.001, 0.05])
     assert settled.settled == SwaySettled.SETTLED_NO

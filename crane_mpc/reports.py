@@ -105,25 +105,11 @@ def settled_is_due(cycles: int, decimation: int, last, verdict) -> bool:
     )
 
 
-def still_swinging(settled_since_ns, verdict, now_ns: int):
-    """
-    `(settled_since_ns, swinging)`: SETTLED_YES held for 1 s, else still swinging.
-
-    A swinging load reads YES at every turning point, so one sample is a coin
-    flip. The same 1 s WaitForMoveComplete's kSettledMinHold asks for.
-    """
-    if verdict.settled != SwaySettled.SETTLED_YES:
-        return None, True
-    since = now_ns if settled_since_ns is None else settled_since_ns
-    return since, now_ns - since < 1_000_000_000
-
-
 def sway_settled(dq_u, age: float | None, max_state_age: float, dq_u_settled, stamp):
     """
     `crane_msgs/SwaySettled` for one cycle: has the load stopped swinging.
 
-    Acted on only to hold the goal past its end while it is not SETTLED_YES
-    (`max_settle_time`); stopping/refusing is the task layer's. Every
+    Reported, never acted on (damping/stopping/refusing is the task layer's). Every
     non-measurement path is SETTLED_UNKNOWN with NaN rates: a degraded estimate
     read as settled is a grip descending onto a swinging block. `age` is the
     **rate**'s age, not the pose's -- a still crane's zeros must not read as fresh.
