@@ -215,6 +215,14 @@ def main(argv=None) -> int:
     )
     parser.add_argument("--viewer", action="store_true", help="MuJoCo passive viewer")
     parser.add_argument(
+        "--start",
+        type=float,
+        nargs=10,
+        metavar="X",
+        help="first move from a live state: canonical eight positions, sway included, "
+        "then tip/tilt rates (e.g. off a cap.json); default the preset, hanging still",
+    )
+    parser.add_argument(
         "--realtime",
         type=float,
         default=1.0,
@@ -262,6 +270,12 @@ def main(argv=None) -> int:
 
     plant.scale_planned_damping(damping_scale)
     start = anchor = tune_planner.start_of(planner, options.resettle_start)
+    if options.start is not None:
+        start = anchor = tune_planner.Start(
+            q=np.asarray(options.start[:8]),
+            dq_a=np.zeros(len(PLANNED)),
+            dq_u=np.asarray(options.start[8:]),
+        )
     rng = None if options.random is None else np.random.default_rng(options.seed)
     gate = SpaceGate()
     if options.viewer:
@@ -290,7 +304,13 @@ def main(argv=None) -> int:
             continue
         gate.pressed, said = False, False
         chain = harness.Chain(plant, start.q_tool, options, fit=plant_fit)
-        reason, score = fly(options, parameters, ocp, chain, equilibrium, plan, coast)
+        # Only the first move starts swinging; later ones start where the last ended.
+        swing = (
+            None if options.start is None or moves else (start.q[PASSIVE], start.dq_u)
+        )
+        reason, score = fly(
+            options, parameters, ocp, chain, equilibrium, plan, coast, swing
+        )
         failed, moves = failed or bool(reason), moves + 1
         scores.append(score)
         if rng is None or (options.random and moves >= options.random):
@@ -308,7 +328,7 @@ def main(argv=None) -> int:
     return 1 if failed else 0
 
 
-def fly(options, parameters, ocp, chain, equilibrium, plan, coast):
+def fly(options, parameters, ocp, chain, equilibrium, plan, coast, swing=None):
     """One move through the wire; `(failure reasons, scores)`. Coast cycles unscored."""
     plant = chain.plant
     Ts, N = float(parameters["Ts"]), int(parameters["horizon_length"])
@@ -339,10 +359,12 @@ def fly(options, parameters, ocp, chain, equilibrium, plan, coast):
         timing.anchor = lambda ns: anchor(ns + phase_ns)
 
     q0 = plan.q[0].copy()
-    q0[PASSIVE] = equilibrium(q0[ACTUATED])
+    q0[PASSIVE] = equilibrium(q0[ACTUATED]) if swing is None else swing[0]
     x_init = np.zeros(cs.NX)
     x_init[: cs.K_PLANNED_DOF] = q0[PLANNED]
     x_init[cs.X_PASSIVE_POSITION : cs.X_PASSIVE_POSITION + 2] = q0[PASSIVE]
+    if swing is not None:
+        x_init[cs.X_PASSIVE_VELOCITY : cs.X_PASSIVE_VELOCITY + 2] = swing[1]
     chain.seed(x_init)
 
     joints = [f"j{i}" for i in range(cs.K_GENERALIZED_DOF)]
