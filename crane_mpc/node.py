@@ -217,6 +217,7 @@ class MpcNode(Node):
         self._dq_a = np.zeros(ACTUATED_DOF)
         self._q_u = np.zeros(PASSIVE_DOF)
         self._dq_u = np.zeros(PASSIVE_DOF)
+        self._settled_since_ns: int | None = None
         self._actuated_stamp: Time | None = None
         self._passive_stamp: Time | None = None
         #: When a passive *velocity* (not pose) was last written; settled verdict ages against this.
@@ -611,6 +612,7 @@ class MpcNode(Node):
             int(values.max_consecutive_failures),
             float(values.min_progress_rate),
             float(values.max_stall_time),
+            float(values.max_settle_time),
         )
 
     def say_stalled(self, text: str, was_stalled: bool) -> str:
@@ -744,6 +746,9 @@ class MpcNode(Node):
             float(self._values.max_state_age),
             list(self._values.sway.dq_u_settled),
             self._stamp,
+        )
+        self._settled_since_ns, cycle.swinging = reports.still_swinging(
+            self._settled_since_ns, verdict, now_ns
         )
         # Reuses `solver_health_decimation`, not a second knob -- two numbers
         # for one decision could disagree.

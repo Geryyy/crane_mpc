@@ -335,6 +335,15 @@ crane_mpc:
     validation:
       gt<>: [0.0]
 
+  max_settle_time:
+    type: double
+    read_only: true
+    description: "How much longer than max_reference_age this node keeps holding the goal while
+      the load still swings, s. Holding is what damps it -- the JTC holding its last point does
+      not, and the sim pendulum barely damps itself. 0 is the old behaviour."
+    validation:
+      gt_eq<>: [0.0]
+
   min_progress_rate:
     type: double
     read_only: true

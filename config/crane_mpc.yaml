@@ -103,6 +103,9 @@ crane_mpc:
       pump_flow: 1.0e4
 
     max_reference_age: 0.5
+    # Run 6 live: 0.03 rad left at the end of the carry never decayed, and the
+    # block slipped in the jaws 12 s into the BT's settle wait.
+    max_settle_time: 10.0
 
     # Liveness pair, wall clock. 0.1 is a third of the lowest legitimate
     # over-ask measured; 2.0 s is a horizon spent without moving through the
