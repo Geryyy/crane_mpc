@@ -98,10 +98,20 @@ replay side), then compare sway peak and path error against the recording.
 
 | quantity                | Gazebo measured | `wire_chain` set       | how                |
 | ----------------------- | --------------- | ---------------------- | ------------------ |
-| tick-to-arrival latency | *unmeasured*    | `--latency 0.0`        | `looptiming.py`    |
-| controller-state rate   | *unmeasured*    | `harness` `jtc_period` | `looptiming.py`    |
-| dead time + `tau_v`     | *unmeasured*    | `--lag-shift 0.0`      | `steptest.py`      |
+| tick-to-arrival latency | p50 26 / p90 30 / max 62 ms | `--latency 0.026` | `looptiming.py`    |
+| controller-state rate   | 100 Hz, 6.0 ticks/cycle, 0 % starved | `harness` `jtc_period` | `looptiming.py`    |
+| dead time + `tau_v`     | matches MuJoCo to 300 ms on all five axes | `--lag-shift 0.0` | `steptest.py` + `plant_step.py` |
 | cadence phase           | **not observable from a capture** | `--cadence-phase 0.0` | — |
+
+Measured 2026-10-01: one unloaded A2B move, `trial.sh`, headless, otherwise idle machine,
+2 ms physics step, N=40, 30 deg sway box. Live sway peak 0.009 rad, final error 1e-4,
+127/127 solves converged (p50 4.9 ms); `wire_chain --latency 0.026` on a similar move:
+0.007 rad, 1e-4. `plant_step.py`: MuJoCo tracks Gazebo's step to <=0.02 over the first
+200-300 ms (telescope 0.83 vs 0.71); the OCP model is ~3x slower there on boom, arm,
+telescope and rotator, slewing agrees. Past ~300 ms the step test is not open loop (the
+JTC's PI holds position), so later columns do not compare. Under the full interactive
+stack (GUI, rviz, perception, load avg 20+) solves ran 75-173 ms: latency is a property of
+the load, not of the loop. Still unmeasured: a loaded (800 kg) move.
 
 Fill a cell only from the instrument named in the last column. A wrong number
 here does not leave the harness unvalidated — it declares it validated, which is

@@ -68,7 +68,7 @@ def ocp_model(hold, amplitude, parameters):
         problem.default_description().read_text(), parameters, parameters["hydraulics"]
     )
     q = np.array([hold[j][0] for j in CANON])
-    x = np.zeros(cs.NX)
+    x = np.zeros(ocp.nx)  # C4 carries the command as a state on top of cs.NX
     x[POS] = q[[0, 1, 2, 3, 6]]
     x[PAS] = q[[4, 5]]
     x[cs.X_PROGRESS_RATE] = float(
@@ -79,7 +79,12 @@ def ocp_model(hold, amplitude, parameters):
     t, dq = [0.0], [0.0]
     for k in range(int(0.95 / ocp.Ts)):
         u = np.zeros(cs.NU_PROGRESS)
-        u[0] = amplitude
+        if ocp.command_state:
+            x[cs.X_COMMAND] = (
+                amplitude  # u is the command's rate under C4: step the state
+            )
+        else:
+            u[0] = amplitude
         x = ocp._integrate(ocp._stepper, x, u)
         t.append((k + 1) * ocp.Ts)
         dq.append(float(x[VEL][0]) / amplitude)
