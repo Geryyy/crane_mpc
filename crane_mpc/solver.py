@@ -838,8 +838,17 @@ class Ocp:
             command = slice(cs.X_COMMAND, cs.X_COMMAND + cs.K_PLANNED_DOF)
             x0[command] = np.clip(x0[command], -self._command_max, self._command_max)
         x0[cs.X_PROGRESS] = 0.0
+        # Nor faster than stops inside what is left: `s` never falls and is capped
+        # at `remaining()` on every stage, so a rate carried onto the last sliver
+        # is QP status 3 to the goal. Stage 1 bounds it by `r/Ts`, braking at
+        # `progress_accel_max` by `sqrt(2 a r)`.
+        left = path.remaining()
+        accel = float(self.parameters["limits"]["progress_accel_max"])
         x0[cs.X_PROGRESS_RATE] = min(
-            max(0.0, float(x0[cs.X_PROGRESS_RATE])), self.progress_rate_max(path)
+            max(0.0, float(x0[cs.X_PROGRESS_RATE])),
+            self.progress_rate_max(path),
+            left / self.Ts,
+            float(np.sqrt(2.0 * accel * left)),
         )
         return x0
 

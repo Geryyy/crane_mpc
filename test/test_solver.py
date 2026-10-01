@@ -1,5 +1,6 @@
 """The solver wrapper: what it predicts, and what it plans."""
 
+import dataclasses
 import json
 
 import crane_ocp_export as ox
@@ -11,6 +12,7 @@ from ament_index_python.packages import get_package_share_directory
 from conftest import export_for
 from crane_model import hydraulic_limits
 from crane_model import symbolic as cs
+
 from crane_mpc import problem
 from crane_mpc.config import machine_limits
 from crane_mpc.horizon import Grid, Knots, resample
@@ -573,3 +575,15 @@ def test_c4_solves_at_rest_inside_its_boxes(c4_ocp):
     u_max = np.asarray(limits["u_max"][:PLANNED])
     assert np.all(np.abs(solution.states[:, cs.X_COMMAND :]) <= u_max + 1e-6)
     assert c4_ocp.cost_terms(solution, q_eq).du >= 0.0
+
+
+def test_c4_converges_at_the_end_of_the_path_with_progress_still_running(c4_ocp):
+    """Live, every goal ended in QP status 3: `v_s` carried onto a spent path."""
+    x = c4_state(c4_ocp, np.zeros(PLANNED))
+    position = x[cs.X_PLANNED_POSITION : cs.X_PLANNED_POSITION + PLANNED]
+    q_eq = x[cs.X_PASSIVE_POSITION : cs.X_PASSIVE_POSITION + cs.K_PASSIVE_DOF]
+    horizon = horizon_holding(c4_ocp, position)
+    end = dataclasses.replace(c4_ocp.window_path(horizon), origin=1.0)
+    solution = c4_ocp.solve(x, horizon, q_eq, path=end)
+    assert solution.status == 0
+    assert np.allclose(solution.states[:, cs.X_PROGRESS], 0.0, atol=1e-9)
