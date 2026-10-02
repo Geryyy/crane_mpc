@@ -107,10 +107,12 @@ crane_mpc:
       cylinder_force: [1.0e4, 1.0e4, 1.0e4, 1.0e4, 1.0e4, 1.0e4]
       pump_flow: 1.0e4
 
-    # 4 s, not 0.5: the machine lags the plan and the JTC played the last horizon
-    # open-loop, a stop nobody damped (live: 0.06 rad left at every goal). The tree
-    # deactivating the JTC ends it sooner; that drops the plan.
-    max_reference_age: 4.0
+    # 20 s, not 0.5: the machine lags the plan and the JTC played the last horizon
+    # open-loop, a stop nobody damped (live: 0.06 rad left at every goal). 4 s fell
+    # silent while the BT still waited for the sway to settle, and the undamped load
+    # took ~18 s more after a lift (sim, 2026-10-02). The tree deactivating the JTC
+    # ends it sooner; that drops the plan.
+    max_reference_age: 20.0
 
     # Liveness pair, wall clock. 0.1 is a third of the lowest legitimate
     # over-ask measured; 2.0 s is a horizon spent without moving through the
