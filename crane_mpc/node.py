@@ -636,9 +636,12 @@ class MpcNode(Node):
     def bounds(self) -> Bounds:
         """Read this cycle's gate parameters, once."""
         values = self._values
+        loaded = self._ocp is not None and self._ocp.payload_mass_kg > 0.0
         return Bounds(
             float(values.max_clock_skew),
-            float(values.max_reference_age),
+            float(
+                values.max_reference_age_loaded if loaded else values.max_reference_age
+            ),
             float(values.max_state_age),
             int(values.max_consecutive_failures),
             float(values.min_progress_rate),

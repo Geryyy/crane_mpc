@@ -335,6 +335,14 @@ crane_mpc:
     validation:
       gt<>: [0.0]
 
+  max_reference_age_loaded:
+    type: double
+    read_only: true
+    description: "max_reference_age while a payload is set: the hold that damps a carried
+      load until the tree releases the JTC. Separate because the empty hold went unstable."
+    validation:
+      gt<>: [0.0]
+
   min_progress_rate:
     type: double
     read_only: true
