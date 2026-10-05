@@ -112,9 +112,9 @@ crane_mpc:
     # deactivating the JTC ends it sooner; that drops the plan.
     max_reference_age: 4.0
     # Carrying: 20 s. 4 s fell silent while a lifted block still swung 0.027 rad, which then
-    # decayed undamped past the BT's 120 s settle wait (sim wall run 70); 20 s loaded held
-    # in every carry of runs 52-57. Empty it stays 4 s: the empty hold grew the swing 0.03
-    # -> 0.49 rad at 9 m reach (run 68).
+    # decayed undamped past the BT's 120 s settle wait; 20 s loaded held
+    # in every carry tried. Empty it stays 4 s: the empty hold grew the swing 0.03
+    # -> 0.49 rad at 9 m reach.
     max_reference_age_loaded: 20.0
 
     # Liveness pair, wall clock. 0.1 is a third of the lowest legitimate
