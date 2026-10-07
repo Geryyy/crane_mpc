@@ -20,8 +20,8 @@ window closes. `--random N` chains N moves, each from where the last ended.
 
 Plant against OCP, i.e. the mismatch: `--plant-payload`/`--plant-payload-com`
 against `--payload-mass`/`--payload-com`, `--k-scale`/`--d-scale`,
-`--tau-v-scale`, `--dead-time`, `--psi-gain-*`. The robustness map they were
-cut for is `robustness.md`.
+`--tau-v-scale`/`--tau-v-offset`, `--dead-time`, `--psi-gain-*`. The robustness
+map they were cut for is `robustness.md`.
 
 Plan, plant mismatch and solver flags are `harness.add_arguments`'. Exit 1 on
 divergence, hunting (`hunting.py`: u0 reversing on half the cycles) or a JTC
@@ -160,6 +160,31 @@ def scale_tau_v(fit, scale):
     return dataclasses.replace(fit, tau_v=tuple(np.asarray(fit.tau_v, float) * scale))
 
 
+def offset_tau_v(fit, offset):
+    """
+    Plant `tau_v` under a per-axis *additive* offset, floored at zero.
+
+    `scale_tau_v` cannot move an axis fitted at zero and the arm is
+    (`tau_v = [0.1, 0.025, 0.0, 0.05, 0.125]`), so every multiplicative lag
+    family leaves the axis carrying the payload moment arm untouched --
+    `robustness.md` §1 says so and §4 asks for this knob. An offset moves it.
+    Still not `perturb_fit`'s `lag_shift_s`, which holds dead time + `tau_v`
+    constant and is refused at that same zero: here the *sum* moves, which is
+    the half the staircase campaign never separated anyway.
+
+    Floored, not refused, below zero: `C3Actuator` reads `tau_v < 0` as
+    alpha = 1, i.e. no lag at all, so a negative would silently clip. Zero is
+    what "no lag" means and the axes already there cannot get faster.
+    `K_LAG_AXES` moves with the floor, but only on the plant's fit -- the export
+    key digests `c3_full_model.json`, not this.
+    """
+    offset = np.asarray(offset, float)
+    if not np.all(np.isfinite(offset)):
+        raise SystemExit(f"--tau-v-offset wants finite seconds: {offset}")
+    lagged = np.maximum(np.asarray(fit.tau_v, float) + offset, 0.0)
+    return dataclasses.replace(fit, tau_v=tuple(lagged))
+
+
 def wire_161(horizon, joints, stamp, lead, in_flight):
     """Issue 161's encoding: knot i at lead + t_i, the in-flight knot at 0, u - dq per knot."""
     message = hz.horizon_to_message(horizon, joints, stamp)
@@ -212,6 +237,15 @@ def main(argv=None) -> int:
         help="plant C3 tau_v multiplier per planned axis",
     )
     parser.add_argument(
+        "--tau-v-offset",
+        type=float,
+        nargs=harness.AXES,
+        default=None,
+        metavar="S",
+        help="plant C3 tau_v += s per planned axis, floored at 0; reaches the "
+        "arm, which is fitted at 0 and no multiplier can move",
+    )
+    parser.add_argument(
         "--json", type=Path, default=None, help="scores; a list per move if chained"
     )
     parser.add_argument("--viewer", action="store_true", help="MuJoCo passive viewer")
@@ -245,6 +279,8 @@ def main(argv=None) -> int:
     )
     if options.tau_v_scale is not None:
         plant_fit = scale_tau_v(plant_fit, options.tau_v_scale)
+    if options.tau_v_offset is not None:
+        plant_fit = offset_tau_v(plant_fit, options.tau_v_offset)
     ocp = harness.create_solver(
         parameters, hydraulics, options.rebuild, options.verbose_build
     )

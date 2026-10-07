@@ -214,7 +214,12 @@ stability rather than tracking:
   scheduling adds to it under load, and the issue's own note records
   controller-state starvation at load avg 20-28 — stability. `--latency` is one
   number, so it cannot carry the jitter either: the p90 and the p50 are set
-  separately or not at all.
+  separately or not at all — and here they cannot be set apart at all. Delivery
+  lands on the first JTC tick at or after `cycle instant + --latency`, so the
+  delay that acts is `10 ms * ceil(latency / 10 ms)`: `0.021`, `0.026` and
+  `0.030` are byte-identical runs and `0.031` is the next distinct value (issue
+  210, which measured a 459-run grid at 0.026 and 0.030 and got all 459 rows
+  equal). The measured p50 26 and p90 30 ms are one point in this harness.
 - **The cadence anchor is exact.** `wire_chain` measures at the cycle instant,
   so the state is never stale; live it is up to a `/joint_states` period old at
   the timer tick. This is the gap `--cadence-phase` was meant to stand for and

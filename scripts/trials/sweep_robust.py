@@ -38,6 +38,7 @@ BANDS = {  # band -> wire_chain flags it sets
     "k": ["--k-scale", "--d-scale"],  # k and d are one identification
     "psi": ["--psi-gain-positive", "--psi-gain-negative"],
     "tau_v": ["--tau-v-scale"],
+    "tau_v_offset": ["--tau-v-offset"],  # seconds, additive; reaches the arm's 0
     "dead_time": ["--dead-time"],  # seconds, absolute; the fit's is 0.06
     "payload": ["--plant-payload"],
     "com": ["--plant-payload-com"],  # m in K8, three components
@@ -45,7 +46,7 @@ BANDS = {  # band -> wire_chain flags it sets
     "latency": ["--latency"],
 }
 #: How many numbers a band's flags take; 1 where it is absent.
-WIDTH = {"k": AXES, "psi": AXES, "tau_v": AXES, "com": 3}
+WIDTH = {"k": AXES, "psi": AXES, "tau_v": AXES, "tau_v_offset": AXES, "com": 3}
 #: One run spreads over ~4 cores for a slower wall clock; one core each scales.
 ONE_THREAD = {**os.environ, "OMP_NUM_THREADS": "1", "OPENBLAS_NUM_THREADS": "1"}
 

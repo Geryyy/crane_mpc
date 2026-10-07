@@ -161,7 +161,8 @@ What that says:
   both knobs move `late/pk` monotonically in the *slower*-plant direction
   (`tau_v` x2 -> 0.80, dead time 90 ms -> 0.40, `k` x0.5 -> 0.91), so margin is
   being spent, just not to exhaustion. Perturbing the arm's lag needs an
-  *additive* offset, and that run has not been made.
+  *additive* offset; §5 makes that run (`--tau-v-offset`, ±30 ms on all five axes
+  including the arm, no failure at any of the three settings it tried).
 - **A payload COM error matters only in the swing plane.** 0.5 m along z (down
   the sling) is invisible; 0.5 m along x pushes two of three moves past the
   command clamp. Read these two rows knowing that `wire_chain` scores sway
@@ -434,8 +435,9 @@ map is used for anything.
 - **The `silence` fraction read off a re-run.** p90 46 % on mismatched plants,
   max 56 %, 0 % median on nominal, and in no table here — `sweep_robust` prints
   it as of 209, but only the Psi family has been re-run through it. A setting
-  recommended for hardware ought to hold it low inside its own envelope; nothing
-  here checks that.
+  recommended for hardware ought to hold it low inside its own envelope; §5
+  checks that and the answer is **no** — shipped, C3 and the recommendation all
+  read p90 22-23 %, max 24-26 %, and the measured latency does not lower it.
 - **The exit reason, always split.** `hunting` fired zero times in 997 runs, so
   the `rev` column informs nothing about pass/fail; `diverged` is 0-2 per
   setting and does not track the aggregate. §3's second table splits them; §2's
@@ -467,7 +469,7 @@ map is used for anything.
   rigid on the mount — none of them are in the map.
 - Psi gain is applied here as one multiplier on all five axes and both
   directions. Per-axis draws are what `sweep_robust --samples` does, and they
-  are not in this map.
+  are not in this map; §5 runs eight of them over 0.85..1.15.
 - Only `payload x k x psi` was ever run as a grid. `tau_v`, `dead_time` and
   `com` appear one at a time only, so no statement here covers them paired with
   anything.
@@ -479,3 +481,253 @@ map is used for anything.
 - Nothing here validates the path that caused the 2026-09-30 failure. That was a
   wrong *declaration* — 800 kg for an 80 kg block. This study measures how much
   wrongness the loop absorbs; it does not stop the declaration being wrong.
+
+## 5. Is the tuning forgiving once the delay is compensated? — issue 210
+
+190 ran every sweep at `--latency 0.06`, a number quoted from an issue text
+rather than measured. Issue 189 has since measured the live Gazebo loop (delivery
+p50 26 / p90 30 / max 62 ms) and 209 moved `past_clamp` onto the commanded `u`.
+The hypothesis: with the delay identified and compensated, stability is far less
+sensitive to the tuning than 190 found.
+
+**It is not.** Over the same grid the failure count goes 171/459 at 60 ms to
+162/459 at 30 ms — two percentage points — and the failing cells do not move. The
+levers that widen the envelope are the pair 190 already recommended, and they
+widen it by the same amount at both latencies. Latency was not what 190 was
+measuring.
+
+Offline throughout: `wire_chain`/`sweep_robust` on MuJoCo, 209's gate, OCP
+payload 800 kg. Nothing launched.
+
+### `--latency` resolves to 10 ms, so 189's p50 and p90 are one point
+
+`wire_chain` hands a horizon to the JTC on the first tick at or after
+`cycle instant + --latency`, and the tick is 10 ms, so the delay that acts is
+`10 ms * ceil(latency / 10 ms)`. `--latency 0.021`, `0.026` and `0.030` produce
+byte-identical runs; `0.031` is the next distinct value. The issue asked for
+three columns — 0.026 (189's p50), 0.030 (p90), 0.060 (190's) — and the harness
+can only hold two. The 459-run grid below was run at 0.026 *and* at 0.030: all
+459 rows match on every column including `exit`, which is the check rather than a
+coincidence. **"30 ms" below is both of 189's measured numbers.** The p50/p90
+spread `README.md` wants set separately is under this harness' resolution, not
+merely unset.
+
+### 1. Latency x detuning
+
+    ./scripts/trials/sweep_robust.py --latency <0.026|0.030|0.060> \
+        --payload-mass 800 --samples 0 --jobs 7 --by-plant \
+        --band payload=800,80 --band k=1,2 --band psi=1,1.3 \
+        --lever "weights.q_a=[20.0,20.0,20.0,20.0,5.0,5.0],[80.0,...,20.0,20.0]" \
+        --lever "weights.dq_a=[0.2,...,0.05,0.05],[0.8,...,0.2,0.2]" \
+        --lever weights.dq_u=128.0,512.0 --lever weights.u=0.5,2.0 \
+        --lever weights.du=0.5,2.0 --lever weights.lag=20.0,80.0 \
+        --lever weights.tool=500.0,2000.0 --lever horizon_length=20,60
+
+190's §2 grid — the plant takes payload x{800, 80} kg, C3 `k` x{1, 2}, Psi gain
+x{1, 1.3}, three moves, 27 runs per setting. `q_a` and `dq_a` ship non-uniform
+rows and are scaled *as rows* here; 190's `q_a=4`/`80` flattened them to a scalar,
+which is a different perturbation.
+
+| weight group | scale | 30 ms `late` | 30 ms failed | 60 ms `late` | 60 ms failed | nominal `late` 30 / 60 |
+| --- | --- | --- | --- | --- | --- | --- |
+| *(shipped)* | -- | 1.320 | 14/27 | 1.298 | 12/27 | 0.034 / 0.034 |
+| `q_a` | x0.5 | 1.259 | 11/27 | 1.286 | 8/27 | 0.034 / 0.034 |
+|  | x2 | 1.375 | 8/27 | 0.868 | 9/27 | 0.034 / 0.034 |
+| `dq_a` | x0.5 | 1.279 | 10/27 | 1.279 | 10/27 | 0.034 / 0.034 |
+|  | x2 | 1.293 | 9/27 | 1.456 | 11/27 | 0.034 / 0.034 |
+| `dq_u` | x0.5 | 1.374 | 8/27 | 1.319 | 12/27 | 0.028 / 0.027 |
+|  | x2 | 1.312 | 10/27 | 0.894 | 12/27 | 0.043 / 0.043 |
+| `u` | x0.5 | 1.446 | 10/27 | 1.372 | 11/27 | 0.034 / 0.034 |
+|  | x2 | 1.243 | 10/27 | 1.386 | 13/27 | 0.034 / 0.034 |
+| `du` | x0.5 | 1.282 | 11/27 | 1.261 | 13/27 | 0.034 / 0.033 |
+|  | x2 | 1.254 | **6/27** | 1.240 | **4/27** | 0.034 / 0.033 |
+| `lag` | x0.5 | 1.377 | 8/27 | 1.358 | 12/27 | 0.034 / 0.034 |
+|  | x2 | 1.214 | 9/27 | 1.321 | 9/27 | 0.034 / 0.034 |
+| `tool` | x0.5 | 1.229 | 10/27 | 1.402 | 9/27 | 0.043 / 0.041 |
+|  | x2 | 1.305 | 10/27 | 1.295 | 11/27 | 0.030 / 0.029 |
+| `horizon_length` | 20 | 1.257 | **6/27** | 1.251 | **4/27** | 0.025 / 0.025 |
+|  | 60 | 0.803 | 12/27 | 1.274 | 11/27 | 0.023 / 0.022 |
+
+**On this grid the worst `late` column is a restatement of the divergence count,
+and nothing else.** Over all 34 setting x latency groups, `late > 1.2` holds
+exactly when the group contains a `diverged` run — 34 of 34, no exception. That
+follows from the instrument: `DIVERGED_SWAY` is 1.2, a diverged run breaks the
+moment |sway| crosses it, and the last 3 s of a log that was cut there contain
+that crossing. Since `diverged` itself runs 0-2 per setting and tracks nothing
+(as in 190), the worst `late` inherits that and ranks nothing either. The issue
+asked to score on `sway_late` + failures; on this grid only the failure count and
+the *nominal* `late` carry information, and `late` recovers its meaning in §2's
+one-at-a-time families, where runs finish.
+
+- **Latency is not the lever.** 162/459 against 171/459 is the whole effect of
+  halving the delivery delay, and per plant cell it is noise in both directions:
+  payload-80 x `k`-2 x Psi-1.3 goes 44/51 to 47/51, payload-800 x `k`-2 x Psi-1.3
+  goes 18/51 to 15/51. Three cells — nominal, payload-800 x `k`-1 x Psi-1, and
+  payload-800 x `k`-2 x Psi-1 — are 0/51 at *both* latencies across all 17
+  settings, and `k` x2 on a correctly declared payload is one of them. The
+  mismatch decides; the delay does not.
+- **The answer per lever is "no more forgiving".** Each weight group x0.5 and x2
+  lands between 6/27 and 14/27 at 30 ms and between 4/27 and 13/27 at 60 ms, i.e.
+  the same broad band 190 reported, at the same width, with the same two
+  exceptions. Nothing in the table is a lever that the compensated delay unlocks.
+- **`weights.du` x2 and `horizon_length=20` are the exceptions, at both
+  latencies** — 6/27 and 6/27 at 30 ms, 4/27 and 4/27 at 60 ms, against shipped's
+  14 and 12. That reproduces 190's §2 finding (`du=10` and `h=20`, 4/27 each) on
+  the new gate and at the measured latency, which is the one thing here that
+  transfers. Both shrink the *set* of failing cells rather than thinning it:
+  shipped fails in six cells at both latencies, `du` x2 in five (30 ms) / three
+  (60 ms), `h=20` in four / three. Both still fail in payload-80 x Psi-1.3, which
+  is 190's conclusion unchanged.
+- **Shipped is not a local optimum of robustness.** At 30 ms every one of the
+  sixteen detunings scores at or below shipped's 14/27; at 60 ms eleven of
+  sixteen do and two are worse. With 27 runs and ~12 failures most of those gaps
+  are inside noise and the ranking among them should not be used — but the
+  direction is consistent across two latencies and the shipped row is at the
+  pessimistic end of the band, not the middle. 190's "no weight buys tolerance"
+  survives; "shipped is a reasonable place in that band" does not.
+- **Detuning does not touch the plant the MPC was tuned for.** The nominal
+  column is 0.022..0.043 rad of `late` over all 17 settings at both latencies,
+  final error <= 2.9 mm, no failure in any of the 102 nominal runs. In that
+  narrow sense the tuning *is* forgiving, and it was already forgiving at 60 ms.
+  What no weight buys is mismatch tolerance.
+- **The silence share did not improve either.** Over both 459-run grids,
+  median 4 %, p90 25 %, max 26 % of cycles with nothing published, identical at
+  the two latencies. Lower than the p90 46 % 190 measured, but still a quarter of
+  the worst run's cycles flying a stale horizon, and 190's §4 question — whether a
+  setting recommended for hardware holds it low — is answered **no** in §2 below:
+  shipped, C3 and the recommendation all sit at p90 22-23 %, max 24-26 %.
+
+Not comparable to 190's printed numbers: 209 established that those tables do not
+reproduce on today's `crane_mpc`. **The 60 ms column here is the like-for-like
+baseline**, measured in this same study, and the 30 ms column is read against it
+and against nothing else.
+
+### 2. The mismatch envelope at the measured latency, three variants
+
+    ./scripts/trials/sweep_robust.py --latency 0.026 --payload-mass 800 \
+        --jobs 7 --by-plant --samples 0 <variant> --band <family>=<values>
+    # variants: (none) | --set command_state=false --set weights.du=10
+    #                  | --set weights.du=10 --set horizon_length=20
+    # families: payload=80,400,1200,1600  k=0.5,0.7,1.5,2  psi=0.7,0.85,1.15,1.3
+    #           com=[0.25,0,0],[0.5,0,0],[0,0,0.25],[0,0,0.5]
+    #           tau_v_offset=-0.03,0.03   dead_time=0.03,0.09
+    #           psi=0.85,1.15 --samples 8 --seed 1      (per-axis draws)
+
+One sweep per family so the rows stay one-at-a-time. Three moves per cell, worst
+of the three; `late` in rad, then the cell's failure count.
+
+| family | cell | shipped | C3 (`command_state=false`, `du=10`) | 190's rec (`du=10`, `h=20`) |
+| --- | --- | --- | --- | --- |
+| *(none)* | nominal | 0.034 / 0/3 | 0.031 / 0/3 | 0.011 / 0/3 |
+| payload | 80 kg (0.1x) | 0.633 / **1/3** | 0.769 / **3/3** | 0.329 / 0/3 |
+| | 400 kg | 0.032 / 0/3 | 0.038 / 0/3 | 0.033 / 0/3 |
+| | 1200 kg | 0.057 / 0/3 | 0.055 / 0/3 | 0.038 / 0/3 |
+| | 1600 kg | 0.074 / 0/3 | 0.071 / 0/3 | 0.061 / 0/3 |
+| C3 `k`, `d` | x0.5 | 0.088 / 0/3 | 0.085 / 0/3 | 0.084 / 0/3 |
+| | x0.7 | 0.068 / 0/3 | 0.066 / 0/3 | 0.051 / 0/3 |
+| | x1.5 | 0.032 / 0/3 | 0.040 / 0/3 | 0.033 / 0/3 |
+| | x2 | 0.126 / 0/3 | 0.428 / **1/3** | 0.090 / 0/3 |
+| Psi gain | x0.7 | 0.111 / 0/3 | 0.154 / 0/3 | 0.003 / 0/3 |
+| | x0.85 | 0.013 / 0/3 | 0.011 / 0/3 | 0.022 / 0/3 |
+| | x1.15 | 0.106 / 0/3 | 0.787 / **2/3** | 0.050 / 0/3 |
+| | x1.3 | 0.394 / **3/3** | 0.799 / **3/3** | 0.190 / 0/3 |
+| payload COM | +0.25 m x | 0.042 / 0/3 | 0.066 / 0/3 | 0.022 / 0/3 |
+| | +0.50 m x | 0.233 / **3/3** | 0.338 / **3/3** | 0.137 / 0/3 |
+| | +0.25 m z | 0.038 / 0/3 | 0.035 / 0/3 | 0.016 / 0/3 |
+| | +0.50 m z | 0.043 / 0/3 | 0.038 / 0/3 | 0.023 / 0/3 |
+| `tau_v` offset | −30 ms | 0.015 / 0/3 | 0.012 / 0/3 | 0.014 / 0/3 |
+| | +30 ms | 0.069 / 0/3 | 0.069 / 0/3 | 0.023 / 0/3 |
+| dead time | 30 ms (−30) | 0.014 / 0/3 | 0.012 / 0/3 | 0.014 / 0/3 |
+| | 90 ms (+30) | 0.070 / 0/3 | 0.070 / 0/3 | 0.022 / 0/3 |
+| Psi per axis | 8 draws, 0.85..1.15 | 0.071 / 0/24 | 0.324 / **2/24** | 0.085 / 0/24 |
+| **all, de-duplicated** | | **7/87** | **14/87** | **0/87** |
+
+The totals count each distinct cell once: the Psi-x0.85 and x1.15 corners are in
+two families and the nominal cell in seven, so the per-family counts above sum
+higher than 87.
+
+- **190's recommendation holds the widest envelope, and it is not close: 0/87.**
+  `weights.du=10` with `horizon_length=20` and `command_state` left true clears
+  every cell of every family — payload 0.1x, Psi x1.3, 0.5 m of COM error, ±30 ms
+  of lag, and all eight per-axis Psi draws — where shipped fails 7 and C3 fails
+  14. It also settles the nominal plant better (`late` 0.011 against shipped's
+  0.034), at the faster transient §3 recorded (nominal sway peak 0.28 against
+  0.15, from table 1's `horizon_length=20` row).
+- **It does not clear the paired grid**, only the one-at-a-time families: table 1
+  has `h=20` at 6/27 and `du` x2 at 6/27 on payload x `k` x Psi. So the envelope
+  that closes here closes over each axis alone, exactly as 190's did, and the
+  payload-80 x Psi-1.3 corner is still outside it for every setting tried.
+- **C3 is worse than C4 under mismatch at the measured latency too** — 14/87
+  against 7/87, and it is the only variant that fails on `k` x2, on Psi x1.15 and
+  on a per-axis Psi draw. Same verdict as 190's §2 (12/27 against 8/27) and
+  `README.md`'s `--wire 161` check, now at the measured delay.
+- **The arm's lag is not a sensitive axis.** This is the run 190's §4 asked for
+  and could not make: `scale_tau_v` is a multiplier and the arm is fitted at
+  `tau_v = 0`, so every `tau_v` family in §1 left the axis carrying the payload
+  moment arm untouched. `--tau-v-offset` is additive (new here, floored at zero,
+  `wire_chain.offset_tau_v`) and ±30 ms on all five axes — the arm included — costs
+  nothing: 0/9 for all three variants, worst `late` 0.069 rad. The `tau_v` and
+  dead-time rows are also near-identical cell for cell (0.015/0.069 against
+  0.014/0.070), which is what "only the sum is identified" looks like from the
+  plant side.
+- **`Psi gain <= ~1.15x` now rests on a measurement.** 190 called that the
+  weakest line in its envelope, because x1.15 sat one step below an x1.3 whose
+  failures might have been the old gate's artifact. On 209's gate x1.15 is clean
+  at shipped settings (0/3, `late` 0.106, against 190's §1 reading of 0.109 with
+  a +0.27/s slope), and so are eight per-axis draws spanning 0.85..1.15 — the
+  per-axis shape `mismatch.py` says the error really has, and which was not in
+  190's map at all. x1.3 remains the wall: 3/3 at shipped, 3/3 at C3, and the one
+  family where the recommendation's margin is visibly spent (`late` 0.190 against
+  0.003..0.137 everywhere else).
+
+### What this still cannot see
+
+The four `README.md` gaps that bear on stability rather than tracking are all
+live here, and the verdict above should be read with them:
+
+- **The solve takes no time.** `wire_chain` sets `ocp.solve_budget_s = 10.0` and
+  `--latency` is delivery only, so a late solve never lands late and
+  `applied_previous_solution` — a different closed loop — never happens. Live,
+  under the full interactive stack (GUI, rviz, perception, load avg 20+), solves
+  ran **75-173 ms against a 60 ms budget** (189). A study whose own conclusion is
+  "latency is not the lever" is the wrong instrument for saying what that does.
+- **Measurement is exact at the cycle instant.** No encoder quantisation, no
+  sensor age, and the passive state is *read*, not estimated — live it comes from
+  a complementary filter whose lag is inside the sway loop. Every sway number
+  above is a lower bound on the phase the real loop closes.
+- **The cadence anchor is exact**, and 189 established the phase is not
+  observable from a capture, so this gap is still unbounded.
+  `--cadence-phase 0.02` is a divergence on the nominal plant — the harness'
+  largest single known sensitivity, and it was held at 0 for all 1 710 runs here.
+- **The OCP model is ~3x slower than the MuJoCo plant** over the first 300 ms on
+  boom, arm, telescope and rotator (189, `plant_step.py`; slewing agrees). So the
+  "nominal" plant of every table above is already a mismatched one in the
+  direction the study does not sweep, and the one-at-a-time `k` and `tau_v`
+  families perturb around a point that is itself off.
+
+Carried over from §4 and unchanged: `past_clamp` fires on a quantity
+`velocity_loop` does not bound (209), the scoring equilibrium is a third model,
+every mismatch here is static, and nothing touches the real hydraulics.
+
+### For 211
+
+The recommendation this section supports is **190's, unchanged**:
+
+    weights.du: 10            (ships 1)
+    horizon_length: 20        (ships 40)
+
+with `command_state` left **true**. It is now measured on 209's gate, at 189's
+measured latency, and it is 0/87 on the one-at-a-time envelope against shipped's
+7/87 — a stronger result than 190 had, and no longer resting on an unfitted
+0.06. No config change was made here; `config/crane_mpc.yaml` still ships
+`du: 1`, `horizon_length: 40`.
+
+Two things 211 should weigh against it, neither new:
+
+- The paired corner payload-80 x Psi-1.3 fails at every setting tried, at both
+  latencies. If a grasp can silently be a tenth of the declared mass *and* Psi
+  can be 30 % high, no MPC setting in this study is an answer — `command_domain`,
+  a Psi refit, or feedback on the achieved joint velocity is.
+- `horizon_length=20` is 1.2 s, and nothing here checks that 1.2 s covers the
+  longest CBS move. A horizon shorter than the move's own settling time fails in
+  a way that does not show as sway.
