@@ -90,6 +90,10 @@ def run(job):
     stem, command = job
     out = OUT / stem
     out.mkdir(parents=True, exist_ok=True)
+    # `stem` repeats across sweeps of the same shape, and wire_chain has exits
+    # that write no json: without this a crashed run reports the *previous*
+    # sweep's score for that cell, with a fresh log.txt beside it.
+    (out / "score.json").unlink(missing_ok=True)
     done = subprocess.run(
         [*command, "--json", str(out / "score.json")],
         capture_output=True,
@@ -178,14 +182,22 @@ def main() -> int:
         scored = [r for r in group if "final_error" in r]
         failed = [r["exit"] for r in group if r["exit"] != "ok"]
         if not scored:
-            return f"{'-':>8} {'-':>7} {'-':>7} {'-':>6} {'-':>6} {'-':>6}  {failed}"
+            return f"{'-':>8} {'-':>7} {'-':>7}" + f" {'-':>6}" * 7 + f"  {failed}"
         worst = lambda key: max(np.max(r[key]) for r in scored)  # noqa: E731
+        # Of the group's runs, not of its cycles: `overspeed` is a per-run bool.
+        over = sum(bool(r["overspeed"]) for r in scored) / len(scored)
+        # Cycles the node published nothing on (`silence`) or handed back on
+        # (`handback`), as a share of the run's cycles -- the stale-horizon path
+        # the JTC flies meanwhile. Worst run of the group.
+        share = lambda key: max(r[key] / r["cycles"] for r in scored)  # noqa: E731
         # growth.py's slope; nan where the sway never rose through its band
         growth = max((r["growth_per_s"] for r in scored), key=np.nan_to_num)
         return (
             f"{worst('final_error'):8.4f} {worst('sway_peak'):7.3f} "
             f"{worst('sway_late'):7.3f} {worst('reversals'):6.2f} "
-            f"{worst('dq_clamp_ratio'):6.2f} {growth:6.2f}  {len(failed)}/{len(group)} failed"
+            f"{worst('u_clamp_ratio'):6.2f} {worst('dq_clamp_ratio'):6.2f} "
+            f"{growth:6.2f} {over:6.2f} {share('silence'):6.2f} "
+            f"{share('handback'):6.2f}  {len(failed)}/{len(group)} failed"
             + (f" {sorted(set(failed))}" if failed else "")
         )
 
@@ -207,7 +219,8 @@ def main() -> int:
     w = max(len(head), *(len(text) for text in label.values()))
     print(
         f"\n{'setting':<28} {head:<{w}} {'err rad':>8} {'sway pk':>7} "
-        f"{'late':>7} {'rev':>6} {'dq/clp':>6} {'grow/s':>6}"
+        f"{'late':>7} {'rev':>6} {'u/clp':>6} {'dq/clp':>6} {'grow/s':>6} "
+        f"{'ovrspd':>6} {'silent':>6} {'handbk':>6}"
     )
     for name in dict.fromkeys(r["setting"] for r in rows):
         mine = [r for r in rows if r["setting"] == name]

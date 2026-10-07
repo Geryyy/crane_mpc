@@ -23,10 +23,11 @@ MuJoCo under C3 and the JTC's velocity loop. Nothing was launched.
   stays under 0.2 ever returns one — but 117 runs cross 0.2 and still get a
   slope, so a finite `growth_per_s` is not evidence that a run was quiet.
   `sweep_robust`'s worst column takes `max(..., key=np.nan_to_num)`, so a single
-  `nan` propagates to it. Read `exit`, `sway pk` and `dq/clp` with it, never the
+  `nan` propagates to it. Read `exit`, `sway pk` and the clamp ratio with it
+  (`dq/clp` in the tables below, `u/clp` on any sweep run after 209), never the
   slope alone.
 - **`sway_late` is the discriminator the issue asked `growth.py` for.** It is
-  the sway peak over the *last 3 s* (`wire_chain.py:469`), so `late ≈ peak`
+  the sway peak over the *last 3 s* (`wire_chain`'s `late`), so `late ≈ peak`
   means the largest swing of the whole run is still happening when the run
   ends, and `late << peak` means the move excited a swing and the loop damped
   it. It is a *strictly* more conservative reading than the failure count, not
@@ -47,9 +48,9 @@ MuJoCo under C3 and the JTC's velocity loop. Nothing was launched.
   which is a small sample of the move space, not of the noise.
 - **`past_clamp` — which is what "failed" almost always means here — is scored
   on the wrong variable, and this limits every conclusion below.**
-  `wire_chain.py:491` takes `dq[PLANNED]`, the plant's *measured joint
-  velocity*, and tests it against `chain.high`/`low`, which are
-  `u_clamp_max`/`min`. Two things are wrong with that pairing. `u_clamp_*` is
+  The gate took `dq[PLANNED]`, the plant's *measured joint velocity*, and tested
+  it against `chain.high`/`low`, which are `u_clamp_max`/`min`. Two things are
+  wrong with that pairing. `u_clamp_*` is
   Psi's fitted domain on `u`, the *commanded* joint velocity, and `u != dq` —
   the command runs 5-8 % RMS ahead of the velocity. And in the loop that ships
   (`velocity_loop.py:9, 14, 22`) `u_clamp_*` bounds the **PI correction alone,
@@ -60,10 +61,20 @@ MuJoCo under C3 and the JTC's velocity loop. Nothing was launched.
   command on its way into the plant, so a Psi gain of x1.3 raises the achieved
   joint velocity by roughly 30 % for the same command — and then trips a
   threshold on achieved joint velocity. §3's headline result about Psi is
-  therefore not yet separable from the gate that measures it. The harness cannot
-  currently resolve this: the only command it logs is the MPC's `u0`, already
-  inside `command_domain`, never the JTC's `forward + correction` that Psi
-  actually receives.
+  therefore not separable from the gate that measures it *in the tables below*.
+  **Issue 209 changed the gate; every table in this document predates it.**
+  `wire_chain` now logs the JTC's `forward + correction` per tick, scores
+  `past_clamp` on that against `u_clamp_*`, and keeps the old `dq` test as the
+  `overspeed` column. Re-running the Psi family alone (shipped, `--latency 0.06`,
+  five moves) scores **both gates off one sweep: old 4/25, new 3/25.** One of the
+  five Psi-x1.3 runs overspeeds the clamp without the command ever leaving Psi's
+  domain; three leave it for real. So the gate inflated the Psi verdict but did
+  not manufacture it, and Psi x1.3 is still the only failing cell of the family.
+  **That old 4/25 is not §3's recorded 3/25, and the difference is drift, not the
+  gate**: on §1's three-move subset the old gate now scores Psi x1.3 at 2/3 where
+  §1 below records 1/3. The tables here do not reproduce on today's `crane_mpc`,
+  so compare old against new only within one sweep. Every table below is the old
+  gate's.
 - **The ranking is the `past_clamp` count and nothing else.** Over all 997 runs:
   831 `ok`, 149 `past_clamp`, 17 `diverged`, and **`hunting` never fired once** —
   the u0-reversal gate contributed no information to any table, although `rev` is
@@ -79,7 +90,7 @@ MuJoCo under C3 and the JTC's velocity loop. Nothing was launched.
   including runs that exit `ok`. So on the cells that decide the ranking, part
   of what is being scored is the stale-horizon/hold path, not the MPC law.
   This also hollows out the `max_consecutive_failures` row of §2:
-  `wire_chain.py:243` sets `solve_budget_s = 10.0`, so the solver never times
+  `wire_chain` sets `ocp.solve_budget_s = 10.0`, so the solver never times
   out, and a silent cycle does not count toward the consecutive-failure counter.
   That knob had almost nothing to act on.
 
@@ -413,19 +424,18 @@ Listed so a later reader does not mistake the map for the machine. The first
 four are cheap and would change conclusions; they should be done before this
 map is used for anything.
 
-- **`past_clamp` re-scored on the commanded `u`.** The gate that produces 149 of
-  the 166 failures in this study tests `dq[PLANNED]`, the achieved joint
-  velocity, against `u_clamp`, which is Psi's domain on the *command* and which
-  the shipped velocity loop applies to the PI branch alone. Log the JTC's
-  `forward + correction` at `wire_chain.py:429` and re-score `past_clamp` and
-  `dq_clamp_ratio` on it. The command is not in the current logs, so this is a
-  one-line harness change **and a full re-run** of every sweep in this document
-  — about 30 min at `--jobs 7` on 8 cores, not a re-analysis. Until it is done,
-  §2's and §3's rankings are rankings on an overspeed test.
-- **The `silence` fraction as a reported column.** p90 46 % on mismatched
-  plants, max 56 %, 0 % median on nominal. It is in every `score.json` and in
-  every CSV, and in no table. A setting recommended for hardware ought to hold
-  it low inside its own envelope; nothing here checks that.
+- **Every table re-run on the new `past_clamp`.** Issue 209 did the harness
+  half: the gate now tests the JTC's `forward + correction` against `u_clamp_*`,
+  `overspeed` carries the old `dq` test, and `sweep_robust` prints `u/clp`,
+  `ovrspd`, `silent` and `handbk`. What it did *not* do is re-run the sweeps —
+  only the Psi family, which went 4/25 -> 3/25. §1's, §2's and §3's tables are
+  all still the old gate's, so their rankings are still rankings on an overspeed
+  test. About 30 min at `--jobs 7` on 8 cores.
+- **The `silence` fraction read off a re-run.** p90 46 % on mismatched plants,
+  max 56 %, 0 % median on nominal, and in no table here — `sweep_robust` prints
+  it as of 209, but only the Psi family has been re-run through it. A setting
+  recommended for hardware ought to hold it low inside its own envelope; nothing
+  here checks that.
 - **The exit reason, always split.** `hunting` fired zero times in 997 runs, so
   the `rev` column informs nothing about pass/fail; `diverged` is 0-2 per
   setting and does not track the aggregate. §3's second table splits them; §2's

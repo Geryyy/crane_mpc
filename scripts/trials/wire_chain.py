@@ -24,7 +24,8 @@ against `--payload-mass`/`--payload-com`, `--k-scale`/`--d-scale`,
 cut for is `robustness.md`.
 
 Plan, plant mismatch and solver flags are `harness.add_arguments`'. Exit 1 on
-divergence or hunting (`hunting.py`: u0 reversing on half the cycles).
+divergence, hunting (`hunting.py`: u0 reversing on half the cycles) or a JTC
+command outside `u_clamp_*`, Psi's fitted domain (`past_clamp`).
 
 Levers: `--set weights.du=30 --set dq_a_feedback=false` overrides crane_mpc.yaml
 (yaml value; a scalar on a list key fills every axis). A key in
@@ -372,6 +373,13 @@ def fly(options, parameters, ocp, chain, equilibrium, plan, coast, swing=None):
     ticks = int(round(Ts / h))
     events = {"silence": 0, "handback": 0}
     log = []
+    # The JTC's total command `forward + correction` per tick -- `u`, i.e. Psi's
+    # input, which is the signal `u_clamp_*` is the fitted domain of. Not a bound
+    # the loop enforces: it clamps the PI branch alone, so the total is free to
+    # leave the domain, which is the whole point of scoring it. Per tick, because
+    # every tick is a separate command; `log` is per cycle, so `dq` beside it is
+    # sampled 1-in-`ticks` and the two clamp ratios are not on one grid.
+    u_tick = []
     solve_times = []
     # Wall seconds from the cycle instant to the horizon on the wire -- the
     # margin the timer callback has left, solve included. Offline wall time is
@@ -459,6 +467,7 @@ def fly(options, parameters, ocp, chain, equilibrium, plan, coast, swing=None):
                 # `Timing.jtc_output` averages over `[measured - Ts, measured)` next
                 # cycle, and an accumulated float would drop the one on the edge.
                 timing.record_output(now_ns + tick * h_ns, command)
+                u_tick.append(command)
                 plant.drive(chain.actuator, chain.psi.apply(command), h)
                 clock += h
             yield step.solution, u0
@@ -491,14 +500,17 @@ def fly(options, parameters, ocp, chain, equilibrium, plan, coast, swing=None):
     late = sway[-int(round(3.0 / Ts)) :]
     u0 = log[:, -nq:]
     u0 = u0[np.all(np.isfinite(u0), axis=1)]
+    # Ticks of the coast loop land in `u_tick` too, but only after this scoring.
+    u = np.array(u_tick)
     print(
         f"wire {options.wire}, latency {1e3 * options.latency:.0f} ms, "
         f"cadence phase {1e3 * options.cadence_phase:.0f} ms, {len(log)} cycles\n"
         f"  final error      {np.abs(log[-1, 2 : 2 + nq] - plan.q[-1, PLANNED]).max():.4f}\n"
         f"  sway peak        {np.round(np.abs(sway).max(axis=0), 3)} rad\n"
         f"  sway last 3 s    {np.round(np.abs(late).max(axis=0), 3)} rad\n"
-        f"  max|dq_rot|      {np.abs(log[:, 4 + nq + ROTATOR]).max():.3f} rad/s "
+        f"  max|u_rot|       {np.abs(u[:, ROTATOR]).max():.3f} rad/s "
         f"(u_clamp {chain.low[ROTATOR]:+.2f}/{chain.high[ROTATOR]:+.2f})\n"
+        f"  max|dq_rot|      {np.abs(log[:, 4 + nq + ROTATOR]).max():.3f} rad/s\n"
         f"  nonzero status   {int(np.sum(log[:, -nq - 1] > 0))}\n"
         f"  u0 reversals     {np.round(reversal_fraction(u0), 3)}\n"
         f"  silence/handback {events['silence']}/{events['handback']}"
@@ -508,10 +520,16 @@ def fly(options, parameters, ocp, chain, equilibrium, plan, coast, swing=None):
         names += [f"dq{i}" for i in range(nq)] + ["dq_u0", "dq_u1", "status"]
         names += [f"u0_{i}" for i in range(nq)]
         np.savetxt(options.csv, log, delimiter=",", header=",".join(names), comments="")
-    # A joint past its command clamp is out of Psi's domain: a hunting run at 1/3
-    # reversals (PI x4, issue 173) passed the reversal gate alone.
+    # A command past `u_clamp_*` is out of Psi's fitted domain, so the compensator
+    # extrapolates a spline past its data: an exit, and one the reversal gate does
+    # not catch (a hunting run at 1/3 reversals, PI x4, issue 173, passed that
+    # alone). Scored on `u`, not on the achieved `dq`: `u != dq`, the clamp is on
+    # u, and `velocity_loop` applies it to the PI branch only. The `dq` test it
+    # replaces (issue 190 scored it, and 149 of 166 failures were this gate) is an
+    # overspeed check with no clamp of its own -- kept as a column, not an exit.
     dq = log[:, 2 + nq + 2 : 2 + 2 * nq + 2]
-    past_clamp = bool(np.any(dq > chain.high + 1e-3) or np.any(dq < chain.low - 1e-3))
+    past_clamp = bool(np.any(u > chain.high + 1e-3) or np.any(u < chain.low - 1e-3))
+    overspeed = bool(np.any(dq > chain.high + 1e-3) or np.any(dq < chain.low - 1e-3))
     hunting = reversal_fraction(u0).max() >= REVERSAL_FRACTION
     reason = [
         n
@@ -533,10 +551,20 @@ def fly(options, parameters, ocp, chain, equilibrium, plan, coast, swing=None):
             ),
             "sway_peak": np.abs(sway).max(axis=0).tolist(),
             "sway_late": np.abs(late).max(axis=0).tolist(),
-            # |dq| over the clamp on its side, per axis: > 1 is outside Psi's domain
+            # The gate: |u| over u_clamp on its side, per axis. > 1 is outside
+            # Psi's fitted domain, i.e. `past_clamp`.
+            "u_clamp_ratio": np.maximum(
+                u.max(0) / chain.high, u.min(0) / chain.low
+            ).tolist(),
+            "u_peak": np.abs(u).max(0).tolist(),
+            # The achieved joint velocity over the *command* clamp, per axis: an
+            # overspeed ratio. `u_clamp_*` bounds u, not dq, so > 1 here says the
+            # joint ran faster than u is allowed to ask, not that Psi was
+            # extrapolated. `overspeed` is that test as a bool.
             "dq_clamp_ratio": np.maximum(
                 dq.max(0) / chain.high, dq.min(0) / chain.low
             ).tolist(),
+            "overspeed": overspeed,
             "reversals": reversal_fraction(u0).tolist(),
             "nonzero_status": int(np.sum(log[:, -nq - 1] > 0)),
             **events,
