@@ -86,6 +86,17 @@ then withdrawn on that metric. Score on the growth rate instead.
   machine) and on a live capture. Score against the command the machine
   *received* (`controller_state.output`), not the one the MPC asked for — on the
   same run the latter reads 20x worse.
+- `replay_tick.py <tick.npz>` — solve a tick the node dumped again. The node
+  writes one `.npz` per non-zero **QP** status (`max_failing_tick_dumps` of them,
+  under `<ros log dir>/crane_mpc_ticks`), because issue 213 had to guess at the
+  inputs of a failing cycle and all three guesses solved clean. This names the
+  non-finite input — `p` by block, so a bad control point is told from a bad
+  payload row — and then reproduces the status off the file alone. Nothing
+  non-finite and the status still reproducing is the `MIN_STEP` answer: the data
+  was fine and the QP was hard. Not reproducing points at the solver's own
+  memory, the settings or the export instead. `qp_stat` is an **acados** status,
+  not HPIPM's (`ocp_qp_hpipm.c` translates): 1 is `NAN_SOL`, 2 `MAX_ITER`, 3
+  `MIN_STEP`, 9 `INCONS_EQ`.
 - `score.py` — cadence, command chatter, travel, arrival. Context, not the score.
 - `pid_move.py` — the same plan with the MPC off: the stable reference arm.
 

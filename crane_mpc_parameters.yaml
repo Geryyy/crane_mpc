@@ -78,6 +78,18 @@ crane_mpc:
     validation:
       gt_eq<>: [1]
 
+  max_failing_tick_dumps:
+    type: int
+    read_only: true
+    description: "Ticks written to file per run, one .npz each under
+      `<ros log dir>/crane_mpc_ticks`, on a non-zero **QP** status -- the QP not being
+      solved, whether by a NaN in it (1) or a collapsed step (3). Carries what issue 213
+      had to guess at: x_0, the resampled reference, q_eq, the path, the payload, `p` per
+      stage, the iterate and the residuals, replayed by
+      `scripts/trials/replay_tick.py`. 0 writes none."
+    validation:
+      gt_eq<>: [0]
+
   max_consecutive_failures:
     type: int
     read_only: true

@@ -635,6 +635,11 @@ class Ocp:
         #: `cost_terms` have to read the solution against.
         self._last_parameter: np.ndarray | None = None
         self._last_path: PathCycle | None = None
+        #: What the last written problem was built from, for `last_problem`.
+        #: Here and not in `Cycle` because both phases pass through
+        #: `_write_problem`, and a cycle taking `feedback` had its problem
+        #: written one cycle and one predicted state earlier.
+        self._written: dict = {}
 
         #: Whether the preparation/feedback split is reachable at all. acados
         #: refuses `rti_phase` outside `SQP_RTI`, so a swept `nlp_solver_type`
@@ -686,15 +691,22 @@ class Ocp:
 
     # -- the model, asked the two questions the solver does not answer ----------
 
-    def set_payload(self, mass_kg: float, com_m) -> bool:
-        """Bind a payload into `p`. Returns whether it changed the model."""
+    def set_payload(self, mass_kg: float, com_m, *, cold: bool = True) -> bool:
+        """
+        Bind a payload into `p`. Returns whether it changed the model.
+
+        `cold=False` takes it without forcing the cold start, which only a
+        replay wants: opening a fresh solver starts at zero payload, so every
+        dump off a loaded move would read as a payload step and throw away the
+        recorded seed -- and the seed is the suspect.
+        """
         config.check_payload(mass_kg, com_m)
         com = np.asarray(com_m, dtype=float)
         changed = mass_kg != self.payload_mass_kg or not np.array_equal(
             com, self.payload_com_m
         )
         # Tracked here, not via caller's `guess=None`: `h_eff` jumps at a grasp.
-        self._payload_changed = self._payload_changed or changed
+        self._payload_changed = self._payload_changed or (changed and cold)
         self.payload_mass_kg = float(mass_kg)
         self.payload_com_m = com
         self._base_parameter[cs.P_PAYLOAD_MASS] = float(mass_kg)
@@ -1061,10 +1073,31 @@ class Ocp:
         states = seed.states.copy()
         states[0] = x0
         states[1:, self._boxed] = np.clip(states[1:, self._boxed], lower[1:], upper[1:])
+        inputs = np.clip(seed.inputs, -self._u_max, self._u_max)
         self.solver.set_flat("x", states.reshape(-1))
-        self.solver.set_flat(
-            "u", np.clip(seed.inputs, -self._u_max, self._u_max).reshape(-1)
-        )
+        self.solver.set_flat("u", inputs.reshape(-1))
+        # The iterate as written, not the caller's guess: a cold cycle rolled its
+        # own and a warm one was clipped, so this is the only seed a replay can
+        # hand back and get the same QP.
+        self._written = {
+            # Two readings of one state here, and they come apart under the
+            # split: `x0` is the point this problem is linearised about, `bound`
+            # the initial-state constraint. `feedback` moves the second alone,
+            # which is the whole of the initial value embedding -- a replay that
+            # linearises about the bound solves another QP.
+            "x0": x0,
+            "bound": x0,
+            "split": False,
+            "q_eq": np.asarray(q_eq, dtype=float),
+            "path": path,
+            "guess": Guess(states, inputs),
+            # Not derivable from `x0`: the force rows are `h_eff` at `x0`, a
+            # casadi evaluation through the cylinder kinematics, so a finite
+            # state can still write a non-finite reference.
+            "yref": reference,
+            "in_flight": self._in_flight,
+            "warm": warm,
+        }
         return warm
 
     def _read_solution(
@@ -1086,7 +1119,11 @@ class Ocp:
         finite = np.all(np.isfinite(states)) and np.all(np.isfinite(inputs))
         word = status_word(status)
         if qp_status != 0:
-            word = f"{word} (QP status {qp_status})"
+            # Named, not just numbered: `qp_stat` is an acados status and not
+            # HPIPM's (`ocp_qp_hpipm.c` translates it), so 3 is `MIN_STEP` and 1
+            # is `NAN_SOL`. Issue 213 read the raw HPIPM enum off the number and
+            # chased a NaN that was a collapsed step.
+            word = f"{word} ({status_word(qp_status)}, QP status {qp_status})"
         if not finite or status != 0 or qp_status != 0:
             outcome = Outcome.FAILED
         elif solve_time > self.solve_budget_s:
@@ -1224,11 +1261,48 @@ class Ocp:
         # measurement 0.05 off the prediction came back as 0.1.
         self.solver.constraints_set(0, "lbx", x0)
         self.solver.constraints_set(0, "ubx", x0)
+        # The one thing this phase moves. `x0` is left as the preparation wrote
+        # it, so a dump of this tick carries both and a replay can repeat the
+        # pair of calls instead of collapsing them onto one state.
+        self._written["bound"] = x0
+        self._written["split"] = True
         self._set_phase(2)
         status = int(self.solver.solve())
         feedback_time = float(self.solver.get_stats("time_tot"))
         return self._read_solution(
             status, feedback_time, self._prepared_warm, self._preparation_time
+        )
+
+    def last_problem(self) -> dict:
+        """
+        Give what the last written problem was built from, for `dump.tick`.
+
+        `p` is read back off the solver rather than rebuilt: it is where a
+        non-finite payload row, tool row or path control point actually lands,
+        and reading it is the only way to see one that was written. The
+        residuals are recomputed because `SQP_RTI` keeps none -- all four come
+        back zero otherwise -- and `res_stat` alone separates a NaN that arrived
+        in the data from one the linearisation produced.
+
+        It relinearises, so it may not run on top of a standing preparation:
+        the next `feedback` would then apply a QP step computed about a point
+        the solver no longer holds, which is unannounced motion. Today a
+        non-zero `qp_status` is always `FAILED` and `Cycle.prepare_next`
+        early-returns on that, so the guard never fires -- it is here so that
+        widening the dump's trigger raises instead of bumping the boom.
+        """
+        if self._prepared:
+            raise RuntimeError(
+                "the last problem cannot be read back while a preparation stands: "
+                "recomputing the residuals relinearises, and the feedback phase "
+                "would then step from a point the solver no longer holds"
+            )
+        return dict(
+            self._written,
+            p=self.solver.get_flat("p").reshape(self.intervals + 1, problem.NP),
+            residuals=np.asarray(
+                self.solver.get_residuals(recompute=True), dtype=float
+            ),
         )
 
     def _slack_taken(self) -> tuple[Violation, float, bool]:

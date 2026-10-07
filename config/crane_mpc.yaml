@@ -42,6 +42,9 @@ crane_mpc:
     solver_health_decimation: 2
     # 300 ms of fallback horizon against a 2.34 s one.
     max_consecutive_failures: 5
+    # One escalation's worth: the five solves it takes to escalate, and nothing
+    # from the cycles after it -- the fault repeats and each file is ~130 kB.
+    max_failing_tick_dumps: 5
 
     sway:
       # A still machine reads 0.0046 rad/s RMS, max 0.039, over 406 s of

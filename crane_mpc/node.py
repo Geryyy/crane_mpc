@@ -7,8 +7,11 @@ stays in the OCP's own `x` end to end, never rebuilt at a crossing.
 
 from __future__ import annotations
 
+import pathlib
+
 import numpy as np
 import rclpy
+import rclpy.logging
 from action_msgs.msg import GoalStatus, GoalStatusArray
 from control_msgs.msg import JointTrajectoryControllerState
 from controller_manager_msgs.msg import ControllerManagerActivity
@@ -25,7 +28,7 @@ from sensor_msgs.msg import JointState
 from std_msgs.msg import String
 from trajectory_msgs.msg import JointTrajectory
 
-from . import config, problem, reports
+from . import config, dump, problem, reports
 from . import horizon as hz
 from .cycle import (
     ACTUATED_DOF,
@@ -61,6 +64,10 @@ WARN_PERIOD = 5.0
 #: Seconds (one query each) to wait for the controllers' `update_rate`.
 RATE_QUERIES = 10
 CONTROLLER_MANAGER = "/controller_manager"
+#: Failing ticks land beside the run's logs, which is where a human reading an
+#: escalation already is -- the log line that explains it and the file that
+#: carries the inputs in one place.
+TICK_DIRECTORY = "crane_mpc_ticks"
 
 
 class StartGate:
@@ -201,6 +208,12 @@ class MpcNode(Node):
             str(self._values.mode),
             list(self._values.dq_a_feedback),
             list(self._values.dq_a_divergence_max),
+        )
+        self._cycle.failing_ticks = dump.Sink(
+            # `pathlib`, spelled out: `Path` here is `nav_msgs/Path`.
+            pathlib.Path(rclpy.logging.get_logging_directory()) / TICK_DIRECTORY,
+            int(self._values.max_failing_tick_dumps),
+            say=self.get_logger().warning,
         )
 
         self._ocp: Ocp | None = None

@@ -17,7 +17,7 @@ import numpy as np
 from crane_model import symbolic as cs
 from crane_model.velocity_loop import load_velocity_loop
 
-from . import bspline, problem
+from . import bspline, dump, problem
 from . import horizon as hz
 from .solver import PROGRESS_ROWS, Outcome, PathCycle
 
@@ -343,6 +343,10 @@ class Cycle:
         )
         #: Set once the description has arrived and the problem is posed.
         self.ocp = None
+        #: Where a tick the QP failed on is written, or `None` to write none.
+        #: Assigned by the owner, like `ocp` -- which directory that is, is a
+        #: deployment's business and this file knows nothing about ROS.
+        self.failing_ticks: dump.Sink | None = None
 
         self.reference: hz.Knots | None = None
         self.reference_stamp_ns = 0
@@ -555,6 +559,7 @@ class Cycle:
             # the node's timer callback down with it.
             return Step(refusal=refusal or "the OCP raised without a message")
 
+        failing = self.failing_reference(solution)
         verdict = self.ladder(
             solution, bounds.max_consecutive_failures, self.ocp.solve_budget_s
         )
@@ -562,6 +567,7 @@ class Cycle:
             solution=solution, verdict=verdict, was_stalled=self.progress_stalled
         )
         if not verdict.published:
+            self.write_failing_tick(solution, failing)
             return done
         if publish is not None:
             publish()
@@ -570,6 +576,7 @@ class Cycle:
         # cycle resamples on; and after the horizon went out, so the linearisation
         # runs in the part of the cycle nobody is waiting on.
         self.prepare_next(solution)
+        self.write_failing_tick(solution, failing)
         return done
 
     # -- the gates ---------------------------------------------------------------
@@ -870,6 +877,38 @@ class Cycle:
         else:
             self.consecutive_failures += 1
         return solution, ""
+
+    def failing_reference(self, solution):
+        """
+        Copy the resampled reference a QP-failed solve ran on, or `None`.
+
+        The one thing a dump needs that this cycle is about to destroy:
+        `ladder`'s shift rung overwrites `self.horizon` with the previous
+        horizon. The rest is read off `Ocp.last_problem` once the command is
+        out, which is where two crossings into acados belong. `None` whenever no
+        sink would take the tick.
+        """
+        sink = self.failing_ticks
+        if sink is None or not sink.wants(solution.qp_status):
+            return None
+        return self.horizon.copy()
+
+    def write_failing_tick(self, solution, reference) -> None:
+        """Write the tick the QP failed on; file I/O, so after the publish only."""
+        if reference is None:
+            return
+        try:
+            self.failing_ticks.write(dump.tick(self, solution, reference))
+        except Exception as refusal:
+            # A diagnostic may not take the timer callback down with it -- but it
+            # may not fail silently either: `Ocp.last_problem` refuses on top of
+            # a standing preparation, so widening the trigger to a status
+            # `prepare_next` does not early-return on lands here, and a `pass`
+            # would turn that into a dump that writes nothing for a whole run.
+            # Spends the budget, so one escalation cannot repeat the log line.
+            self.failing_ticks.refuse(
+                f"the failing tick could not be read back: {refusal}"
+            )
 
     def preparation_still_applies(self) -> bool:
         """
