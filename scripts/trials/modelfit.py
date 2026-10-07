@@ -64,6 +64,11 @@ In sim none of this is available: the gz actuator's `effort_state_` is the right
 quantity but is not exposed, and the `effort` state interface is the transmitted
 wrench, gravity and constraint reaction included, which is a different thing.
 
+Every number in this docstring was measured under C3. Under C4
+(`command_state: true`, now the shipped setting) `score` crashed on the state
+width until issue 212; the tables above have not been re-measured since, and the
+C4 command row is a state the applied command is *seeded* into, not an input.
+
 **Which command you score against decides the answer.** On a capture, use what
 the JTC put on the interface (`controller_state.output`), not the MPC's `u`: the
 JTC ramps between knots and adds its PI, and scoring `u` held flat instead reads
@@ -123,7 +128,9 @@ def score(ocp, t, q, dq, command, cycle=None, force=None):
     it. The command-lag row carries either way -- nothing measures that.
     """
     stride = max(1, int(round((cycle or ocp.Ts) / float(np.median(np.diff(t))))))
-    x = np.zeros(cs.NX)
+    # `ocp.nx`, not `cs.NX`: under C4 (`command_state: true`, the shipped
+    # setting) the command is a state and the vector is five rows longer.
+    x = np.zeros(ocp.nx)
     x[POS] = q[0, :PL]
     x[PAS] = q[0, PL : PL + 2]
     x[cs.X_PROGRESS_RATE] = float(
@@ -145,7 +152,14 @@ def score(ocp, t, q, dq, command, cycle=None, force=None):
             x[cs.X_ACTUATED_FORCE : cs.X_ACTUATED_FORCE + PL] = force(k)
         x[cs.X_PROGRESS] = 0.0
         step = np.zeros(cs.NU_PROGRESS)
-        step[:PL] = u
+        if ocp.command_state:
+            # Under C4 the input is the command's *rate*. Holding the command
+            # the machine was given for one cycle is a seeded state at du = 0;
+            # writing it into `step` instead would ramp from zero and read the
+            # model as far slower than it is.
+            x[cs.X_COMMAND : cs.X_COMMAND + PL] = u
+        else:
+            step[:PL] = u
         try:
             predicted = ocp._integrate(ocp._stepper, x, step)
         except Exception:
@@ -157,22 +171,40 @@ def score(ocp, t, q, dq, command, cycle=None, force=None):
     return np.asarray(model), np.asarray(actual)
 
 
-def report(label, model, actual):
-    print(f"\n{label}\n")
-    print(f"{'':>4} " + " ".join(f"{a:>21}" for a in AX))
-    print(f"{'':>4} " + " ".join(f"{'rms  skill     n':>21}" for _ in AX))
-    cells = []
-    for axis in range(PL):
+def skill(model, actual):
+    """`axis -> (rms, skill, n)` over the cycles where the axis changed speed."""
+    out = {}
+    for axis, name in enumerate(AX):
         moving = np.abs(actual[:, axis]) > MOVING
         if moving.sum() < 10:
-            cells.append(f"{'--':>8} {'--':>7} {0:>5}")
+            out[name] = None
             continue
         rms = float(np.sqrt(np.mean(model[moving, axis] ** 2)))
         base = float(np.sqrt(np.mean(actual[moving, axis] ** 2)))
-        cells.append(f"{rms:8.4f} {1 - rms / base:7.2f} {int(moving.sum()):5d}")
-    print(f"{'':>4} " + " ".join(f"{c:>21}" for c in cells))
-    print("\nrms is rad/s of one-cycle velocity prediction error, over cycles where")
-    print(f"the axis changed speed by more than {MOVING} rad/s.")
+        out[name] = (rms, 1.0 - rms / base, int(moving.sum()))
+    return out
+
+
+def report(label, model, actual):
+    """Lay the table out as text; `labday_report.py` embeds it in a section."""
+    scored = skill(model, actual)
+    cells = [
+        f"{'--':>8} {'--':>7} {0:>5}"
+        if scored[a] is None
+        else f"{scored[a][0]:8.4f} {scored[a][1]:7.2f} {scored[a][2]:5d}"
+        for a in AX
+    ]
+    return "\n".join(
+        [
+            f"\n{label}\n",
+            f"{'':>4} " + " ".join(f"{a:>21}" for a in AX),
+            f"{'':>4} " + " ".join(f"{'rms  skill     n':>21}" for _ in AX),
+            f"{'':>4} " + " ".join(f"{c:>21}" for c in cells),
+            "",
+            "rms is rad/s of one-cycle velocity prediction error, over cycles where",
+            f"the axis changed speed by more than {MOVING} rad/s.",
+        ]
+    )
 
 
 def measured_force(q, data):
@@ -270,10 +302,12 @@ def main():
                 "force row from measured pressure" if pressure else "force row carried"
             )
             model, actual = from_bags(ocp, sys.argv[2], count, pressure)
-            report(f"{sys.argv[2]} ({count} bags) -- {arm}", model, actual)
+            print(report(f"{sys.argv[2]} ({count} bags) -- {arm}", model, actual))
     else:
         model, actual = from_capture(ocp, sys.argv[2])
-        report(sys.argv[2], model, actual)
+        print(report(sys.argv[2], model, actual))
 
 
-main()
+# Guarded: `labday_report.py` imports `score`/`report`/`shipped`/`measured_force`.
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,44 @@
+# Lab-day recording profile -- issue 212, commissioning.md 6 (MPC in shadow).
+#
+# Hardware time is the scarce thing: record on the crane, analyse offline with
+#
+#     ros2 bag record -s mcap -o labday \
+#       $(grep -v '^#' scripts/trials/labday_topics.txt)
+#     ./scripts/trials/labday_report.py labday/labday_0.mcap
+#
+# `ros2 bag record` warns about a topic nobody publishes and records the rest,
+# so an unused line costs a warning, not a run. The report says "not recorded"
+# for a section whose topics are missing.
+#
+# CLOCK. Every latency below is `recorder receipt - header stamp`, so it is a
+# difference of two clocks: the publishing host's and the recorder's. The MPC
+# host and the ros2_control host must be chrony-synced before the session or
+# the number is the offset between them and nothing else. The report flags a
+# negative or implausible latency as a clock problem and refuses to report it
+# as a result. `use_sim_time` stays **false** on the machine -- it is a clock
+# flag, not a rig selector, and there is no `/clock` publisher there.
+#
+# The private `~/` topics resolve against the *node* name, not a namespace:
+# `crane_mpc.launch.py` sets `name="crane_mpc"`, so `~/shadow_horizon` is
+# `/crane_mpc/shadow_horizon` and **not** `/crane/mpc/shadow_horizon`. Rename
+# or namespace the node and these two lines move with it.
+#
+# There is no tip/tilt broadcaster and no tip/tilt `status` topic: issues
+# 101-103 deleted `crane_control`, and the passive pair
+# (`theta6_tip_joint`, `theta7_tilt_joint`) now reaches `/joint_states` from
+# the plain `joint_state_broadcaster`. `/crane/sway_settled` is the nearest
+# live verdict stream and is recorded in its place.
+
+/joint_states
+/crane/controller_state
+/trajectory_controller_a2b/controller_state
+/trajectory_controllers/controller_state
+/crane_mpc/shadow_horizon
+/crane_mpc/shadow_comparison
+/crane/mpc/solver_health
+/crane/sway_settled
+/crane/reference
+/crane/joint_path
+/cranedata
+/controller_manager/introspection_data/names
+/controller_manager/introspection_data/values

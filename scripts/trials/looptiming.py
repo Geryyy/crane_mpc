@@ -51,10 +51,20 @@ def _times(rows, key):
     return np.asarray([r[key] for r in rows if r.get(key) is not None], float)
 
 
+def horizon_rows(cap):
+    """
+    Pick the horizon stream: `/crane/mpc/horizon`, or in shadow `~/shadow_horizon`.
+
+    In shadow the contract topic is silent by design, so a capture of a shadow
+    run carries only `shz`. Same cadence and same `Timing.stamp_ns()`, so every
+    number below reads the same off either.
+    """
+    return (cap.get("hz") or []) or (cap.get("shz") or [])
+
+
 def stamped(cap):
     """Whether every stream carries usable `sim`/`rx`. Nothing here works without it."""
-    for name in ("hz", "ctrl", "js"):
-        rows = cap.get(name) or []
+    for rows in (horizon_rows(cap), cap.get("ctrl") or [], cap.get("js") or []):
         if not rows:
             continue
         sim, rx = _times(rows, "sim"), _times(rows, "rx")
@@ -65,31 +75,42 @@ def stamped(cap):
     return True
 
 
+def period_of(stamps):
+    """Median spacing of a stamp set, or None when there is no grid to read."""
+    sorted_stamps = np.sort(np.asarray(stamps, float))
+    return float(np.median(np.diff(sorted_stamps))) if len(sorted_stamps) >= 3 else None
+
+
 def cycle_period(cap):
     """`Ts` from the horizon cadence, or None."""
-    ht = np.sort(_times(cap.get("hz") or [], "sim"))
-    return float(np.median(np.diff(ht))) if len(ht) >= 3 else None
+    return period_of(_times(horizon_rows(cap), "sim"))
 
 
-def latency(cap):
+def latency_of(rows):
     """
-    Measurement instant to the horizon arriving: `{p50, p90, max, negative, n}`.
+    Stamp to arrival over one stream: `{p50, p90, max, negative, n}`.
 
-    Sets `--latency`. Two caveats the number cannot carry: arrival is the capture
-    node's, a second subscriber in a second process, so the JTC's own callback
+    Sets `--latency` off the horizon; `labday_report.py` runs it per recorded
+    stream with `rx` the recorder's receipt instead. Two caveats the number
+    cannot carry: arrival is the *subscriber's*, so the JTC's own callback
     scheduling is not in it; and `rx` under `use_sim_time` is a held value
     between `/clock` messages, so the resolution is one `/clock` period and a
-    capture node whose clock lags the publisher's can read negative.
+    subscriber whose clock lags the publisher's can read negative.
     """
-    hz = [r for r in cap.get("hz") or [] if r.get("sim") and r.get("rx")]
-    if not hz:
+    rows = [r for r in rows or [] if r.get("sim") and r.get("rx")]
+    if not rows:
         return None
-    lag = np.array([r["rx"] - r["sim"] for r in hz])
+    lag = np.array([r["rx"] - r["sim"] for r in rows])
     p50, p90, worst = (float(x) for x in np.percentile(lag, [50, 90, 100]))
     return dict(p50=p50, p90=p90, max=worst, negative=int(np.sum(lag < 0)), n=len(lag))
 
 
-def controller_rate(cap, nominal_hz=NOMINAL_JTC_HZ):
+def latency(cap):
+    """`latency_of` on the capture's horizon stream."""
+    return latency_of(horizon_rows(cap))
+
+
+def rate_of(ctrl, cycle_stamps=None, nominal_hz=NOMINAL_JTC_HZ):
     """
     `/controller_state` publish rate and the share of cycles under quorum.
 
@@ -101,9 +122,9 @@ def controller_rate(cap, nominal_hz=NOMINAL_JTC_HZ):
     on a non-blocking `RealtimePublisher`, which drops under exactly the load
     that starves the loop. `starved` mirrors `Timing.jtc_output`'s test against
     the nominal tick count, so it answers "would the dead time have replayed the
-    command that was sent".
+    command that was sent". Without `cycle_stamps` there is no cycle grid to
+    count against and only the rate is reported.
     """
-    ctrl = cap.get("ctrl") or []
     if not ctrl:
         return None
     by_source: dict = {}
@@ -111,23 +132,28 @@ def controller_rate(cap, nominal_hz=NOMINAL_JTC_HZ):
         by_source.setdefault(r.get("src", ""), []).append(r)
     src, rows = max(by_source.items(), key=lambda kv: len(kv[1]))
     ct = np.sort(_times(rows, "sim"))
-    if len(ct) < 3:
+    step = period_of(ct)
+    if step is None:
         return None
-    step = float(np.median(np.diff(ct)))
     out = dict(
         src=src, hz=1.0 / step if step > 0 else float("nan"), sources=len(by_source)
     )
-    Ts = cycle_period(cap)
+    Ts = period_of(cycle_stamps) if cycle_stamps is not None else None
     if Ts is None:
         return out
     expected = Ts * nominal_hz
-    counts = np.diff(np.searchsorted(ct, np.sort(_times(cap["hz"], "sim"))))
+    counts = np.diff(np.searchsorted(ct, np.sort(np.asarray(cycle_stamps, float))))
     out.update(
         per_cycle=float(np.median(counts)) if len(counts) else None,
         expected=expected,
         starved=float(np.mean(counts < 0.5 * expected)) if len(counts) else None,
     )
     return out
+
+
+def controller_rate(cap, nominal_hz=NOMINAL_JTC_HZ):
+    """`rate_of` on the capture's controller stream, against its horizon grid."""
+    return rate_of(cap.get("ctrl") or [], _times(horizon_rows(cap), "sim"), nominal_hz)
 
 
 def report(cap, nominal_hz=NOMINAL_JTC_HZ):

@@ -1,13 +1,25 @@
 #!/usr/bin/env python3
-"""Record 155 criteria 4/5/6 in one pass. Joints mapped by name, never by index."""
+"""
+Record 155 criteria 4/5/6 in one pass. Joints mapped by name, never by index.
 
+    capture.py <seconds> <out.json> [--sim-time|--no-sim-time] [--mpc-node NAME]
+
+`rx` is only comparable with a header stamp on the same clock, so the clock has
+to match the rig: sim stamps are sim time, the machine's are wall time. Neither
+is assumed -- with no flag the `use_sim_time` parameter is read as given
+(`--ros-args -p use_sim_time:=true`, or the default `false`), and the resolved
+value is printed. `--sim-time` is the Gazebo arm of issue 189; the lab day
+(issue 212) records on the machine and leaves it false.
+"""
+
+import argparse
 import json
-import sys
 import time
 
 import rclpy
 from control_msgs.msg import JointTrajectoryControllerState
 from crane_msgs.msg import SolverHealth
+from diagnostic_msgs.msg import DiagnosticArray
 from rclpy.node import Node
 from rclpy.parameter import Parameter
 from sensor_msgs.msg import JointState
@@ -23,15 +35,16 @@ def stamp_ns(h):
     return h.stamp.sec * 10**9 + h.stamp.nanosec
 
 
+def sim_time_override(sim_time):
+    """`None` reads the parameter as given; a bool pins it."""
+    return [] if sim_time is None else [Parameter("use_sim_time", value=bool(sim_time))]
+
+
 class Cap(Node):
-    def __init__(self):
-        # `rx` is only comparable with a header stamp on the same clock, and in
-        # sim the stamps are sim time. Without this every latency reads as the
-        # wall-to-sim epoch offset (issue 189).
-        super().__init__(
-            "cap", parameter_overrides=[Parameter("use_sim_time", value=True)]
-        )
+    def __init__(self, sim_time=None, mpc_node="crane_mpc"):
+        super().__init__("cap", parameter_overrides=sim_time_override(sim_time))
         self.health, self.js, self.hz = [], [], []
+        self.shz, self.cmp = [], []
         self.ref_stamps, self.path_stamps = [], []
         self.ref = {}
         self.ctrl = []
@@ -40,6 +53,16 @@ class Cap(Node):
         )
         self.create_subscription(JointState, "/joint_states", self.on_js, 50)
         self.create_subscription(JointTrajectory, "/crane/mpc/horizon", self.on_hz, 50)
+        # Shadow mode leaves the contract topic silent, so a shadow run carries
+        # nothing above. `~/` resolves against the *node* name, not the topic
+        # namespace: `name="crane_mpc"` in the launch file makes these
+        # `/crane_mpc/shadow_*` and not `/crane/mpc/shadow_*`.
+        self.create_subscription(
+            JointTrajectory, f"/{mpc_node}/shadow_horizon", self.on_shz, 50
+        )
+        self.create_subscription(
+            DiagnosticArray, f"/{mpc_node}/shadow_comparison", self.on_cmp, 50
+        )
         self.create_subscription(JointTrajectory, "/crane/reference", self.on_ref, 10)
         # What the JTC actually put on the command interface. Without this the
         # MPC's `u` and the machine's response are two ends of an unobserved
@@ -96,22 +119,44 @@ class Cap(Node):
         )
 
     def on_hz(self, m):
-        if not m.points:
-            return
-        p = m.points[0]
-        self.hz.append(
-            dict(
-                t=time.time(),
-                rx=self.rx(),
-                # `Timing.stamp_ns`: the measurement instant knot 0 counts from.
-                # Latency and cadence phase are both measured off this, so a
-                # capture without it cannot answer issue 189 at all.
-                sim=stamp_ns(m.header) * 1e-9,
-                names=list(m.joint_names),
-                pos=list(p.positions),
-                vel=list(p.velocities),
-                eff=list(p.effort),
+        row = self.knot_zero(m)
+        if row is not None:
+            self.hz.append(row)
+
+    def on_shz(self, m):
+        row = self.knot_zero(m)
+        if row is not None:
+            self.shz.append(row)
+
+    def on_cmp(self, m):
+        """`shadow_comparison` is a DiagnosticArray; keep the key/value pairs flat."""
+        for status in m.status:
+            self.cmp.append(
+                dict(
+                    t=time.time(),
+                    rx=self.rx(),
+                    sim=stamp_ns(m.header) * 1e-9,
+                    level=int(status.level),
+                    message=status.message,
+                    values={kv.key: kv.value for kv in status.values},
+                )
             )
+
+    def knot_zero(self, m):
+        if not m.points:
+            return None
+        p = m.points[0]
+        return dict(
+            t=time.time(),
+            rx=self.rx(),
+            # `Timing.stamp_ns`: the measurement instant knot 0 counts from.
+            # Latency and cadence phase are both measured off this, so a
+            # capture without it cannot answer issue 189 at all.
+            sim=stamp_ns(m.header) * 1e-9,
+            names=list(m.joint_names),
+            pos=list(p.positions),
+            vel=list(p.velocities),
+            eff=list(p.effort),
         )
 
     def on_ctrl(self, m, source):
@@ -151,11 +196,30 @@ class Cap(Node):
         self.path_stamps.append(stamp_ns(m.header))
 
 
-def main():
-    dur, out = float(sys.argv[1]), sys.argv[2]
+def parse(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[1])
+    parser.add_argument("seconds", type=float)
+    parser.add_argument("out", help="json for looptiming.py / modelfit.py / growth.py")
+    clock = parser.add_mutually_exclusive_group()
+    clock.add_argument("--sim-time", dest="sim_time", action="store_true", default=None)
+    clock.add_argument("--no-sim-time", dest="sim_time", action="store_false")
+    parser.add_argument(
+        "--mpc-node",
+        default="crane_mpc",
+        help="node name the `~/shadow_*` topics resolve against",
+    )
+    return parser.parse_known_args(argv)[0]
+
+
+def main(argv=None):
+    options = parse(argv)
     rclpy.init()
-    n = Cap()
-    end = time.time() + dur
+    n = Cap(options.sim_time, options.mpc_node)
+    clock = bool(n.get_parameter("use_sim_time").value)
+    print(
+        f"use_sim_time={clock}" + ("" if options.sim_time is not None else " (as set)")
+    )
+    end = time.time() + options.seconds
     while time.time() < end and rclpy.ok():
         rclpy.spin_once(n, timeout_sec=0.1)
     json.dump(
@@ -163,22 +227,27 @@ def main():
             health=n.health,
             js=n.js,
             hz=n.hz,
+            shz=n.shz,
+            cmp=n.cmp,
             ref=n.ref_stamps,
             path=n.path_stamps,
             ctrl=n.ctrl,
             refmsg=n.ref,
         ),
-        open(out, "w"),
+        open(options.out, "w"),
     )
     print(
-        f"health={len(n.health)} js={len(n.js)} hz={len(n.hz)} ctrl={len(n.ctrl)} "
-        f"ref={n.ref_stamps} path={n.path_stamps}"
+        f"health={len(n.health)} js={len(n.js)} hz={len(n.hz)} shz={len(n.shz)} "
+        f"cmp={len(n.cmp)} ctrl={len(n.ctrl)} ref={n.ref_stamps} path={n.path_stamps}"
     )
-    # No /clock: `rx` is 0 and no latency can be measured from this capture.
-    # Say it now -- discovering it after the sim is torn down costs the run.
-    if n.hz and not any(r["rx"] for r in n.hz):
+    # Under `use_sim_time` and no /clock: `rx` is 0 and no latency can be
+    # measured. Say it now -- discovering it after the sim is torn down costs
+    # the run. On wall time `rx` is never 0, so the check only applies in sim.
+    horizons = n.hz or n.shz
+    if clock and horizons and not any(r["rx"] for r in horizons):
         print("WARNING: no /clock, so rx=0 -- looptiming.py cannot measure latency")
     rclpy.shutdown()
 
 
-main()
+if __name__ == "__main__":
+    main()

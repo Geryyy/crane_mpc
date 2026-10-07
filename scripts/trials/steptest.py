@@ -2,14 +2,20 @@
 """
 Open-loop step on one axis at a time, MPC out of the loop.
 
+    steptest.py <out.json> [--sim-time|--no-sim-time]
+
 Holds every position where it was found and puts a constant feed-forward
 velocity in `effort`, which is the field the MPC's `u` travels in. Records the
 whole joint state so the same step can be replayed against the OCP's own model
 and the two compared.
+
+The clock is not assumed: with no flag the `use_sim_time` parameter is read as
+given. On the machine the steps are issued by a person through
+`FollowJointTrajectory` (commissioning §3), not by this script.
 """
 
+import argparse
 import json
-import sys
 import time
 
 import rclpy
@@ -35,10 +41,12 @@ HOLD, SETTLE, TS = 0.6, 2.4, 0.06
 
 
 class Step(Node):
-    def __init__(self):
+    def __init__(self, sim_time=None):
         super().__init__(
             "steptest",
-            parameter_overrides=[Parameter("use_sim_time", Parameter.Type.BOOL, True)],
+            parameter_overrides=[]
+            if sim_time is None
+            else [Parameter("use_sim_time", Parameter.Type.BOOL, bool(sim_time))],
         )
         self.q = self.dq = self.names = None
         self.trace = []
@@ -94,9 +102,20 @@ def trajectory(hold, row, amplitude):
     return msg
 
 
-def main():
+def parse(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[1])
+    parser.add_argument("out", help="json for plant_step.py")
+    clock = parser.add_mutually_exclusive_group()
+    clock.add_argument("--sim-time", dest="sim_time", action="store_true", default=None)
+    clock.add_argument("--no-sim-time", dest="sim_time", action="store_false")
+    return parser.parse_known_args(argv)[0]
+
+
+def main(argv=None):
+    options = parse(argv)
     rclpy.init()
-    n = Step()
+    n = Step(options.sim_time)
+    print(f"use_sim_time={bool(n.get_parameter('use_sim_time').value)}")
     while n.q is None and rclpy.ok():
         rclpy.spin_once(n, timeout_sec=0.1)
     runs = []
@@ -120,8 +139,9 @@ def main():
             )
         )
         print(f"{CANON[row]:>22} step {amplitude:+.2f}: {len(n.trace)} samples")
-    json.dump(runs, open(sys.argv[1], "w"))
+    json.dump(runs, open(options.out, "w"))
     rclpy.shutdown()
 
 
-main()
+if __name__ == "__main__":
+    main()

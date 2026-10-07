@@ -27,11 +27,16 @@ then withdrawn on that metric. Score on the growth rate instead.
 - `trial.sh <outdir>` — one live arm: tear down by PID, launch headless,
   activate `trajectory_controller_a2b`, call `/a2b_movement`, capture.
   `CTRL=pid MOVE=<script>` swaps the arm. ~3 min.
-- `capture.py` — records `/joint_states`, `/crane/mpc/horizon` knot 0 and
-  `/crane/mpc/solver_health`. Joints by `name[]`, never by index. Each row
-  carries three times: wall `t`, the header stamp `sim` and the receipt `rx` on
-  the stamps' own clock (`use_sim_time`, so sim time in sim). `sim - rx` is the
-  only way to a latency — wall and sim are different clocks.
+- `capture.py <seconds> <out.json> [--sim-time|--no-sim-time]` — records
+  `/joint_states`, `/crane/mpc/horizon` knot 0, the two shadow topics
+  (`~/shadow_horizon` knot 0 as `shz`, `~/shadow_comparison`'s key/value pairs
+  as `cmp`) and `/crane/mpc/solver_health`. Joints by `name[]`, never by index.
+  Each row carries three times: wall `t`, the header stamp `sim` and the
+  receipt `rx` on the stamps' own clock. `sim - rx` is the only way to a
+  latency — wall and sim are different clocks. **The clock is not assumed**:
+  with no flag the `use_sim_time` parameter is read as given and printed, and
+  the two flags pin it. `--sim-time` is the Gazebo arm below; on the machine it
+  stays false.
 - `looptiming.py <cap.json>` — of the four numbers issue 189 wants, the two a
   capture actually contains: delivery latency (`--latency`) and the
   controller-state publish rate, with the share of cycles under
@@ -60,12 +65,21 @@ then withdrawn on that metric. Score on the growth rate instead.
   negative.
 - `growth.py <cap.json> <label> ...` — the score: fit `log|q_u - q_eq|` against
   sim time over the first rise. `<= 0` is stable. Two runs per arm, worst reported.
-- `steptest.py <out.json>` — one open-loop velocity step per axis on a live
-  sim, MPC killed, recording position, velocity and applied torque.
+- `steptest.py <out.json> [--sim-time|--no-sim-time]` — one open-loop velocity
+  step per axis on a live sim, MPC killed, recording position, velocity and
+  applied torque. Same clock rule as `capture.py`. On the machine the steps are
+  issued by a person through `FollowJointTrajectory` (commissioning §3), not by
+  this script.
 - `plant_step.py <out.json> [joint]` — the same step on every plant we have,
   side by side: Gazebo (from that capture), MuJoCo through `C3Actuator`, and the
   OCP's own integrator. They agreed to 0.01 through 500 ms once issue 161's
-  three actuator faults were fixed; before that Gazebo was alone.
+  three actuator faults were fixed; before that Gazebo was alone. `ocp_model`
+  takes the *planned* row (`planned_row(joint)`) — before issue 212 it stepped
+  row 0 whatever axis was asked for, so every non-slewing column was slewing's
+  response under another axis' name.
+- `labday_report.py <bag.mcap>` — the lab-day sections below, offline, off an
+  mcap. Also the refactor target for `looptiming.py`'s latency and rate, which
+  now take either a capture's streams or a bag's.
 - `modelfit.py bag '<glob>' | capture <cap.json>` — one-cycle prediction error of
   the MPC's own model against what the crane actually did, per axis, with a
   skill score against "nothing changes". Works on the HydraulicCalib bags (real
@@ -74,6 +88,73 @@ then withdrawn on that metric. Score on the growth rate instead.
   same run the latter reads 20x worse.
 - `score.py` — cadence, command chatter, travel, arrival. Context, not the score.
 - `pid_move.py` — the same plan with the MPC off: the stable reference arm.
+
+## The lab-day shadow kit — issue 212
+
+Hardware time is the scarce thing, so the lab day **records** and the numbers are
+taken afterwards. Nothing in this section drives anything; every launch and
+every step on the crane is human-run (PRD §14, `wiki/commissioning.md`).
+
+    # on the crane, by a person, beside commissioning.md §6's shadow launch
+    ros2 bag record -s mcap -o labday \
+      $(grep -v '^#' scripts/trials/labday_topics.txt)
+
+    # afterwards, anywhere
+    ./scripts/trials/labday_report.py labday/labday_0.mcap
+
+`labday_topics.txt` is the checked-in profile: the topic list, that command, and
+the clock note. Three things in it are worth knowing before the session.
+
+- **The `~/` topics are not under `/crane/mpc/`.** `~` resolves against the
+  *node* name, and `crane_mpc.launch.py` sets `name="crane_mpc"`, so the two
+  shadow topics are `/crane_mpc/shadow_horizon` and
+  `/crane_mpc/shadow_comparison`. Rename or namespace the node and they move.
+- **There is no tip/tilt broadcaster and no tip/tilt `status` topic.** Issues
+  101–103 deleted `crane_control`; the passive pair reaches `/joint_states` from
+  the plain `joint_state_broadcaster`. `/crane/sway_settled` is recorded instead.
+- **Latency is a difference of two clocks** — the recorder's receipt against the
+  publishing host's `header.stamp`. The MPC host and the ros2_control host have
+  to be chrony-synced or the number is the offset between them. The report
+  reports a negative or implausible value as a clock problem and refuses it as a
+  result; both `control_recordings` bags read ≈ −23 ms, which is what that looks
+  like.
+
+`labday_report.py` reads the bag with `mcap_ros2` off the embedded schemas, so
+it needs no sourced workspace and no built `crane_msgs` — except for the two
+sections that evaluate the OCP's own integrator (model skill, steps), which
+import `crane_model`/`crane_mpc` lazily and say so when the import fails. Six
+sections; one whose topics are absent says "not recorded" and does not fail.
+
+1. **Latency** — stamp to receipt per stream, then `looptiming.py`'s
+   controller-state rate and `jtc_output` quorum share, against the shadow
+   horizon's cadence as the cycle grid.
+2. **Solve timing** — `solve_time` p50/p90/max against `solve_budget`; the late,
+   non-converged, `used_slack` and `applied_previous_solution` shares;
+   `FAULT_SOLVER` count; silence episodes. The stream is decimated by
+   `solver_health_decimation`, so a gap is not a missed solve.
+3. **Model skill** — `modelfit.py`'s one-cycle skill per axis, scored against
+   `controller_state.output`, the command the machine actually received. Where
+   `/cranedata` is in the bag, a second row with the force state seeded from the
+   measured chamber pressures.
+4. **Shadow vs drive** — per axis, `<joint>.difference` out of
+   `~/shadow_comparison`: RMS, bias and the worst `--window` second mean, worst
+   axis named. `u != dq_ref` by construction, so a bias is expected; there is no
+   documented threshold and the checklist records the number rather than judging
+   it.
+5. **Steps** — single-axis episodes in the driven command that rise from a quiet
+   machine and then hold: dead time, time to 63 %, and the C3 response from
+   `plant_step.ocp_model` beside the measured one. `k` is *not* separately
+   identifiable from a velocity step without `M_ii`, which is pose dependent, so
+   what is compared is the response `k` and `tau_v` produce. Past ~300 ms the
+   episode is not open loop.
+6. **Checklist** — a markdown table of each quantity, its value, the threshold
+   from `commissioning.md` §6 and a verdict, ready to paste back into §6.
+
+The measurement is checked in `test/test_labday_report.py` against a synthetic
+mcap with an injected latency and an injected multiplicative model error, both
+recovered. The model arm takes its plant as an argument there: a skill number
+off the real OCP is a measurement, and asserting one tests only that the model
+has not changed.
 
 ## Matching `wire_chain` to the live Gazebo loop — issue 189
 

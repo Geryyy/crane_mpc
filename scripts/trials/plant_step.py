@@ -62,8 +62,22 @@ def mujoco(hold, amplitude, joint):
     return np.array([float(np.interp(f, t, np.asarray(dq) / amplitude)) for f in TIMES])
 
 
-def ocp_model(hold, amplitude, parameters):
-    """Step the OCP's own integrator, then shift it by the dead time it omits."""
+def planned_row(joint):
+    """Planned row of a canonical joint, or None where the OCP does not plan it."""
+    canonical = CANON.index(joint)
+    rows = [0, 1, 2, 3, 6]
+    return rows.index(canonical) if canonical in rows else None
+
+
+def ocp_model(hold, amplitude, parameters, row=0):
+    """
+    Step the OCP's own integrator, then shift it by the dead time it omits.
+
+    `row` is the *planned* row, so it has to come from `planned_row`: the
+    command block and the velocity block are both indexed in planned order
+    while `hold` is keyed by canonical name. Stepping row 0 regardless of the
+    axis asked for reads slewing's response and labels it the other axis'.
+    """
     ocp = Ocp(
         problem.default_description().read_text(), parameters, parameters["hydraulics"]
     )
@@ -80,14 +94,13 @@ def ocp_model(hold, amplitude, parameters):
     for k in range(int(0.95 / ocp.Ts)):
         u = np.zeros(cs.NU_PROGRESS)
         if ocp.command_state:
-            x[cs.X_COMMAND] = (
-                amplitude  # u is the command's rate under C4: step the state
-            )
+            # u is the command's rate under C4: step the state
+            x[cs.X_COMMAND + row] = amplitude
         else:
-            u[0] = amplitude
+            u[row] = amplitude
         x = ocp._integrate(ocp._stepper, x, u)
         t.append((k + 1) * ocp.Ts)
-        dq.append(float(x[VEL][0]) / amplitude)
+        dq.append(float(x[VEL][row]) / amplitude)
     # The dead time is one `Ts` (`config.check_settings`), so shift by that.
     return np.array([float(np.interp(max(f - ocp.Ts, 0.0), t, dq)) for f in TIMES])
 
@@ -119,10 +132,12 @@ def main():
         ("MuJoCo", mujoco(hold, amplitude, joint)),
         (
             "OCP model, dead time added",
-            ocp_model(hold, amplitude, copy.deepcopy(parameters)),
+            ocp_model(hold, amplitude, copy.deepcopy(parameters), planned_row(joint)),
         ),
     ):
         print(f"{label:>30} " + " ".join(f"{v:>9.3f}" for v in row))
 
 
-main()
+# Guarded: `labday_report.py` imports `TIMES`/`ocp_model` for its step section.
+if __name__ == "__main__":
+    main()
