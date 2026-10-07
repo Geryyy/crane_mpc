@@ -12,7 +12,6 @@ from ament_index_python.packages import get_package_share_directory
 from conftest import export_for
 from crane_model import hydraulic_limits
 from crane_model import symbolic as cs
-
 from crane_mpc import problem
 from crane_mpc.config import machine_limits
 from crane_mpc.horizon import Grid, Knots, resample
@@ -22,6 +21,7 @@ from crane_mpc.solver import (
     export_key,
     move_suppression,
     predictor_label,
+    slack_prices,
     weight_matrices,
 )
 
@@ -175,7 +175,47 @@ def test_the_cost_split_names_where_the_plan_spent(ocp, state):
     solution = ocp.solve(state, horizon, q_eq)
     terms = ocp.cost_terms(solution, q_eq)
     assert terms.q_a > 0.0
+    # Off pose means off path at the tool too, which is the row the split used to drop.
+    assert terms.tool > 0.0
     assert all(np.isfinite(value) and value >= 0.0 for value in terms.__dict__.values())
+
+
+def test_the_cost_split_leaves_no_residual_row_out(ocp, state):
+    """
+    acados' own number is the oracle: an omitted row cannot hide from it.
+
+    Two conventions have to be undone first. acados scales every stage by its
+    interval (`cost_scaling` defaults to [Ts] * N + [1]) while the split sums
+    stage and terminal alike, and it counts the slack penalty into the same
+    number -- unscaled in `slack_penalty`, so only the terminal stage's share has
+    to be told apart.
+    """
+    position = state[cs.X_PLANNED_POSITION : cs.X_PLANNED_POSITION + PLANNED]
+    horizon = horizon_holding(ocp, position)
+    # Off pose, so every tracking row carries something -- the tool's included.
+    horizon.q_a_ref[:, 0] += 0.4
+    q_eq = state[cs.X_PASSIVE_POSITION : cs.X_PASSIVE_POSITION + cs.K_PASSIVE_DOF]
+
+    solution = ocp.solve(state, horizon, q_eq)
+    terms = ocp.cost_terms(solution, q_eq)
+    assert terms.tool > 0.0
+
+    taken = np.maximum(ocp.solver.get_flat("sl"), 0.0) + np.maximum(
+        ocp.solver.get_flat("su"), 0.0
+    )
+    price = slack_prices(ocp.parameters)["terminal"]
+    terminal_slack = float(price @ taken[-price.size :])
+    stage = sum(
+        value
+        for name, value in vars(terms).items()
+        if name not in ("terminal", "slack")
+    )
+    total = (
+        ocp.Ts * (stage + terms.slack - terminal_slack)
+        + terms.terminal
+        + terminal_slack
+    )
+    assert total == pytest.approx(ocp.solver.get_cost(), rel=1e-9)
 
 
 def test_the_warm_start_is_the_last_solution_unshifted(ocp, state):

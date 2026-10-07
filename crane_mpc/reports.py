@@ -252,9 +252,10 @@ def shadow_comparison(cycle: Cycle, verdict: str, solution, joints, budget, stam
         put("constraint.sway_rate", _text(solution.violation.dq_u))
         put("constraint.cylinder_force", _text(solution.violation.cylinder_force))
         put("constraint.pump_flow", _text(solution.violation.pump_flow))
-        # The two cost rows `SolverHealth` has no field for (issue 119 made them interesting).
+        # The cost rows `SolverHealth` has no field for (issue 119 made them interesting).
         if cycle.cost_terms is not None:
             put("cost.lag", _text(cycle.cost_terms.lag))
+            put("cost.tool", _text(cycle.cost_terms.tool))
             put("cost.progress", _text(cycle.cost_terms.progress))
 
     compared = 0

@@ -144,6 +144,8 @@ class CostTerms:
     q_u: float = 0.0
     dq_u: float = 0.0
     lag: float = 0.0
+    #: The three TCP-position rows -- the cm-scale metric, in metres, not joints.
+    tool: float = 0.0
     progress: float = 0.0
     tau_a: float = 0.0
     #: The command (C3: the input rows; C4: the `c` rows) plus progress accel.
@@ -1312,6 +1314,7 @@ class Ocp:
             terms.q_u += float(np.sum(row[problem.Y_PASSIVE_POSITION :][:passive]))
             terms.dq_u += float(np.sum(row[problem.Y_PASSIVE_VELOCITY :][:passive]))
             terms.lag += float(row[problem.Y_LAG])
+            terms.tool += float(np.sum(row[problem.Y_TOOL :][:3]))
             # Both rows of the pair: the path-following one carries the weight
             # (8 against 0.1), so reporting the rate alone hid the term.
             terms.progress += float(
