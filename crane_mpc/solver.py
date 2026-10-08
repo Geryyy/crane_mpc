@@ -512,6 +512,13 @@ def predictor_sim(ocp, seconds: float, sample_time: float) -> AcadosSim:
     Built here and read by both sides -- `scripts/export_ocp.py` compiles exactly
     the set `predictor_labels` names, and `Ocp` opens exactly that set, so the
     two cannot disagree about which integrators exist.
+
+    `newton_iter` is acados' default 3 until the passive rows carry Coulomb
+    friction (issue 222): the bias turns over inside the tanh's smoothing width,
+    three iterations stop short, and two replays of one ZOH command then part by
+    2 N m of actuated force -- `test_c4_replays_a_command_ramp_from_its_start`.
+    It is a runtime option, applied when the solver is opened, so it is not in
+    `export_key` and moving it costs no re-export.
     """
     sim = AcadosSim()
     sim.model = ocp.model
@@ -520,6 +527,7 @@ def predictor_sim(ocp, seconds: float, sample_time: float) -> AcadosSim:
     sim.solver_options.integrator_type = "IRK"
     sim.solver_options.num_stages = 2
     sim.solver_options.num_steps = _sub_steps(seconds, sample_time)
+    sim.solver_options.newton_iter = 20
     return sim
 
 
