@@ -17,7 +17,7 @@ import numpy as np
 from crane_model import symbolic as cs
 from crane_model.velocity_loop import load_velocity_loop
 
-from . import bspline, dump, problem
+from . import bspline, dump, force_filter, problem
 from . import horizon as hz
 from .solver import PROGRESS_ROWS, Outcome, PathCycle
 
@@ -103,14 +103,14 @@ class Timing:
         if stamp_ns is None:
             return now_ns
         if stamp_ns > now_ns:
-            self._once(
+            self.say_once(
                 "future stamp",
                 f"a state stamp is {(stamp_ns - now_ns) / 1e9:.3f} s ahead of this "
                 f"node's clock on {JOINT_STATE_TOPIC} and is clamped to it, so the "
                 "cadence anchors on the tick instead of the sample.",
             )
             return now_ns
-        self._said.discard("future stamp")
+        self.rearm("future stamp")
         return stamp_ns
 
     def anchor(self, measured_ns: int) -> None:
@@ -143,14 +143,14 @@ class Timing:
         start = measured_ns - int(self.Ts * NANOSECONDS)
         window = [v for t, v in self._outputs if start <= t < measured_ns]
         if len(window) < 0.5 * self.Ts / self.jtc_period:
-            self._once(
+            self.say_once(
                 "no jtc output",
                 f"fewer than half a cycle's ticks arrived on {CONTROLLER_STATE_TOPIC}, "
                 "so the dead time replays the command that was sent instead of the "
                 "JTC's own output -- which carries the PI term and the command does not.",
             )
             return None
-        self._said.discard("no jtc output")
+        self.rearm("no jtc output")
         return np.mean(window, axis=0)
 
     # -- what the controllers promise --------------------------------------------
@@ -170,12 +170,16 @@ class Timing:
         """End-to-end from the measurement, not acados' own `solve_time`."""
         return latency_s is not None and float(latency_s) > float(budget_s)
 
-    def _once(self, key: str, message: str) -> None:
+    def say_once(self, key: str, message: str) -> None:
         """Say this fallback once per episode; the healthy branch re-arms `key`."""
         if self._say is None or key in self._said:
             return
         self._said.add(key)
         self._say(message)
+
+    def rearm(self, key: str) -> None:
+        """Arm this fallback again: it stopped happening, so say it if it returns."""
+        self._said.discard(key)
 
 
 @dataclass(frozen=True)
@@ -378,6 +382,12 @@ class Cycle:
         # Path parameter now, so rest is where a fresh cycle starts from.
         self.carried[cs.X_PROGRESS_RATE] = 0.0
         self.seed_force = True
+        #: The force state's observer, built from `ocp.parameters` the first time
+        #: a cycle reaches for it -- the node and `wire_chain` both hand the same
+        #: yaml block in through `Ocp`, so neither constructs one. `None` where
+        #: `force_filter.enabled` is false, which is the pre-227 open-loop carry.
+        self._force_filter: force_filter.ForceFilter | None = None
+        self._force_filter_read = False
         # Previous cycle's propagated velocity, read back as the carry -- not a
         # second integrator. `None` until propagated once.
         self.dq_a_carried: np.ndarray | None = None
@@ -423,6 +433,27 @@ class Cycle:
     def command_state(self) -> bool:
         """C4: the command is a state and `u` its rate."""
         return bool(getattr(self.ocp, "command_state", False))
+
+    @property
+    def force_filter(self):
+        """
+        The force observer, or `None` where the yaml switched it off.
+
+        Read off `ocp.parameters` once the problem is posed, like `u_max`: the
+        node and `wire_chain` hand the same block in through `Ocp`, so there is
+        one place the filter can be configured from and neither caller builds it.
+        """
+        if self._force_filter_read:
+            return self._force_filter
+        if self.ocp is None:
+            return None
+        block = self.ocp.parameters["force_filter"]
+        self._force_filter_read = True
+        if bool(block["enabled"]):
+            self._force_filter = force_filter.ForceFilter(
+                force_filter.Noise.from_parameters(block)
+            )
+        return self._force_filter
 
     def in_flight_command(self):
         """Give what the JTC plays until knot 0: C3 its hold, C4 its ramp's start."""
@@ -712,15 +743,6 @@ class Cycle:
         x[cs.X_PLANNED_VELOCITY : cs.X_PLANNED_VELOCITY + PLANNED_DOF] = (
             measurement.dq_a[:PLANNED_DOF]
         )
-        # `dq_a_feedback[axis]` false: velocity is the model's, not the
-        # measurement just written. All-true ships, so this is inert by default.
-        self.velocity_carry = (
-            VelocityCarry()
-            if self.dq_a_carried is None
-            else carry_actuated_velocity(
-                x, self.dq_a_carried, self.dq_a_feedback, self.dq_a_divergence_max
-            )
-        )
         x[cs.X_PASSIVE_POSITION : cs.X_PASSIVE_POSITION + PASSIVE_DOF] = measurement.q_u
         x[cs.X_PASSIVE_VELOCITY : cs.X_PASSIVE_VELOCITY + PASSIVE_DOF] = (
             measurement.dq_u
@@ -728,15 +750,71 @@ class Cycle:
         x[cs.X_PROGRESS] = 0.0
         if self.seed_force:
             # C3 seeds holding the machine's weight, not zero (hydraulics off) --
-            # no force is measured.
+            # no force is measured. The filter's gain goes with it: it was
+            # derived at a pose this reset says nothing is known about.
             self.ocp.pin_tool(self.tool_position)
             x[cs.X_ACTUATED_FORCE : cs.X_ACTUATED_FORCE + PLANNED_DOF] = (
                 self.ocp.static_hold_force(x)
             )
+            if self.force_filter is not None:
+                self.force_filter.forget()
             self.carried = x.copy()
             self.seed_force = False
+        elif self.force_filter is not None:
+            self.correct_force(x, measurement)
+        # `dq_a_feedback[axis]` false: velocity is the model's, not the row just
+        # written. All-true ships, so this is inert by default -- and it runs
+        # last so that it still overrules whichever of the two wrote `dq`.
+        self.velocity_carry = (
+            VelocityCarry()
+            if self.dq_a_carried is None
+            else carry_actuated_velocity(
+                x, self.dq_a_carried, self.dq_a_feedback, self.dq_a_divergence_max
+            )
+        )
         self.measured = x
         return None
+
+    def correct_force(self, x: np.ndarray, measurement: Measurement) -> None:
+        """
+        Replace `x`'s `(dq_a, tau_a)` rows with the filter's estimate.
+
+        `q_a` is left as the measurement on purpose -- `position_box` pins the
+        hard box on it (`force_filter` says what that costs).
+
+        The prediction is `self.carried`: last cycle's measurement rolled one
+        `Ts` under what the JTC ran, so it already stands at *this* cycle's
+        measurement instant (`advance` says so where it writes it). The gain is
+        derived here on the first corrected cycle after a reset, at that pose and
+        under the command in flight, and held until the next reset.
+
+        Raising is not an option this deep -- nothing wraps `read_state` and an
+        exception here would take the node's timer callback with it -- so a
+        linearisation or an evaluation that fails leaves the rows measured and
+        the force carried, i.e. the pre-227 behaviour, and says so once. The
+        integrator it would have failed in is the one `propagate` refuses the
+        cycle on two calls later, so this is a fallback and not a hiding place.
+        """
+        rows = np.array([cs.X_PLANNED_VELOCITY, cs.X_ACTUATED_FORCE])
+        index = (rows[:, None] + np.arange(PLANNED_DOF)[None, :]).T
+        self.ocp.pin_tool(self.tool_position)
+        try:
+            if not self.force_filter.armed:
+                self.force_filter.derive(
+                    self.ocp.axis_transition(self.carried, self.last_input)
+                )
+            corrected = self.force_filter.correct(self.carried[index], measurement.dq_a)
+        except Exception as refusal:
+            self.force_filter.forget()
+            self.timing.say_once(
+                "force filter",
+                f"the force filter could not estimate C3's force state ({refusal}), "
+                "so x_0 carries it open loop as it did before issue 227 -- the "
+                "velocity noise is back in the force rows.",
+            )
+            return
+        self.timing.rearm("force filter")
+        x[index] = corrected
 
     def propagate(self):
         """Carry the measurement over the dead time, or refuse the cycle."""

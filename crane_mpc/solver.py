@@ -773,6 +773,50 @@ class Ocp:
             )
         return predicted
 
+    def axis_transition(self, x: np.ndarray, u: np.ndarray) -> np.ndarray:
+        """
+        One `Ts` of `(dq_a, tau_a)` per planned axis, as a `(5, 2, 2)` matrix.
+
+        What `force_filter` derives its gain from. acados' own forward
+        sensitivity of exactly the step `propagate` takes, so the filter is
+        linearised about the integrator the horizon runs rather than about a
+        second model written by hand -- and the force row's only path into
+        something a sensor reads, `d dq / d tau`, comes out of it rather than
+        out of an inertia this package would have to restate.
+
+        Diagonal sub-blocks: the filter is one two-row observer per axis, so the
+        cross terms are deliberately dropped, and `q_a` is not a row of it at
+        all (the filter takes the encoder as exact -- `force_filter` says why).
+        Converted out of the scaled coordinates like every other state crossing
+        this binding; the pair is a sub-block, so that is one outer product per
+        axis.
+        """
+        x, u = _finite(x, u)
+        self._stepper.set("p", self._model_parameter())
+        self._stepper.set("x", self._to_qp(x))
+        self._stepper.set("u", u)
+        status = self._stepper.solve()
+        if status != 0:
+            raise RuntimeError(
+                f"linearising the force filter's step answered {status_word(status)}"
+            )
+        # `(nx, nx + nu)`; the input columns belong to no state row.
+        sensitivity = np.asarray(self._stepper.get("S_forw"), dtype=float)[:, : self.nx]
+        rows = np.array([cs.X_PLANNED_VELOCITY, cs.X_ACTUATED_FORCE])
+        blocks = np.zeros((cs.K_PLANNED_DOF, rows.size, rows.size))
+        for axis in range(cs.K_PLANNED_DOF):
+            index = rows + axis
+            factor = self._x_scale[index]
+            blocks[axis] = (
+                sensitivity[np.ix_(index, index)] * factor[:, None] / factor[None, :]
+            )
+        if not np.all(np.isfinite(blocks)):
+            raise RuntimeError(
+                "the force filter's own linearisation came back non-finite, so no "
+                "gain can be derived from it"
+            )
+        return blocks
+
     def propagate(self, x: np.ndarray, u: np.ndarray) -> np.ndarray:
         """
         `x` carried forward through the transport dead time -- one `Ts` -- under `u`.
