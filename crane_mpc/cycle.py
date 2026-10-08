@@ -75,6 +75,13 @@ class Timing:
         #: published last cycle, and the predictor replays exactly that. Without it
         #: the first `solve latency` of every interval ran a command nobody
         #: predicted -- 10 ms of it diverges the loop.
+        #: **`solve_budget` is `Ts` and that is the real deadline, not a margin.**
+        #: This is two `Ts` only because knot 0 reaches the *joint* one dead time
+        #: after the JTC emits it; `hz._command_message` puts knot 0 at
+        #: `time_from_start = Ts` behind the in-flight prepend, so a horizon
+        #: arriving past `stamp + Ts` has had that prepend -- the device that
+        #: makes it continuous with what is being commanded -- played without it.
+        #: Issue 230 nearly published late horizons on this misreading.
         self.command_delay = self.delay + self.Ts
         self.command_delay_ns = int(self.command_delay * NANOSECONDS)
         #: The JTC's tick; it samples feedforward one tick ahead (`hz._command_message`).
@@ -923,8 +930,9 @@ class Cycle:
         Solve. Returns `(solution, refusal)`; exactly one is falsy.
 
         `latency()`, seconds since the measurement, is read once the OCP answers;
-        past `solve_budget_s` a converged solve is late end-to-end and is handled
-        as over budget -- acados' `solve_time` misses the Python around it.
+        past `solve_budget_s` a converged solve is `Outcome.LATE` -- handled like
+        over budget, reported apart from it, since acados' `solve_time` misses
+        the Python around it and reads inside the budget on every late cycle.
 
         A refusal has already stopped the publisher; the caller only reports it.
 
@@ -955,7 +963,7 @@ class Cycle:
         if solution.outcome is Outcome.CONVERGED and self.timing.late(
             self.latency_s, self.ocp.solve_budget_s
         ):
-            solution = replace(solution, outcome=Outcome.BUDGET_EXCEEDED)
+            solution = replace(solution, outcome=Outcome.LATE)
         self.guess = (
             None if solution.outcome is Outcome.FAILED else self.ocp.carried(solution)
         )
@@ -996,26 +1004,44 @@ class Cycle:
                 f"the failing tick could not be read back: {refusal}"
             )
 
+    def spent(self, solution, solve_budget_s: float) -> str:
+        """
+        Say what this cycle cost, in the one clause every verdict ends with.
+
+        **Both clocks, on every rung.** acados' `solve_time` is inside the
+        budget on every *late* cycle -- the budget is end-to-end from the
+        measurement -- so a reader given only that one counted 226's late
+        cycles as refusals and the latency was nowhere on the stream. The ms
+        are integers so the clause is as parseable as it is readable:
+        `SolverHealth.message` is the only field either number has, and a
+        converged cycle reports them too, which is the only way to see the
+        margin before it is gone.
+        """
+        end_to_end = (
+            "latency unmeasured"
+            if self.latency_s is None
+            else f"{round(1000 * self.latency_s)} ms end-to-end from the measurement"
+        )
+        late = " (a late cycle)" if solution.outcome is Outcome.LATE else ""
+        return (
+            f"{round(1000 * solution.solve_time_s)} ms of solver time, {end_to_end}"
+            f"{late}, against a {round(1000 * solve_budget_s)} ms budget"
+        )
+
     def ladder(self, solution, max_consecutive_failures: int, solve_budget_s: float):
         """Publish this solve, shift the last one, or hand control back."""
         destination = HORIZON_TOPIC if self.mode == "active" else SHADOW_HORIZON_TOPIC
+        spent = self.spent(solution, solve_budget_s)
 
         if solution.outcome is Outcome.CONVERGED:
             self.adopt_solution(solution)
             self.applied_previous = False
             return Verdict(
-                "the solve converged inside the budget and its horizon was published "
+                f"the solve converged in {spent} and its horizon was published "
                 f"on {destination}",
                 published=True,
             )
 
-        late = self.timing.late(self.latency_s, solve_budget_s)
-        spent = (
-            f"{round(1000 * self.latency_s)} ms end-to-end from the measurement, a "
-            "late cycle,"
-            if late
-            else f"{round(1000 * solution.solve_time_s)} ms"
-        ) + f" against a {round(1000 * solve_budget_s)} ms budget"
         if self.consecutive_failures >= max_consecutive_failures:
             # Handing back happens once; later cycles just wait for a believable
             # solve. SolverHealth keeps FAULT_SOLVER either way -- only log
@@ -1036,7 +1062,7 @@ class Cycle:
             else:
                 text = (
                     f"mpc §6's escalation still holds: {self.consecutive_failures} "
-                    f"consecutive failures, the last one {spent}. Nothing goes out "
+                    f"consecutive failures, the last one at {spent}. Nothing goes out "
                     f"on {destination} until a solve converges or the mode changes"
                 )
             self.stay_silent_after_failure(

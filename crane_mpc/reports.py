@@ -54,9 +54,18 @@ def solver_health(cycle: Cycle, solution, why: str, joints, budget: float, stamp
         health.fault = SupervisorStatus.FAULT_SOLVER
         return health
 
+    # `LATE` and `BUDGET_EXCEEDED` share the wire value: both are "too slow",
+    # the message has no fourth constant and crane_msgs is not this package's to
+    # extend. What separates them from a *failure* is this field against
+    # `SOLVE_FAILED`, and what separates them from each other is `status` (0 on
+    # a late cycle, since it converged) and `message`, which carries both clocks
+    # on every rung -- `solve_time` is acados' own and is inside the budget on
+    # every late cycle, so counting overruns off it reads 0 while a fifth of
+    # cycles publish a shifted horizon (issue 226 §4, issue 230).
     health.outcome = {
         Outcome.CONVERGED: SolverHealth.SOLVE_CONVERGED,
         Outcome.BUDGET_EXCEEDED: SolverHealth.SOLVE_BUDGET_EXCEEDED,
+        Outcome.LATE: SolverHealth.SOLVE_BUDGET_EXCEEDED,
         Outcome.FAILED: SolverHealth.SOLVE_FAILED,
     }[solution.outcome]
     # A stalled plan is a *converged* solve (answering "wait"); without this it reads

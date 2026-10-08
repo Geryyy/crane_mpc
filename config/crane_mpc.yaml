@@ -48,8 +48,11 @@ crane_mpc:
     dq_a_feedback: [true, true, true, true, true, true]
     dq_a_divergence_max: [0.19, 0.06, 0.08, 0.10, 0.53, 0.13]
 
-    # = Ts: knot 0 is due one command delay after the sample. Live sim, tick to
-    # arrival 30 ms median, solve 10 ms median, 44 ms max.
+    # = Ts: the horizon is stamped at the sample and knot 0 sits one Ts into it,
+    # behind the in-flight prepend, so Ts is the deadline and not a margin --
+    # `command_delay` being 2 Ts is the dead time to the joint, not slack for
+    # the message (issue 230). Live sim, tick to arrival 30 ms median, solve 10
+    # ms median, 44 ms max.
     solve_budget: 0.06
     # 12.5 Hz, the largest decimation not running ahead of a 20 Hz consumer.
     solver_health_decimation: 2

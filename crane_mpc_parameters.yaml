@@ -67,7 +67,9 @@ crane_mpc:
     type: double
     description: "Budget, s, from the /joint_states sample to the solved horizon -- end to
       end, not acados' solve_time. The solve is **not interrupted** at it: over budget comes
-      back as SOLVE_BUDGET_EXCEEDED and the previous horizon shifted one step goes out."
+      back as SOLVE_BUDGET_EXCEEDED and the previous horizon shifted one step goes out. Ts
+      is the deadline and not a margin -- knot 0 sits one Ts into a horizon stamped at the
+      sample, behind the in-flight prepend that makes it continuous (issue 230)."
     validation:
       gt<>: [0.0]
 

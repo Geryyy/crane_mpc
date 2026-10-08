@@ -494,7 +494,12 @@ def test_which_branch_drives_the_position_reference_is_said_out_loud(node):
 
 
 def test_a_cycle_late_end_to_end_is_not_published_as_converged(node):
-    """acados' solve_time misses the sample's age; 100 ms old is past a 60 ms budget."""
+    """
+    acados' solve_time misses the sample's age; 100 ms old is past a 60 ms budget.
+
+    Reported apart from a failure: the outcome is the budget's, `status` stays
+    acados' own 0, and `message` carries both durations (issue 230).
+    """
     configured(node)
     node.set_parameters([Parameter("solve_budget", Parameter.Type.DOUBLE, 0.06)])
     old = joint_state(node)
@@ -505,7 +510,9 @@ def test_a_cycle_late_end_to_end_is_not_published_as_converged(node):
     assert "_shadow_horizon_publisher" not in node.published
     health = node.published["_health_publisher"][0]
     assert health.outcome == SolverHealth.SOLVE_BUDGET_EXCEEDED
+    assert health.status == 0
     assert "late cycle" in health.message
+    assert "100 ms end-to-end from the measurement" in health.message
 
 
 def rate(value):

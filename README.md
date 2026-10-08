@@ -251,6 +251,18 @@ non-convergence takes the same path. It is never a zero-velocity fallback: on a
 hydraulic crane a commanded zero excites exactly the sway this controller exists
 to suppress.
 
+**`solve_budget = T_s` is the deadline and not a margin**, and `command_delay`
+being two `T_s` does not widen it (issue 230 nearly widened it). The message is
+stamped at the measurement and `hz._command_message` puts knot 0 at
+`time_from_start = T_s`, behind the in-flight prepend: `[0, T_s)` is the
+command already in flight, which is what makes a new horizon continuous with
+what the JTC is commanding right now. A horizon arriving past `stamp + T_s` has
+had that prepend played without it, so the command steps instead of ramping —
+and a step in `dq_d` is the one thing this controller must not do. The second
+`T_s` in `command_delay` is the transport dead time between the JTC emitting
+knot 0 and the joint feeling it; it is the predictor's business, not the
+receiver's.
+
 **With nothing to shift the node publishes nothing.** The fallback *is* the
 previous solution, and on the first cycle — and the first after any silence —
 there is not one. The cold start does not fill that hole and is not meant to: it
@@ -405,6 +417,20 @@ regime with none to spare.
 `outcome` is compared beside `fault`, so a move between a budget overrun and a QP
 failure counts as a change: they are one fault code but two different things to
 chase.
+
+**Late is not failed, and `solve_time` cannot tell you which.** A late cycle
+converged: `status` and `qp_status` are 0, `outcome` is
+`SOLVE_BUDGET_EXCEEDED`, and `solve_time` — acados' own `time_tot`, the only
+duration this message has a field for — is *inside* the budget, because what
+crossed it is the end-to-end latency from the measurement. Counting overruns
+off `solve_time` therefore read 0 while a fifth of cycles published a shifted
+horizon (issue 226 §4). So: a failure is `outcome == SOLVE_FAILED` or a
+non-zero `status`/`qp_status`; a late cycle is `SOLVE_BUDGET_EXCEEDED` with
+`status == 0`; a capped QP is neither and shows only in `qp_iterations` at
+`qp_solver_iter_max`. `message` carries **both** durations in integer
+milliseconds on every rung, converged ones included, which is the only way to
+watch the margin before it is gone — `crane_msgs/SolverHealth` has no latency
+field and that is the one real gap left here.
 
 A cycle in which no solve was attempted—no reference, no fresh measurement, an
 unconfigured node—publishes no report. Absence is the supervisor's own staleness

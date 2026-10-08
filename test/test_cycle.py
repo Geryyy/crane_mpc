@@ -44,15 +44,15 @@ def cycle(mode="active"):
     return made
 
 
-def solution(outcome, progress_advance=Ts, nx=cs.NX):
+def solution(outcome, progress_advance=Ts, nx=cs.NX, status=2):
     """A solve whose states count up, so a shift of them is visible."""
     states = np.arange(KNOTS * nx, dtype=float).reshape(KNOTS, nx)
     return Solution(
         states=states,
         inputs=np.zeros((KNOTS - 1, cs.NU_PROGRESS)),
         outcome=outcome,
-        status=2,
-        status_word="ACADOS_MAXITER",
+        status=status,
+        status_word="ACADOS_SUCCESS" if status == 0 else "ACADOS_MAXITER",
         qp_status=0,
         iterations=1,
         qp_iterations=1,
@@ -117,7 +117,9 @@ def test_the_ceiling_escalates_and_stops_the_publisher():
     assert one.escalated
     assert not one.applied_previous
     assert "escalation" in one.last_silence
-    assert "10 ms against a 20 ms budget" in verdict.text
+    assert "10 ms of solver time, latency unmeasured, against a 20 ms budget" in (
+        verdict.text
+    )
     assert one.last_horizon is None
     assert one.guess is None
 
@@ -165,6 +167,84 @@ def test_a_horizon_of_the_wrong_length_is_not_shifted():
     one.last_horizon = hz.Knots.zeros(KNOTS + 1)
     one.last_tcp_states = np.zeros((KNOTS + 1, cs.NX))
     assert not one.shift_previous_horizon()
+
+
+def solving(answer, budget=0.02):
+    """A cycle whose OCP answers `answer`; nothing else about it is exercised."""
+    one = cycle()
+    one.ocp = SimpleNamespace(
+        solve_budget_s=budget,
+        solve=lambda *_, **__: answer,
+        carried=lambda _: None,
+    )
+    one.applied_inputs = [np.zeros(cs.NU_PROGRESS)]
+    return one
+
+
+def health_of(one, answer, joints=("a", "b", "c", "d", "e", "f")):
+    return reports.solver_health(
+        one, answer, "a verdict", list(joints), one.ocp.solve_budget_s, Time().to_msg()
+    )
+
+
+def test_a_late_cycle_is_reported_apart_from_a_failed_one():
+    """
+    Issue 226 read a run of late cycles as refusals, and the stream let it.
+
+    Both rungs shift the previous horizon and both raise `FAULT_SOLVER`, so the
+    only separation is `outcome` against `status` -- and acados' `solve_time`,
+    the one duration the message carries, is *inside* the budget on every late
+    cycle, which is why counting overruns off it read 0 while a fifth of cycles
+    published a shifted horizon.
+    """
+    late = solving(solution(Outcome.CONVERGED, status=0))
+    answer, refusal = late.solve(latency=lambda: 0.1)
+    assert not refusal
+    assert answer.outcome is Outcome.LATE
+    assert answer.status == 0  # it converged; nothing acados says is wrong
+
+    failed = solving(solution(Outcome.FAILED))
+    assert failed.solve(latency=lambda: 0.001)[0].outcome is Outcome.FAILED
+
+    assert health_of(late, answer).outcome == SolverHealth.SOLVE_BUDGET_EXCEEDED
+    assert (
+        health_of(failed, solution(Outcome.FAILED)).outcome == SolverHealth.SOLVE_FAILED
+    )
+
+
+def test_every_verdict_carries_both_clocks():
+    """
+    The solver's own time and the end-to-end latency, converged cycles included.
+
+    A reader handed only the overruns cannot see the margin shrinking, and the
+    one duration `SolverHealth` has a field for is the one that misses the
+    Python around the solve.
+    """
+    one = solving(solution(Outcome.CONVERGED))
+    answer, _ = one.solve(latency=lambda: 0.1)
+    assert answer.outcome is Outcome.LATE
+    one.last_horizon = hz.Knots.zeros(KNOTS)
+    one.last_tcp_states = np.zeros((KNOTS, cs.NX))
+    text = one.ladder(answer, 3, one.ocp.solve_budget_s).text
+    assert "10 ms of solver time" in text
+    assert "100 ms end-to-end from the measurement (a late cycle)" in text
+    assert "20 ms budget" in text
+
+    on_time = solving(solution(Outcome.CONVERGED))
+    answer, _ = on_time.solve(latency=lambda: 0.012)
+    assert answer.outcome is Outcome.CONVERGED
+    converged = on_time.ladder(answer, 3, on_time.ocp.solve_budget_s).text
+    assert "10 ms of solver time, 12 ms end-to-end" in converged
+    assert "late cycle" not in converged
+
+
+def test_an_unmeasured_latency_says_so_rather_than_reading_as_zero():
+    one = solving(solution(Outcome.CONVERGED))
+    assert one.solve(latency=None)[0].outcome is Outcome.CONVERGED
+    assert (
+        "latency unmeasured"
+        in one.ladder(solution(Outcome.FAILED), 3, one.ocp.solve_budget_s).text
+    )
 
 
 def test_the_shadow_mode_names_its_own_topic_in_the_verdict():

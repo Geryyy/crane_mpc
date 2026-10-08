@@ -893,3 +893,57 @@ Two cells move enough to name, and they move opposite ways:
   the weight pricing an offset the plant will not hold, and paying for it in the
   one family §3 already called the least survivable. +0.25 m does not do it
   (0.035 -> 0.041) and neither does an offset along z.
+
+## 8. Can the linearisation be made cheaper? — issue 230
+
+226 left the latency as the thing that shifts the previous horizon and named
+three candidates: fewer knots, a cheaper integrator, or the split behind a
+predicate. The first two are measured here and **neither is taken**.
+
+The A2B cell (`--goal-pose 6.06 0.35 2.0 1.5708 --latency 0.026`, empty,
+`OMP_NUM_THREADS=1`), four repeats **interleaved** so the box's load cannot
+order the settings — it moves the absolute scale by a factor of two inside one
+sweep, which is how an earlier non-interleaved run read `newton_iter 1` as 30 %
+cheaper:
+
+| `CRANE_MPC_OCP_OPTIONS` | median of the four p50 | p90 | worst max |
+| --- | --- | --- | --- |
+| shipped | 12.13 ms | 15.23 | 23.72 |
+| `sim_method_newton_iter: 2` | 11.40 | 14.06 | 23.69 |
+| `sim_method_newton_iter: 1` | 11.05 | 13.75 | 22.17 |
+| `horizon_length: 50` | 9.70 | 14.28 | 30.38 |
+
+**`sim_method_newton_iter` is a null result, and acados' own timers say why.**
+On twelve replayed ticks `time_lin` is 10.64 ms shipped and 10.55 ms at one
+Newton iteration — unmoved. With `sim_method_jac_reuse: 1` and a warm iterate
+the second and third iterations are a back-substitution on a residual that is
+already small; the cost of the linearisation is the *sensitivity* propagation,
+which runs once however many Newton steps precede it. The 1 ms the closed-loop
+table shows is inside the run-to-run spread.
+
+**`sim_method_num_stages: 1` is the only cheap integrator, and it breaks the C3
+force rows.** `time_lin` 10.64 -> 5.94 ms, exactly the factor the stage count
+predicts — and on the A2B cell the final error goes 0.0003 -> 0.0132 rad, the
+late tilt rate 0.018 -> **0.39** rad/s and 4 % of QPs stop at their iteration
+cap. Backward Euler is L-stable but first order, and at `|lambda| T_s = 8.5` on
+the actuator lag that order is the model. `sim_method_num_stages: 3` costs 12 %
+and changes no quality column.
+
+**Fewer knots works and is not free.** `horizon_length: 50` buys 20 % of the
+solve for a late tip rate of 0.0217 against 0.0194 and a late tilt rate of
+0.0199 against 0.0176; 40 buys 48 % for 0.0236/0.0210. 223 bought those knots
+for the damping and this does not undo that trade for 2.4 ms.
+
+On the eight cells of 226 §3 (four moves x {empty, 800 kg}) `newton_iter 1` is
+bit-identical to the shipped setting on every quality column, which is the
+other half of calling it a null result.
+
+**Nothing was taken, and `solve_budget` was not widened either.** The one lever
+that costs no solve time looked like publishing a late horizon anyway --
+`command_delay` is two `T_s` while the budget is one -- and it is wrong: the
+horizon is stamped at the measurement and knot 0 sits one `T_s` into it, behind
+`hz._command_message`'s in-flight prepend, so past `stamp + T_s` the JTC has
+already played that prepend and the command steps instead of ramping. The
+second `T_s` is the dead time to the joint, not slack for the message.
+`horizon_length: 50` is the only honest remaining trade here and 2.4 ms does
+not buy back what 223 paid those knots for.

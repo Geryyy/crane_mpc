@@ -50,6 +50,12 @@ def status_word(status: int) -> str:
 class Outcome(Enum):
     CONVERGED = "converged"
     BUDGET_EXCEEDED = "the solve exceeded its budget"
+    #: Converged, and still past the budget end-to-end from the measurement.
+    #: Apart from `BUDGET_EXCEEDED` (acados' own `solve_time`) and from `FAILED`
+    #: (a status) because the three are three different things to chase, and
+    #: because 226 read a run of late cycles as refusals: `solve_time` was
+    #: inside the budget on every one of them. `Cycle.solve` sets it.
+    LATE = "the cycle was late end to end"
     FAILED = "the solve failed"
 
     def __str__(self) -> str:
