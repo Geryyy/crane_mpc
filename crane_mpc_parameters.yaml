@@ -84,10 +84,12 @@ crane_mpc:
     type: int
     read_only: true
     description: "Ticks written to file per run, one .npz each under
-      `<ros log dir>/crane_mpc_ticks`, on a non-zero **QP** status -- the QP not being
-      solved, whether by a NaN in it (1) or a collapsed step (3). Carries what issue 213
-      had to guess at: x_0, the resampled reference, q_eq, the path, the payload, `p` per
-      stage, the iterate and the residuals, replayed by
+      `<ros log dir>/crane_mpc_ticks`, on a non-zero **NLP or QP** status -- the latter is
+      the QP not being solved, whether by a NaN in it (1) or a collapsed step (3), and the
+      former is what a refused cycle is counted by. Both, since issue 233: 227's twelve
+      captures refused on NLP status 4 with `qp_status` 0 throughout and dumped nothing.
+      Carries what issue 213 had to guess at: x_0, the resampled reference, q_eq, the path,
+      the payload, `p` per stage, the iterate and the residuals, replayed by
       `scripts/trials/replay_tick.py`. 0 writes none."
     validation:
       gt_eq<>: [0]
@@ -386,41 +388,3 @@ crane_mpc:
       bounds /crane/controller_state's stamp**, which is shadow mode's comparison instant."
     validation:
       gt<>: [0.0]
-
-  force_filter:
-    enabled:
-      type: bool
-      read_only: true
-      description: "Estimate C3's force state instead of integrating it open loop (issue
-        227). False carries `tau_a` exactly as it was carried before: the force row of the
-        previous roll, integrated over the measured `dq`. read_only -- turning it on mid-move
-        steps two rows of x_0 at once."
-    dq_a:
-      type: double_array
-      read_only: true
-      description: "Process variance of the velocity row, (rad/s)^2 ((m/s)^2) per `Ts` --
-        whatever acceleration C3 does not describe, over one cycle. **This is the knob that
-        decides how much of the measurement reaches the force row**: large, the filter
-        believes the encoder and the old noise is back; small, it believes a model."
-      validation:
-        fixed_size<>: [5]
-        lower_element_bounds<>: [0.0]
-    tau_a:
-      type: double_array
-      read_only: true
-      description: "Process variance of the force row, (N m)^2 (N^2) per `Ts`: what the C3
-        fit itself cannot predict, and **not** the force a cycle of velocity error makes --
-        the transition already carries that one, and counting it here as well returns the
-        open-loop carry (issue 227's notes have the sweep)."
-      validation:
-        fixed_size<>: [5]
-        lower_element_bounds<>: [0.0]
-    dq_a_sensor:
-      type: double_array
-      read_only: true
-      description: "/joint_states velocity noise variance, (rad/s)^2 ((m/s)^2). The quantity
-        issue 227 is about: through C3's `k` one cycle of it is 1e2-1e3 N m of force error.
-        The one row the filter observes -- `q_a` is taken as exact, see `force_filter`."
-      validation:
-        fixed_size<>: [5]
-        lower_element_bounds<>: [0.0]

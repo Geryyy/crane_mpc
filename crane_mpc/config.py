@@ -52,13 +52,6 @@ WIDTHS = {
         "dq_u": cs.K_PASSIVE_DOF,
         "cylinder_force": cs.K_ACTUATED_DOF,
     },
-    # Planned axes, not actuated: the force state has five rows and the tool is
-    # pinned, so a six-wide covariance would carry an entry nothing reads.
-    "force_filter": {
-        "dq_a": cs.K_PLANNED_DOF,
-        "tau_a": cs.K_PLANNED_DOF,
-        "dq_a_sensor": cs.K_PLANNED_DOF,
-    },
 }
 
 
@@ -108,10 +101,6 @@ LIMITS = (
 )
 SLACK = ("q_u", "dq_u", "cylinder_force", "pump_flow")
 
-#: `force_filter`: the Kalman filter's two covariances. `enabled` is the
-#: rollback switch -- off, `x_0` carries the force exactly as it did before 227.
-FORCE_FILTER = ("enabled", "dq_a", "tau_a", "dq_a_sensor")
-
 
 class MpcConfigError(ValueError):
     """Refusal. The message is what the operator gets instead of a node."""
@@ -126,12 +115,7 @@ def parameter_dict(values) -> dict:
     """
     shaped = {name: float(getattr(values, name)) for name in SCALARS}
     shaped["horizon_length"] = int(values.horizon_length)
-    for block, names in (
-        ("weights", WEIGHTS),
-        ("limits", LIMITS),
-        ("slack", SLACK),
-        ("force_filter", FORCE_FILTER),
-    ):
+    for block, names in (("weights", WEIGHTS), ("limits", LIMITS), ("slack", SLACK)):
         group = getattr(values, block)
         shaped[block] = {name: getattr(group, name) for name in names}
     shaped["limits"].update(machine_limits())
@@ -356,18 +340,6 @@ def check_settings(parameters: dict, hydraulics: dict) -> None:
         ),
         "every L1 slack price of `mpc` §3.2 must be finite and positive; a soft "
         "constraint priced at zero is silently an absent one",
-    )
-
-    _refuse(
-        _offender(
-            parameters["force_filter"],
-            ("dq_a", "tau_a", "dq_a_sensor"),
-            _positive,
-        ),
-        "the force filter's process and sensor variances must each be finite and "
-        "positive: a zero sensor variance is a measurement the filter must match "
-        "exactly, which makes its own innovation covariance singular, and a zero "
-        "process variance claims C3 is exact on that row",
     )
 
 

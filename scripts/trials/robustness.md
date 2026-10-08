@@ -947,3 +947,73 @@ already played that prepend and the command steps instead of ramping. The
 second `T_s` is the dead time to the joint, not slack for the message.
 `horizon_length: 50` is the only honest remaining trade here and 2.4 ms does
 not buy back what 223 paid those knots for.
+
+## 9. The C3 force estimator, and why it is gone — issue 233
+
+227 shipped `force_filter` with `enabled: false`: a per-axis steady-state Kalman
+filter on `(dq_a, tau_a)` that held 5-79x of the velocity noise out of the force
+rows, bought by trusting C3 and so paid for in the mismatch envelope. 227's own
+reading of that trade was that the filter *rejected* the gravity error it should
+have estimated, and named a force-bias state as the fix. **It was built,
+measured, and it is not the fix. The filter and its parameters are deleted;
+`git show 524faa5` is the whole of it if a future issue wants it back.**
+
+The third state was a per-axis random walk `b` entering the force row,
+`tau+ = A10 dq + A11 tau + b`, with `tau_a_bias` its process variance — zero
+reproducing 227's two-row filter exactly, which is the control every number
+below is read against.
+
+**It does estimate a sustained error.** Share of a constant unmodelled force
+(10 % of each axis' hold force) that has reached `tau_hat` by cycle 200, at the
+resting pose, with `tau_a_bias = m * tau_a`:
+
+| axis | `A[1,1]` | m = 0 | 1e-2 | 1e-1 | 1 |
+| --- | --- | --- | --- | --- | --- |
+| slewing | 0.98 | 95 % | 99 % | 100 % | 100 % |
+| boom | 0.78 | 51 % | 84 % | 99 % | 100 % |
+| arm | 0.61 | 21 % | 57 % | 89 % | 100 % |
+| telescope | 0.18 | −2 % | 83 % | 100 % | 100 % |
+| rotator | 0.51 | 17 % | 42 % | 73 % | 97 % |
+
+At m = 0 a sustained force error is **permanently** rejected on three of five
+rows, which is 227's mechanism as a number; the bias state removes that. Noise
+rejection pays for it, the telescope first (its sensor variance is 1.8e-7): over
+the three i226 bags with the measured sensor noise added, `m = [0, 1e-1, 5e-2,
+0, 0]` holds 5.6-9.2x out of the boom and arm against the two-row filter's
+11-79x, and is the largest `m` that keeps 14 of 15 axis-runs at or above the 5x
+gate — the same 14 of 15 as shipped.
+
+**And it buys nothing where it was supposed to.** `sweep_robust.py --latency
+0.026 --payload-mass 800 --samples 0 --by-plant --band payload=80,400`, worst of
+three moves, `late` in rad (load 0.9-7.1 over the sweeps):
+
+| setting | payload 80 kg | payload 400 kg |
+| --- | --- | --- |
+| filter off | **0.040** | **0.028** |
+| on, `tau_a_bias` 0 (= 227) | 0.396 | 0.219 |
+| on, the candidate above | 0.390 | 0.229 |
+| on, `m` = 1 / 1e1 / 1e2 uniform | 0.348 / 0.314 / 0.320 | — |
+
+**No bias variance over four decades recovers the cell** — not even m = 1e2,
+where the noise rejection is 0.26-0.29x, i.e. the filter makes the force rows
+worse than the open-loop carry. What does recover it is `dq_a`, exactly as 227
+said: `late` 0.461 (1e-7) / 0.107 (1e-6) / 0.047 (1e-5) / 0.041 (1e-4) against
+0.040 off — and at 1e-5 and 1e-6 the rejection is 1.1-2.9x whatever the bias
+does (measured with the bias at 0, at the candidate and at m = 1; the three
+columns agree to 10 %).
+
+So the conflict 227 measured is **not** the rejected gravity error. It is the
+velocity row: `x_0`'s `dq_a` is what the MPC plans the next 3.5 s from, and a
+`dq_a` the filter low-passes is a velocity the plant does not have. A bias state
+cannot fix a state that is wrong rather than missing. The two acceptance
+criteria remain in direct conflict and no third state reconciles them.
+
+Two notes for whoever comes back to this:
+
+- **The baseline moved.** 227 measured payload-80 `late` at 0.114 off; in this
+  checkout it is 0.040 (231 moved `position_box`, 229 repriced `weights.q_u`).
+  The filter's cost is therefore *larger* relative to today's baseline than 227
+  reported, not smaller. Re-measure, do not read 227's column.
+- **228's chamber pressure is the remaining route.** It makes `tau_a` a
+  measurement instead of an estimate, and a measured force needs no trust in C3
+  at all — which is the only thing here that was ever the problem.

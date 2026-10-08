@@ -24,12 +24,6 @@ then withdrawn on that metric. Score on the growth rate instead.
   cell per setting, `--by-plant` for one row per sample. The plant-mismatch map
   it was run for, and the settings that came out of it, are `robustness.md`
   (issue 190).
-- `force_truth.py <bag>/bag_0.mcap [--dq-noise S...]` — scores `x_0`'s C3 force
-  state against Gazebo's own joint `effort`, the one ground truth for `tau_a`
-  anywhere here. Replays the estimator alone over a recorded `/joint_states` and
-  JTC output, open loop and through `force_filter`, each on the capture and on
-  the capture plus a white draw, so the difference of the two columns is the
-  force error the measurement noise made and nothing else (issue 227). ~25 s.
 - `trial.sh <outdir>` — one live arm: tear down by PID, launch headless,
   activate `trajectory_controller_a2b`, call `/a2b_movement`, capture.
   `CTRL=pid MOVE=<script>` swaps the arm. ~3 min.

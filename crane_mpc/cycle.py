@@ -17,7 +17,7 @@ import numpy as np
 from crane_model import symbolic as cs
 from crane_model.velocity_loop import load_velocity_loop
 
-from . import bspline, dump, equilibrium, force_filter, problem
+from . import bspline, dump, equilibrium, problem
 from . import horizon as hz
 from .solver import PROGRESS_ROWS, Outcome, PathCycle
 
@@ -393,12 +393,6 @@ class Cycle:
         # Path parameter now, so rest is where a fresh cycle starts from.
         self.carried[cs.X_PROGRESS_RATE] = 0.0
         self.seed_force = True
-        #: The force state's observer, built from `ocp.parameters` the first time
-        #: a cycle reaches for it -- the node and `wire_chain` both hand the same
-        #: yaml block in through `Ocp`, so neither constructs one. `None` where
-        #: `force_filter.enabled` is false, which is the pre-227 open-loop carry.
-        self._force_filter: force_filter.ForceFilter | None = None
-        self._force_filter_read = False
         # Previous cycle's propagated velocity, read back as the carry -- not a
         # second integrator. `None` until propagated once.
         self.dq_a_carried: np.ndarray | None = None
@@ -444,27 +438,6 @@ class Cycle:
     def command_state(self) -> bool:
         """C4: the command is a state and `u` its rate."""
         return bool(getattr(self.ocp, "command_state", False))
-
-    @property
-    def force_filter(self):
-        """
-        The force observer, or `None` where the yaml switched it off.
-
-        Read off `ocp.parameters` once the problem is posed, like `u_max`: the
-        node and `wire_chain` hand the same block in through `Ocp`, so there is
-        one place the filter can be configured from and neither caller builds it.
-        """
-        if self._force_filter_read:
-            return self._force_filter
-        if self.ocp is None:
-            return None
-        block = self.ocp.parameters["force_filter"]
-        self._force_filter_read = True
-        if bool(block["enabled"]):
-            self._force_filter = force_filter.ForceFilter(
-                force_filter.Noise.from_parameters(block)
-            )
-        return self._force_filter
 
     def in_flight_command(self):
         """Give what the JTC plays until knot 0: C3 its hold, C4 its ramp's start."""
@@ -761,21 +734,16 @@ class Cycle:
         x[cs.X_PROGRESS] = 0.0
         if self.seed_force:
             # C3 seeds holding the machine's weight, not zero (hydraulics off) --
-            # no force is measured. The filter's gain goes with it: it was
-            # derived at a pose this reset says nothing is known about.
+            # no force is measured.
             self.ocp.pin_tool(self.tool_position)
             x[cs.X_ACTUATED_FORCE : cs.X_ACTUATED_FORCE + PLANNED_DOF] = (
                 self.ocp.static_hold_force(x)
             )
-            if self.force_filter is not None:
-                self.force_filter.forget()
             self.carried = x.copy()
             self.seed_force = False
-        elif self.force_filter is not None:
-            self.correct_force(x, measurement)
         # `dq_a_feedback[axis]` false: velocity is the model's, not the row just
         # written. All-true ships, so this is inert by default -- and it runs
-        # last so that it still overrules whichever of the two wrote `dq`.
+        # after the seed so that it overrules the row written above.
         self.velocity_carry = (
             VelocityCarry()
             if self.dq_a_carried is None
@@ -785,47 +753,6 @@ class Cycle:
         )
         self.measured = x
         return None
-
-    def correct_force(self, x: np.ndarray, measurement: Measurement) -> None:
-        """
-        Replace `x`'s `(dq_a, tau_a)` rows with the filter's estimate.
-
-        `q_a` is left as the measurement on purpose -- `position_box` pins the
-        hard box on it (`force_filter` says what that costs).
-
-        The prediction is `self.carried`: last cycle's measurement rolled one
-        `Ts` under what the JTC ran, so it already stands at *this* cycle's
-        measurement instant (`advance` says so where it writes it). The gain is
-        derived here on the first corrected cycle after a reset, at that pose and
-        under the command in flight, and held until the next reset.
-
-        Raising is not an option this deep -- nothing wraps `read_state` and an
-        exception here would take the node's timer callback with it -- so a
-        linearisation or an evaluation that fails leaves the rows measured and
-        the force carried, i.e. the pre-227 behaviour, and says so once. The
-        integrator it would have failed in is the one `propagate` refuses the
-        cycle on two calls later, so this is a fallback and not a hiding place.
-        """
-        rows = np.array([cs.X_PLANNED_VELOCITY, cs.X_ACTUATED_FORCE])
-        index = (rows[:, None] + np.arange(PLANNED_DOF)[None, :]).T
-        self.ocp.pin_tool(self.tool_position)
-        try:
-            if not self.force_filter.armed:
-                self.force_filter.derive(
-                    self.ocp.axis_transition(self.carried, self.last_input)
-                )
-            corrected = self.force_filter.correct(self.carried[index], measurement.dq_a)
-        except Exception as refusal:
-            self.force_filter.forget()
-            self.timing.say_once(
-                "force filter",
-                f"the force filter could not estimate C3's force state ({refusal}), "
-                "so x_0 carries it open loop as it did before issue 227 -- the "
-                "velocity noise is back in the force rows.",
-            )
-            return
-        self.timing.rearm("force filter")
-        x[index] = corrected
 
     def propagate(self):
         """Carry the measurement over the dead time, or refuse the cycle."""
@@ -976,21 +903,27 @@ class Cycle:
 
     def failing_reference(self, solution):
         """
-        Copy the resampled reference a QP-failed solve ran on, or `None`.
+        Copy the resampled reference a failed solve ran on, or `None`.
 
         The one thing a dump needs that this cycle is about to destroy:
         `ladder`'s shift rung overwrites `self.horizon` with the previous
         horizon. The rest is read off `Ocp.last_problem` once the command is
         out, which is where two crossings into acados belong. `None` whenever no
         sink would take the tick.
+
+        `Outcome.FAILED`, not a status: `Ocp.solve` refuses on a non-zero NLP
+        status, a non-zero QP status *or* a non-finite state, and the gate used
+        to read the last of the three -- so 227's refusals (NLP status 4,
+        `qp_status` 0) and 233's r3 (both statuses 0, state not finite) left
+        nothing to replay. One gate, the one `SolverHealth` reports.
         """
         sink = self.failing_ticks
-        if sink is None or not sink.wants(solution.qp_status):
+        if sink is None or not sink.wants(solution.outcome is Outcome.FAILED):
             return None
         return self.horizon.copy()
 
     def write_failing_tick(self, solution, reference) -> None:
-        """Write the tick the QP failed on; file I/O, so after the publish only."""
+        """Write the tick the solve failed on; file I/O, so after the publish only."""
         if reference is None:
             return
         try:

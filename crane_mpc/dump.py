@@ -5,8 +5,13 @@ Nothing recorded the inputs of a failing cycle before this: `SolverHealth`
 carries the diagnosis and not the problem, so issue 213 guessed at three offline
 reproductions of `mpc` §6's escalation and every one of them solved clean.
 
-Written on any non-zero QP status, which is the QP not being solved -- a NaN in
-it, or a step that collapsed, and the two want opposite investigations.
+Written on **every refused cycle** -- `Outcome.FAILED`, i.e. whatever the caller
+counts as a refusal -- and not on a status. `Ocp.solve` refuses on three
+different things and the dump used to gate on one of them, `qp_status`: issue
+227's twelve captures all refused on NLP status 4 (`ACADOS_QP_FAILURE`) with
+`qp_status` 0 and produced not one dump to replay, and 233's own first live run
+added the third shape, a solve acados called `ACADOS_SUCCESS` on both statuses
+with a non-finite state in it. One gate, the same one `SolverHealth` reports.
 **`qp_stat` is an acados status, not HPIPM's**: `ocp_qp_hpipm.c` translates
 before storing it, so 1 is HPIPM's `NAN_SOL`, 2 its `MAX_ITER`, 3 its
 `MIN_STEP` and 9 its `INCONS_EQ`. `solver.status_word` names it; issue 213 read
@@ -154,9 +159,9 @@ class Sink:
         self.written = 0
         self._say = say
 
-    def wants(self, qp_status: int) -> bool:
-        """Whether a tick with this status would be taken: reading one is not free."""
-        return bool(qp_status) and self.written < self.limit
+    def wants(self, refused: bool) -> bool:
+        """Whether this cycle's tick would be taken: reading one is not free."""
+        return bool(refused) and self.written < self.limit
 
     def write(self, record) -> Path | None:
         """Write one tick, or `None` if there is no budget left for it."""
@@ -171,12 +176,17 @@ class Sink:
             return None
         self.written += 1
         if self.written == 1:
+            status = int(record["status"])
             qp_status = int(record["qp_status"])
+            # Both numbers, and what it means when neither is set: on those
+            # cycles acados reported success and the state it returned was not
+            # finite, which is a third fault and not either status' story.
+            clean = "" if status or qp_status else ", so the solution was not finite"
             self._tell(
-                f"the QP came back {status_word(qp_status)} (QP status {qp_status}) "
-                f"and the tick it failed on is written to {self.directory}, at most "
-                f"{self.limit} of them this run. Replay one with "
-                f"{REPLAY_COMMAND} <file>"
+                f"a cycle was refused: {status_word(status)} (NLP status {status}, "
+                f"QP status {qp_status}){clean}. The tick it failed on is written "
+                f"to {self.directory}, at most {self.limit} of them this run. "
+                f"Replay one with {REPLAY_COMMAND} <file>"
             )
         return path
 

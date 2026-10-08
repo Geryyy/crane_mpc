@@ -1,5 +1,5 @@
 """
-A tick the QP failed on has to leave a file, and that file has to solve the same.
+A refused tick has to leave a file, and that file has to solve the same.
 
 The escalation this exists for is only seen in Gazebo -- issue 213 reproduced
 none of three guesses offline -- so what is tested is the path, not the fault: a
@@ -10,6 +10,7 @@ same status. A dump that could not be replayed would be a second guess.
 
 import math
 import sys
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -24,7 +25,7 @@ from crane_mpc import dump, problem
 from crane_mpc.config import machine_limits
 from crane_mpc.cycle import Cycle, Timing
 from crane_mpc.horizon import Grid, Knots, resample
-from crane_mpc.solver import Ocp, PathCycle
+from crane_mpc.solver import Ocp, Outcome, PathCycle
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts" / "trials"))
 
@@ -139,17 +140,49 @@ def test_a_tick_that_cannot_be_read_back_is_said_once_and_not_retried(ocp, tmp_p
     assert len(said) == 1 and "could not be read back" in said[0]
     # Spent, not retried: the refusal is the same every cycle and reading it
     # back costs the next cycle its deadline.
-    assert not cycle.failing_ticks.wants(3)
+    assert not cycle.failing_ticks.wants(True)
     assert not (tmp_path / "ticks").exists()
 
 
 def test_the_dumps_are_bounded_and_off_by_default_at_zero(tmp_path):
     """The fault repeats, so an unbounded dump is a full disk per escalation."""
     sink = dump.Sink(tmp_path / "ticks", 1)
-    record = {"cycle": 3, "qp_status": 3, "x0": np.zeros(2)}
-    assert sink.wants(3) and not sink.wants(0)
+    record = {"cycle": 3, "status": 4, "qp_status": 3, "x0": np.zeros(2)}
+    assert sink.wants(True) and not sink.wants(False)
     assert sink.write(record) is not None
-    assert not sink.wants(3)
+    assert not sink.wants(True)
     assert sink.write(dict(record, cycle=4)) is None
     assert len(list((tmp_path / "ticks").glob("*.npz"))) == 1
-    assert not dump.Sink(tmp_path / "off", 0).wants(3)
+    assert not dump.Sink(tmp_path / "off", 0).wants(True)
+
+
+def test_a_refusal_the_qp_status_does_not_see_is_still_dumped(ocp, tmp_path):
+    """
+    The two refusal shapes the old `qp_status` gate dumped nothing for.
+
+    `Ocp.solve` refuses on a non-zero NLP status, a non-zero QP status *or* a
+    non-finite state, and the gate read only the second: every live refusal in
+    227's twelve captures was NLP status 4 with `qp_status` 0, and 233's own r3
+    was both statuses 0 with a state that was not finite. Both are faked onto a
+    solve that really ran, so what is tested is `Cycle`'s gate and the write
+    behind it, not an arithmetic on two ints.
+    """
+    for status, qp_status in ((4, 0), (0, 0)):
+        said = []
+        cycle = holding_cycle(ocp)
+        cycle.failing_ticks = dump.Sink(tmp_path / f"ticks{status}", 2, say=said.append)
+        solved, refusal = cycle.solve()
+        assert not refusal and solved.qp_status == 0 and solved.status == 0
+        assert cycle.failing_reference(solved) is None, "a clean solve leaves no dump"
+
+        failed = replace(
+            solved, outcome=Outcome.FAILED, status=status, qp_status=qp_status
+        )
+        reference = cycle.failing_reference(failed)
+        assert reference is not None, f"NLP {status}, QP {qp_status} left no dump"
+        cycle.write_failing_tick(failed, reference)
+        assert len(list((tmp_path / f"ticks{status}").glob("*.npz"))) == 1
+        assert f"NLP status {status}" in said[0] and "QP status 0" in said[0]
+        # Neither status set is the third fault, and the line has to say so
+        # rather than reporting the refusal as a success.
+        assert ("not finite" in said[0]) == (status == 0)
