@@ -10,12 +10,15 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
+from crane_model import CraneModel, Payload, Tool
 from crane_model import symbolic as cs
 from crane_mpc import horizon as hz
-from crane_mpc import reports
+from crane_mpc import problem, reports
 from crane_mpc.cycle import (
     HORIZON_TOPIC,
     JOINT_PATH_TOPIC,
+    PASSIVE_DOF,
+    PLANNED_DOF,
     Bounds,
     Cycle,
     Timing,
@@ -23,6 +26,7 @@ from crane_mpc.cycle import (
     carry_actuated_velocity,
     watch_progress,
 )
+from crane_mpc.equilibrium import RO, Equilibrium
 from crane_mpc.solver import Outcome, Solution, Violation
 from crane_mpc.solver import path_control as ocp_path_control
 from crane_msgs.msg import SolverHealth, SupervisorStatus
@@ -860,3 +864,60 @@ def test_c4_publishes_the_command_state_and_carries_the_ramp_that_went_out():
     one.advance(failed, NOMINAL_NS, MIN_RATE, MAX_STALL)
     assert one.last_start == pytest.approx(command[1])
     assert one.last_input[:DOF] == pytest.approx((command[2] - command[1]) / Ts)
+
+
+def test_the_sway_centre_is_carried_along_the_plan_and_not_frozen():
+    """
+    The centre is what sway costs, so it has to be the plan's hanging pose.
+
+    Frozen at the measurement it charges the hanging pose's *own* travel as
+    sway -- that pose moves 1:1 with `-(q_boom + q_arm)` -- which is why
+    `weights.q_u` could not be paid before issue 229. The fallback with no model
+    to ask is still the frozen vector, and nothing downstream may tell the two
+    apart by anything but the shape.
+    """
+    one = cycle()
+    one.ocp = ReplayOcp()
+    one.measured = np.zeros(cs.NX)
+    # Swinging, not hanging: the frozen centre is this, the carried one is not.
+    one.measured[cs.X_PASSIVE_POSITION] = 0.3
+    assert one.propagate() is None
+    assert one.q_eq.shape == (PASSIVE_DOF,)
+    assert one.q_eq[0] == pytest.approx(0.3)
+
+    model = CraneModel(problem.default_description().read_text(), Tool(problem.TOOL))
+    one.equilibrium = Equilibrium(model)
+    # A plan that luffs the arm through 0.4 rad over the horizon.
+    one.horizon.q_a_ref[:, 2] = np.linspace(0.0, 0.4, KNOTS)
+    assert one.propagate() is None
+    assert one.q_eq.shape == (KNOTS, PASSIVE_DOF)
+    hanging = [
+        model.passive_equilibrium(np.append(knot[:PLANNED_DOF], 0.0))
+        for knot in one.horizon.q_a_ref
+    ]
+    assert np.allclose(one.q_eq, hanging, atol=1e-6)
+    assert one.q_eq[-1, 0] - one.q_eq[0, 0] == pytest.approx(-0.4, abs=1e-6)
+
+
+def test_the_centre_follows_an_off_axis_payload_around_the_rotator():
+    """
+    An off-axis CoM is the only thing besides the luff that moves the centre.
+
+    It is also what a Jacobian fitted at the plan's start gets wrong: the curve
+    is a harmonic in the rotator, so carrying its slope over a turn put the tilt
+    centre 0.23 rad out -- past the 0.2 rad sway box, on a weight that is only
+    payable while the centre is right.
+    """
+    model = CraneModel(problem.default_description().read_text(), Tool(problem.TOOL))
+    payload = Payload(800.0, np.array([0.5, 0.0, 0.0]), valid=True)
+    q_a = np.zeros(cs.K_ACTUATED_DOF)
+    stages = np.zeros((KNOTS, PLANNED_DOF))
+    stages[:, RO] = np.linspace(0.0, 2.0, KNOTS)
+    table = Equilibrium(model, payload).table(q_a, stages)
+    truth = np.array(
+        [model.passive_equilibrium(np.append(knot, 0.0), payload) for knot in stages]
+    )
+    assert np.allclose(table, truth, atol=0.01)
+    # Worth having: the centre really does travel here, so `atol` is not passing
+    # on a curve the table failed to follow at all.
+    assert np.abs(truth - truth[0]).max() > 0.1

@@ -93,13 +93,30 @@ independent terms, and **only the rate is priced** — see below. The terminal c
 omits the effort and input blocks and raises the remaining weights by
 `terminal_scale`; it is a cost, not a hard terminal set.
 
-**`q_eq` is the measured passive position, not a solved hanging pose.**
-`cycle.py` pins it at the propagated measurement and holds it across every stage,
-so what the offset residual charges over the horizon is the *change* in the
-passive rows, which is not sway: the hanging pose moves 1:1 with
-`-(q_boom + q_arm)`, so **a weight on it prices luffing, not swinging.** That is
-why `weights.q_u` ships at zero and `weights.dq_u` carries the damping — a rate
-residual needs no centre. `weights.q_u`'s own description carries the numbers.
+**`q_eq` is a table, one hanging pose per stage, carried along the plan**
+(`equilibrium.py`). Held at the measurement instead — as it was until issue 229 —
+what the offset residual charges over the horizon is the *change* in the passive
+rows, which is not sway: the hanging pose moves 1:1 with `-(q_boom + q_arm)`,
+about 0.9 rad over an A2B move against a 0.2 rad clearance box, so **a weight on
+it priced luffing and not swinging** and `weights.q_u` had to ship at zero.
+
+One numeric equilibrium costs ~4 ms, so 60 of them do not fit in a 60 ms cycle.
+They are not needed, because `passive_equilibrium` factors — to 1e-13 at every
+pose probed, empty and at 800 kg on and off the rotator axis:
+
+    tip_eq = h_tip(q_ro) - (q_ha + q_ka)        tilt_eq = h_tilt(q_ro)
+
+The tool hangs vertically, so the tip angle *is* the luffing pair's travel, and
+slew, telescope and the tool move neither row. Only the rotator does, and only
+through an **off-axis payload CoM** swinging around it — which the planner takes
+from an estimate, so it is not a corner case. `Equilibrium` samples that one
+curve over the rotator's turn once per payload (16 solves, ~64 ms, on a cycle a
+payload step already cold-starts) and reads the table off it with no solve per
+cycle at all: exact empty and on axis, within 0.007 rad at 0.5 m off it.
+A Jacobian fitted at the plan's start instead — this file's first answer — is
+affine where the curve is a harmonic, and put the tilt centre **0.23 rad** out
+over a turn, past the box it centres. `weights.q_u`'s own description carries
+the weights.
 
 Five constraints are native boxes: control-safe actuated position,
 actuated velocity, sway about `q_eq`, sway rate, and input rate. Constraints 6

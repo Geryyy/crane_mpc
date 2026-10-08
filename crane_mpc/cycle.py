@@ -17,7 +17,7 @@ import numpy as np
 from crane_model import symbolic as cs
 from crane_model.velocity_loop import load_velocity_loop
 
-from . import bspline, dump, force_filter, problem
+from . import bspline, dump, equilibrium, force_filter, problem
 from . import horizon as hz
 from .solver import PROGRESS_ROWS, Outcome, PathCycle
 
@@ -351,6 +351,10 @@ class Cycle:
         #: Assigned by the owner, like `ocp` -- which directory that is, is a
         #: deployment's business and this file knows nothing about ROS.
         self.failing_ticks: dump.Sink | None = None
+        #: The sway centre's model, assigned by the owner like `ocp`: it needs a
+        #: `CraneModel`, which the problem is posed from and this file does not
+        #: build. `None` freezes the centre at the measurement (pre-229).
+        self.equilibrium: equilibrium.Equilibrium | None = None
 
         self.reference: hz.Knots | None = None
         self.reference_stamp_ns = 0
@@ -868,12 +872,7 @@ class Cycle:
                 f"forward, so "
                 f"nothing is published on {HORIZON_TOPIC}: {error}.",
             )
-        # Sway box and offset residual centred on where the tool actually
-        # swings, not the hanging pose -- issue 137 measured centre worth 3-4x
-        # peak sway, weight worth nothing (issue 049).
-        self.q_eq = x0[
-            cs.X_PASSIVE_POSITION : cs.X_PASSIVE_POSITION + PASSIVE_DOF
-        ].copy()
+        self.q_eq = self.equilibrium_table(x0)
         # Next cycle's carry on an opted-out axis: this propagation's velocity,
         # one cycle old -- inside what dq_a_divergence_max watches.
         self.dq_a_carried = x0[
@@ -881,6 +880,41 @@ class Cycle:
         ].copy()
         self.x0 = x0
         return None
+
+    def equilibrium_table(self, x0: np.ndarray) -> np.ndarray:
+        """
+        Give the sway box's centre and the offset residual's reference, per stage.
+
+        The centre, not the weight, is what sway costs (issue 137: centre worth
+        3-4x peak sway, weight worth nothing -- issue 049). Frozen at the
+        measurement it charges the hanging pose's *own* travel as sway: that pose
+        moves 1:1 with `-(q_boom + q_arm)`, ~0.9 rad over an A2B move against a
+        0.2 rad clearance box, which is why `weights.q_u` had to ship at zero.
+        Carried along the plan instead, the residual is the swing and the weight
+        is affordable (issue 229).
+
+        Falls back to the frozen measurement with no model to ask, or where the
+        tool has nowhere to hang at all at this pose -- a cycle is never lost to
+        the centre. Note what that fallback now means: with `weights.q_u` paid it
+        is the pre-229 mispricing, not a neutral default, so it is a `say_once`
+        and not a silence.
+        """
+        measured = x0[cs.X_PASSIVE_POSITION : cs.X_PASSIVE_POSITION + PASSIVE_DOF]
+        if self.equilibrium is None or self.horizon is None:
+            return measured.copy()
+        planned = x0[cs.X_PLANNED_POSITION : cs.X_PLANNED_POSITION + PLANNED_DOF]
+        try:
+            return self.equilibrium.table(
+                np.append(planned, self.tool_position),
+                self.horizon.q_a_ref[:, :PLANNED_DOF],
+            )
+        except Exception as error:
+            self.timing.say_once(
+                "equilibrium",
+                "The tool's hanging pose could not be solved along this plan, so the "
+                f"sway centre stays frozen at the measurement: {error}.",
+            )
+            return measured.copy()
 
     # -- the solve and its ladder ------------------------------------------------
 

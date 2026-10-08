@@ -56,6 +56,7 @@ from .cycle import (
     Silence,
     Timing,
 )
+from .equilibrium import Equilibrium
 from .parameters import crane_mpc as parameter_library
 from .solver import Ocp, path_control
 
@@ -479,6 +480,7 @@ class MpcNode(Node):
             self.get_logger().error(f"The MPC could not be configured: {error}")
             return
         self._cycle.ocp = self._ocp
+        self._cycle.equilibrium = Equilibrium(self._model, self._payload)
         self.get_logger().info(
             f"crane_mpc configured on {self._model.tool.value}: joints "
             f"{', '.join(self._joints)}, sway {', '.join(self._passive_joints)}."
@@ -899,6 +901,9 @@ class MpcNode(Node):
         # A payload step makes the warm plan and the force state seeded for it
         # stale, which is the same reactivation every other break in output is.
         self._cycle.forget_plan()
+        # ... and the hanging-pose curve, whose shape is the CoM's. The next
+        # cycle re-samples it, ~64 ms, which is why it waits for a cold start.
+        self._cycle.equilibrium.set_payload(payload)
         com = payload.center_of_mass_k8_m
         response.message = (
             f"the payload is now {payload.mass_kg} kg at ({com[0]}, {com[1]}, "

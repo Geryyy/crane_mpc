@@ -43,9 +43,10 @@ def refusal(parameters) -> str:
 def test_the_shipped_configuration_is_accepted(shipped):
     """A guard that rejects what the repo ships is a bug in the guard."""
     check_settings(shipped, shipped["hydraulics"])
-    # Guard on weights is non-negativity, so shipped zero sway offset weight
-    # passes (issue 137 moved the declared default to zero; guard stays >= 0).
-    assert list(shipped["weights"]["q_u"]) == [0.0, 0.0]
+    # Guard on weights is non-negativity. The sway offset weight is payable only
+    # because `q_eq` is a per-stage table (issue 229); zero is what it shipped at
+    # while the centre was frozen, and the guard covers either.
+    assert list(shipped["weights"]["q_u"]) == [6400.0, 6400.0]
 
 
 def test_the_command_may_not_slew_faster_than_the_sway_it_shapes(shipped):

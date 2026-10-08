@@ -153,17 +153,18 @@ crane_mpc:
     q_u:
       type: double_array
       read_only: true
-      description: "Q_u -- sway offset, per passive row, against the q_eq cycle.py freezes at
-        the measured passive position. The hanging pose moves 1:1 with -(q_boom + q_arm), so
-        **this prices luffing, not swinging**; the centre is issue 049's."
+      description: "Q_u -- sway offset, per passive row, against the per-stage q_eq
+        `equilibrium.py` carries along the plan. Frozen at the measured passive position
+        (pre-229) it priced the hanging pose's own travel -- 1:1 with -(q_boom + q_arm) --
+        and **not swinging**, which is why it shipped at zero; the centre is issue 049's."
       validation:
         fixed_size<>: [2]
         lower_element_bounds<>: [0.0]
     dq_u:
       type: double_array
       read_only: true
-      description: "Q_dot_u -- sway rate, and the sway term that ships: a rate residual needs
-        no centre, so it survives the frozen q_eq that q_u could not."
+      description: "Q_dot_u -- sway rate. It carried the damping alone while q_eq was frozen:
+        a rate residual needs no centre. Swept with `q_u` in issue 229 and unmoved at 1024."
       validation:
         fixed_size<>: [2]
         lower_element_bounds<>: [0.0]

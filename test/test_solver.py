@@ -583,4 +583,10 @@ def test_c4_converges_at_the_end_of_the_path_with_progress_still_running(c4_ocp)
     solution = c4_ocp.solve(x, horizon, q_eq, path=end)
     assert solution.status == 0
     progress = solution.states[:, cs.X_PROGRESS]
-    assert np.all(progress >= 0.0) and progress.max() < 0.02, progress.max()
+    # `s >= 0` is a hard box, held to the QP's own absolute tolerance and no
+    # better: one RTI step at the sway offset weight issue 229 pays lands a few
+    # 1e-4 outside it. Nothing reads these rows but `progress_advance`, which
+    # `_read_solution` clips into `[0, progress_ceiling]`, so the slop cannot
+    # move the origin backwards.
+    assert progress.min() > -1.0e-3, progress.min()
+    assert progress.max() < 0.02, progress.max()

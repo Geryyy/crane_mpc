@@ -59,6 +59,7 @@ from crane_model.viewing import SpaceGate
 from crane_mpc import cycle as cy
 from crane_mpc import horizon as hz
 from crane_mpc import problem as ocp_problem
+from crane_mpc.equilibrium import Equilibrium
 from growth import growth
 from harness import ACTUATED, PASSIVE, PLANNED, cs, tune_planner
 from hunting import REVERSAL_FRACTION, reversal_fraction
@@ -306,6 +307,12 @@ def main(argv=None) -> int:
     def equilibrium(q_a):
         return planner.model.passive_equilibrium(q_a, payload)
 
+    # The OCP's payload this time, not the plant's: this is the sway centre the
+    # node's own `Cycle` solves against, so a COM mismatch must move it.
+    hanging = Equilibrium(
+        planner.model, Payload(ocp.payload_mass_kg, ocp.payload_com_m, valid=True)
+    )
+
     plant.scale_planned_damping(damping_scale)
     start = anchor = tune_planner.start_of(planner, options.resettle_start)
     if options.start is not None:
@@ -347,7 +354,7 @@ def main(argv=None) -> int:
             None if options.start is None or moves else (start.q[PASSIVE], start.dq_u)
         )
         reason, score = fly(
-            options, parameters, ocp, chain, equilibrium, plan, coast, swing
+            options, parameters, ocp, chain, equilibrium, plan, coast, swing, hanging
         )
         failed, moves = failed or bool(reason), moves + 1
         scores.append(score)
@@ -366,7 +373,9 @@ def main(argv=None) -> int:
     return 1 if failed else 0
 
 
-def fly(options, parameters, ocp, chain, equilibrium, plan, coast, swing=None):
+def fly(
+    options, parameters, ocp, chain, equilibrium, plan, coast, swing=None, hanging=None
+):
     """One move through the wire; `(failure reasons, scores)`. Coast cycles unscored."""
     plant = chain.plant
     Ts, N = float(parameters["Ts"]), int(parameters["horizon_length"])
@@ -374,6 +383,7 @@ def fly(options, parameters, ocp, chain, equilibrium, plan, coast, swing=None):
     timing = cy.Timing(Ts, delay, jtc_period=chain.step_s)
     cycle = cy.Cycle(timing, hz.Grid(Ts, N), "active", parameters["dq_a_feedback"])
     cycle.ocp = ocp
+    cycle.equilibrium = hanging
     bounds = cy.Bounds(
         float(parameters["max_clock_skew"]),
         float(parameters["max_reference_age"]),

@@ -134,9 +134,30 @@ crane_mpc:
       # an estimator.
       q_a: [40.0, 40.0, 40.0, 40.0, 10.0, 10.0]
       dq_a: [0.4, 0.4, 0.4, 0.4, 0.1, 0.1]
-      # Sway damped by rate alone: q_eq is frozen at measurement, so q_u prices
-      # boom+arm travel and not swing. 20.0 measured worse than 0.0 on both.
-      q_u: [0.0, 0.0]
+      # 6400 from 0 (issue 229), and affordable only because `q_eq` is now a
+      # per-stage table along the plan (`equilibrium.py`): frozen at the
+      # measurement this row priced the hanging pose's own travel, ~0.9 rad of
+      # boom+arm over an A2B move, which is why 20.0 measured worse than 0.0.
+      # With the centre carried, both sway rates fall with this weight on every
+      # offline cell that does not refuse -- A2B empty 0.027/0.024 ->
+      # 0.019/0.018 rad/s, at 800 kg 0.027/0.019 -> 0.024/0.016, worst-of-eight
+      # late tilt rate 0.047 -> 0.029 -- and 6400 is where that stops being
+      # free: 12800 costs the final joint error (worst 0.0048 -> 0.0085 rad) and
+      # 25600 costs it on cells that were clean (A2B 800 kg 0.0002 -> 0.0019).
+      # Swept with `dq_u`, which stays at 1024: 512 and 2048 both trade the two
+      # axes, 4096 moves the swing onto the tip. Ratio 6.25 against the sway's
+      # own omega^2 ~ 10 (2 s period), i.e. this prices roughly the pendulum's
+      # total energy rather than its kinetic half -- a consistency check, not a
+      # derivation.
+      # **Live this weight does not separate, and 0.02 rad/s is not reached.**
+      # Seven Gazebo runs at this setting span 0.014-0.045 rad/s late, one of
+      # them under 0.02 on both rows, against 0.034-0.040 at q_u 0 -- the spread
+      # between identical runs is wider than the on/off difference and does not
+      # track load. 0.02 is not a noise floor either: the passive rows read
+      # exactly 0 before the move. So the offline sweep is what picked 6400, and
+      # what live says is only that it costs nothing (0/3277 cycles refused,
+      # solve p50 13-14 ms). `trials/robustness.md` §7 has both halves.
+      q_u: [6400.0, 6400.0]
       # 16x from 4.0, which had never moved while q_a, tool, progress and
       # terminal_scale rose around it: 4x less residual swing at the end of the
       # move and the path improves with it.

@@ -762,3 +762,134 @@ things to read with it:
   `late` 0.352 against 0.363, COM +0.5 m 0.237 against 0.228, payload 80 kg
   0.172 against 0.199. Nothing here widens the envelope and nothing narrows it;
   §3's and §5's conclusions about *which* mismatch is survivable stand.
+
+## 7. The sway centre became a table, and `weights.q_u` was paid — issue 229
+
+`q_eq` was pinned at the propagated measurement and held across the horizon, so
+the offset residual charged the hanging pose's *own* travel — 1:1 with
+`-(q_boom + q_arm)`, ~0.9 rad over an A2B move against a 0.2 rad box — and
+`weights.q_u` had to ship at zero, leaving the tilt damped by rate alone.
+`equilibrium.py` gives the OCP one hanging pose per stage, so the residual is
+the swing; this section is the sweep that then priced `q_u`.
+
+### The sweep
+
+226's eight cells (A2B, `--goal out`, two random moves, each empty and at
+800 kg), `--latency 0.026`, worst cell per setting:
+
+    ./scripts/trials/wire_chain.py <cell> --latency 0.026 \
+        --set weights.q_u=<q> --set weights.dq_u=<dq>
+
+| q_u | dq_u | late tip/tilt rate | peak sway | final err | ms p50/p90/max | capped | refused |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 0 | 1024 | 0.045/0.047 | 0.132 | 0.0048 | 7.2/15.9/22.4 | 0.4 % | 24.8 % |
+| 20 | 1024 | 0.045/0.046 | 0.132 | 0.0047 | 8.0/16.3/54.6 | 1.3 % | 23.9 % |
+| 100 | 1024 | 0.044/0.046 | 0.134 | 0.0047 | 8.1/15.0/23.7 | 0.9 % | 25.2 % |
+| 400 | 1024 | 0.044/0.045 | 0.134 | 0.0046 | 10.0/19.3/35.1 | 0.4 % | 24.8 % |
+| 1600 | 1024 | 0.045/0.040 | 0.133 | 0.0046 | 22.0/51.9/131.4 | 0.9 % | 24.3 % |
+| 3200 | 1024 | 0.047/0.042 | 0.131 | 0.0047 | 7.3/13.8/29.3 | 1.7 % | 23.5 % |
+| **6400** | **1024** | **0.048/0.029** | **0.129** | **0.0041** | **9.6/14.7/59.6** | **0.9 %** | **21.3 %** |
+| 12800 | 1024 | 0.067/0.049 | 0.126 | 0.0085 | 7.7/14.7/18.5 | 0.4 % | 23.9 % |
+| 25600 | 1024 | 0.055/0.055 | 0.124 | 0.0044 | 7.5/15.0/22.5 | 0.9 % | 21.7 % |
+| 6400 | 512 | 0.042/0.042 | 0.138 | 0.0043 | 8.9/14.6/31.4 | 0.4 % | 24.3 % |
+| 6400 | 2048 | 0.035/0.050 | 0.114 | 0.0047 | 7.7/15.6/59.3 | 1.7 % | 23.5 % |
+| 6400 | 4096 | 0.080/0.056 | 0.098 | 0.0053 | 12.8/21.1/29.7 | 2.2 % | 23.0 % |
+
+The worst column is the wrong place to read this from: `out p800` dominates
+every row and it is the cell 231 is about — the arm starts 0.24-0.41 rad outside
+the control-safe box, so a fifth of its cycles refuse whatever the weight is.
+Per cell, late tip/tilt rate with the refused share in brackets:
+
+| q_u | a2b empty | a2b p800 | out empty | out p800 | r1 empty | r1 p800 | r2 empty | r2 p800 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 0 | 0.027/0.024 (0) | 0.027/0.019 (0) | 0.028/0.041 (25) | 0.045/0.022 (23) | 0.020/0.022 (0) | 0.024/0.015 (0) | 0.011/0.047 (0) | 0.013/0.031 (0) |
+| 6400 | 0.019/0.018 (0) | 0.024/0.016 (0) | 0.015/0.017 (2) | 0.048/0.029 (21) | 0.016/0.018 (0) | 0.020/0.014 (0) | 0.007/0.029 (0) | 0.010/0.025 (0) |
+| 12800 | 0.017/0.016 (0) | 0.021/0.014 (0) | 0.029/0.049 (24) | 0.067/0.030 (6) | 0.014/0.017 (0) | 0.017/0.015 (0) | 0.007/0.023 (0) | 0.009/0.022 (0) |
+
+Both rates fall with the weight on all six cells that do not refuse, and keep
+falling past 6400 — 6400 is where the *cost* starts: the final joint error on a
+clean cell goes 0.0002 -> 0.0005 rad at 6400 and 0.0002 -> 0.0012 at 12800,
+and 12800's worst cell is 0.0085. `dq_u` was swept with it and stays at 1024;
+512 and 2048 trade the two axes against each other and 4096 buys peak sway
+(0.129 -> 0.098) by moving the residual onto the tip (0.048 -> 0.080).
+
+### Live, and this is where it stops agreeing
+
+Three interleaved Gazebo pairs, `gazebo_wall_assembly_pzs100.launch.py` with
+`enable_livox_sim:=off gui:=False initial_pose:=2`, A2B to (6.06, 0.35, 2.0),
+no payload, `solver_health_decimation 1`; `on` is the shipped 6400, `off` the
+same tree with `q_u` patched to 0 in the *installed* yaml. Sway rate is the max
+|velocity| on each passive row over arrival+2..5 s.
+
+| run | load (1 min) | late tip/tilt | solve ms p50/p90/max | refused | over budget |
+| --- | --- | --- | --- | --- | --- |
+| on 1 | 3.14 | 0.028/0.045 | 19.1/23.4/55.6 | 0/465 | 0 |
+| off 1 | 9.98 | 0.028/0.038 | 17.2/20.7/72.4 | 0/475 | 1 |
+| on 2 | 11.49 | 0.029/0.025 | 14.1/18.2/36.7 | 0/466 | 0 |
+| off 2 | 11.18 | 0.033/0.034 | 14.8/18.7/44.2 | 0/472 | 0 |
+| on 3 | 10.96 | 0.037/0.043 | 13.5/16.1/34.5 | 0/480 | 0 |
+| off 3 | 7.55 | 0.040/0.037 | 13.6/16.4/40.1 | 0/474 | 0 |
+
+A second round, four more `on` runs after the centre's closed form replaced the
+affine one (no change for these bags — they carry no payload, where the two
+agree to 1e-12 — but the tree underneath had been rebuilt):
+
+| run | load (1 min) | late tip/tilt | solve ms p50/p90/max | refused | over budget |
+| --- | --- | --- | --- | --- | --- |
+| on 4 | 16.33 | **0.019/0.014** | 14.0/16.7/49.7 | 0/463 | 0 |
+| on 5 | 15.54 | 0.035/0.030 | 13.2/15.8/22.3 | 0/475 | 0 |
+| on 6 | 4.69 | 0.036/0.041 | 13.0/16.2/32.5 | 0/481 | 0 |
+| on 7 | 18.89 | 0.043/0.039 | 13.2/15.9/39.6 | 0/477 | 0 |
+| off 6 | 6.68 | 0.040/0.034 | 13.6/16.6/31.8 | 0/475 | 0 |
+
+**The weight does not separate live, and the target is not reached.** Over seven
+`on` runs the late rate spans 0.014–0.045 rad/s and exactly one of them — on 4,
+at the *highest* load of the set — lands under 0.02 on both rows. The spread
+between nominally identical runs is wider than any `on`/`off` difference, and it
+does not track load. So 0.02 rad/s is not met, and the sweep's offline ordering
+does not reproduce here.
+
+0.02 is nonetheless a measurable target, not a noise floor: both passive rows
+read exactly 0.000 rad/s over the whole pre-move window of every bag, so
+0.03–0.045 is real residual swing. What live does say is that 6400 **costs
+nothing** — solve p50/p90, `qp_capped` and the refused share all sit on 227's,
+0/3277 cycles refused across all seven runs, and the single over-budget cycle in
+thirteen runs is an `off` run.
+
+Why offline and live disagree is open, and these runs cannot close it. They
+differ in more than the weight: they start at `initial_pose:=2` because
+`crane_planning`'s concurrent branch refuses the pose 226 and 227 captured from,
+`crane_model` and `crane_planning` were themselves being edited on another
+branch in this checkout while rounds one and two ran (the same race put three
+`crashed: libacados...so: file too short` into the envelope table below), the
+box sat between load 3 and 19, and §5's warning that this harness is unvalidated
+against Gazebo has not been retired. The honest reading is that the structural
+change is right and measured, and the weight it unlocks is offline-only
+evidence.
+
+### The envelope, §6's gate re-run
+
+Same seven families, shipped against the one lever that moved:
+
+    ./scripts/trials/sweep_robust.py --latency 0.026 --payload-mass 800 \
+        --samples 0 --jobs 7 --by-plant --lever weights.q_u=0.0 --band <family>=<values>
+
+**New 0/102, old 0/102** — no cell fails at either setting, so the envelope is
+unchanged and §3's and §5's conclusions about which mismatch is survivable
+stand. (`tau_v_offset` logged 3/9 `crashed:` on the shipped column, all three
+`t_renderer`/`libacados_ocp_solver...so: file too short` — `crane_planning`'s
+OCP cache being regenerated under the run by a concurrent branch, not a control
+failure. The lever column, run minutes later, is clean on the same cells.)
+
+Two cells move enough to name, and they move opposite ways:
+
+- **Payload 80 kg is where the weight earns its keep.** `late` 0.118 -> 0.040,
+  final error 0.0214 -> 0.0064 rad. That is 190's original failure — the tree
+  declaring 800 kg over an 80 kg block — and it is the most mismatched cell the
+  weight helps rather than hurts.
+- **An off-axis *plant* CoM is where it costs.** COM +0.5 m: `late` 0.111 ->
+  0.185, peak 0.247 -> 0.253, `grow/s` 6.10 -> 7.39. The centre is exact at both
+  settings here — the band moves the plant's CoM, never the OCP's — so this is
+  the weight pricing an offset the plant will not hold, and paying for it in the
+  one family §3 already called the least survivable. +0.25 m does not do it
+  (0.035 -> 0.041) and neither does an offset along z.
