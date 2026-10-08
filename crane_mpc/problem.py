@@ -286,6 +286,36 @@ def nominal_progress_rate(parameters: dict) -> float:
     return 1.0 / (shooting_intervals(parameters) * float(parameters["Ts"]))
 
 
+def state_scale(parameters: dict, scale: np.ndarray) -> np.ndarray:
+    """
+    Return `S`, one divisor per state row: the QP is posed in `x = S x_s`.
+
+    Only the C3 force rows get a factor, and it is `constraint_scale`'s own
+    per-axis cylinder-force maximum -- the same number constraint 6 divides by,
+    so the scaled force state *is* the force in units of its own allowance and
+    comes out at `|J_c,ii(q)|`, i.e. 0.1 to a few. Unscaled it is 1e4-2e5 N m
+    beside angles of 1e-2 rad.
+
+    Everything else is already O(1): angles and the path parameter by
+    construction, velocities under a rad/s, the lagged command and C4's `c` in
+    Psi's domain. A row outside the force block therefore stays at one, and the
+    boxed prefix *must*: `state_bounds`, `position_box` and `_slack_taken` all
+    read that block in physical units, and the slack a softened box row takes is
+    reported in them.
+    """
+    factor = np.ones(cs.NX_COMMAND if command_state(parameters) else cs.NX)
+    factor[cs.X_ACTUATED_FORCE : cs.X_ACTUATED_FORCE + cs.K_PLANNED_DOF] = scale[
+        : cs.K_PLANNED_DOF
+    ]
+    boxed = boxed_state_rows(parameters)
+    if not np.all(factor[boxed] == 1.0):
+        raise ValueError(
+            "a boxed state row carries a scale factor; every consumer of the "
+            "boxed prefix -- bounds, slack, dumps -- reads it in physical units"
+        )
+    return factor
+
+
 def constraint_scale(model: cs.CraneSymbolicModel, hydraulics: dict) -> tuple:
     """
     Return `(scale, extend, retract)`: each `h` row's divisor and what set it.
@@ -393,14 +423,12 @@ def build_ocp(description_xml: str, parameters: dict, hydraulics: dict) -> tuple
 
     acados_model = AcadosModel()
     acados_model.name = f"{SOLVER_PREFIX}_{TOOL}"
+    # Physical for now; the scaling block below rewrites `x` and every
+    # expression that reads it into the QP's own coordinates.
     acados_model.x = x
     acados_model.u = u
     acados_model.p = parameter_vector
     acados_model.f_expl_expr = xdot
-    # IRK reads `f_impl_expr` (errors if empty), ERK reads `f_expl_expr`; both
-    # set so the integrator stays a solver option, not a re-model.
-    acados_model.xdot = ca.SX.sym("xdot", x.shape[0])
-    acados_model.f_impl_expr = acados_model.xdot - xdot
 
     # --- the cost, as a nonlinear least-squares residual -----------------------
     #
@@ -481,6 +509,65 @@ def build_ocp(description_xml: str, parameters: dict, hydraulics: dict) -> tuple
     acados_model.con_h_expr = constraint
     # Terminal stage has no input, so `tau_a` is undefined and neither
     # nonlinear row exists there.
+
+    # --- the QP's own coordinates: `x = S x_s` ---------------------------------
+    #
+    # Every expression above is physical, and stays written that way; what the
+    # solver is handed is the same problem in a scaled state. Nothing else
+    # changes -- a diagonal change of variables leaves the optimum, the
+    # objective, the weights and every bound where they were, and moves only the
+    # QP's conditioning.
+    #
+    # Why: the force rows are 1e4-2e5 N m beside angles of 1e-2 rad, so they
+    # carried the largest numbers in the QP in both the Hessian and the
+    # initial-state bound -- the stage-0 bound gap maxed out on them at
+    # 116-3197 N m (0.03 rad/s of `dq_a` noise through C3's `k`) where the
+    # velocity rows were at 0.03, and stage 0 carries no slack. Divided
+    # through, that gap is 0.001-0.09, like every other block.
+    #
+    # What it bought, measured: `weights.dq_u` stops breaking the solve -- 2048
+    # refused 29 % of cycles unscaled and 0 % scaled, up to 65536 (issue 223's
+    # "raising one weight should not break a well-scaled QP"). What it did
+    # *not* buy: the live refusals. Those were the preparation/feedback split
+    # and the position box, not the conditioning -- see `solver.Ocp.solve`.
+    #
+    # One trap, and it is the whole of why `weights.tau_a` moved: a scalar
+    # `levenberg_marquardt` is **not** invariant under this. Unscaled its 1e-6
+    # was 100x the force rows' own curvature (`w_tau` = 1e-8, and the residual
+    # row *is* `tau_a`), so it damped every step in those directions to a
+    # hundredth; scaled, the curvature is `w_tau * S^2` -- 13 on the rotator,
+    # 1e5 on luffing -- and the damping is gone. `weights.tau_a` buys that
+    # resistance back as cost, which is a retune and says so in the yaml.
+    #
+    # acados' own `qpscaling_*` cannot do any of this: it raises
+    # `NotImplementedError` under `SQP_RTI` (`acados_ocp.py:1301`).
+    #
+    # `solver.py` converts at every boundary it writes or reads a state, so
+    # nothing outside it -- bounds, tick dumps, `replay_tick.py` -- ever sees a
+    # scaled state.
+    x_scale = state_scale(parameters, scale)
+    divisor = ca.DM(x_scale)
+    x_qp = ca.SX.sym("x_qp", x.shape[0])
+    for field in (
+        "f_expl_expr",
+        "cost_y_expr_0",
+        "cost_y_expr",
+        "cost_y_expr_e",
+        "con_h_expr_0",
+        "con_h_expr",
+    ):
+        setattr(
+            acados_model,
+            field,
+            ca.substitute(getattr(acados_model, field), x, divisor * x_qp),
+        )
+    acados_model.x = x_qp
+    # The chain rule on the rate: `d(x/S)/dt`, one divisor per row.
+    acados_model.f_expl_expr = acados_model.f_expl_expr / divisor
+    # IRK reads `f_impl_expr` (errors if empty), ERK reads `f_expl_expr`; both
+    # set so the integrator stays a solver option, not a re-model.
+    acados_model.xdot = ca.SX.sym("xdot", x_qp.shape[0])
+    acados_model.f_impl_expr = acados_model.xdot - acados_model.f_expl_expr
 
     ocp = AcadosOcp()
     ocp.model = acados_model

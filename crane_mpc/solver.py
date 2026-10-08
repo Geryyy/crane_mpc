@@ -5,6 +5,12 @@ The binding around acados' unchanged artifact: what is written before a solve,
 read back after, plus the dead-time predictor and static hold force. State is the
 OCP's own rows end to end -- a truncation that drops the actuator rows coasts the
 predictor at a frozen force (issue 125).
+
+Every state crossing this binding is **physical** (N m, rad, rad/s). The
+compiled problem is posed in a scaled one (`problem.state_scale`), and
+`Ocp._to_qp`/`_to_physical` are the only conversion: nothing above this module
+or beside it -- bounds, tick dumps, `replay_tick.py`, the predictor's callers --
+sees a scaled row.
 """
 
 from __future__ import annotations
@@ -95,11 +101,6 @@ class Solution:
     violation: Violation
     progress_advance: float
     warm_started: bool
-    #: Seconds the preparation phase cost, or zero when the cycle was solved
-    #: whole. Not counted in `solve_time_s`, which is what the budget is about:
-    #: under the split only the feedback phase sits between the measurement and
-    #: the command, and the preparation ran before the measurement existed.
-    preparation_time_s: float = 0.0
 
     @property
     def u0(self) -> np.ndarray:
@@ -489,6 +490,13 @@ def export_key(parameters: dict, hydraulics: dict, description_xml: str) -> dict
         "problem.py": _file_digest(problem.__file__),
         "symbolic.py": _file_digest(cs.__file__),
         "actuator_fit": _file_digest(cs.default_actuator_path()),
+        # The whole file, not the three numbers `hydraulics` carries: the
+        # chamber areas, `r_gear` and `V_m` live in it too, and since issue 226
+        # they set `problem.state_scale` -- the **units of the force state
+        # across this binding**. An area edited without a re-export would leave
+        # the compiled code reading `S_old x_qp` while `Ocp._x_scale` writes
+        # `tau/S_new`, and nothing else in the package reads `tau_a` to notice.
+        "hydraulics.yaml": _file_digest(cs.default_hydraulics_path()),
     }
 
 
@@ -567,6 +575,12 @@ class Ocp:
         #: C4: `c` rides at the end of `x` and the joint inputs are its rate.
         self.command_state = problem.command_state(parameters)
         self.nx = int(self.model.x.shape[0])
+        #: `x = S x_s`: the compiled problem is posed in a scaled state
+        #: (`problem.state_scale`). Everything in this class and everything
+        #: outside it -- bounds, dumps, the predictor's callers -- is physical;
+        #: `_to_qp`/`_to_physical` convert at the four places a state is written
+        #: to or read off acados.
+        self._x_scale = problem.state_scale(parameters, self.scale)
         self._boxed = problem.boxed_state_rows(parameters)
         self._ny = problem.residual_rows(parameters)
         self._command_max = np.asarray(
@@ -582,7 +596,9 @@ class Ocp:
         )
         self._check_dimensions()
 
-        # Residual outside the solver: acados reports one cost, this splits tracking/sway/effort.
+        # Residual outside the solver: acados reports one cost, this splits
+        # tracking/sway/effort. Posed on the *scaled* state, like the generated
+        # code -- `cost_terms` divides before it calls either.
         model = self._ocp.model
         self._residual = ca.Function(
             "y", [model.x, model.u, model.p], [model.cost_y_expr]
@@ -644,19 +660,7 @@ class Ocp:
         self._last_parameter: np.ndarray | None = None
         self._last_path: PathCycle | None = None
         #: What the last written problem was built from, for `last_problem`.
-        #: Here and not in `Cycle` because both phases pass through
-        #: `_write_problem`, and a cycle taking `feedback` had its problem
-        #: written one cycle and one predicted state earlier.
         self._written: dict = {}
-
-        #: Whether the preparation/feedback split is reachable at all. acados
-        #: refuses `rti_phase` outside `SQP_RTI`, so a swept `nlp_solver_type`
-        #: leaves every cycle on the combined `solve`.
-        self.split_rti = problem.solver_tuning()["nlp_solver_type"] == "SQP_RTI"
-        #: Whether a `prepare` is standing that `feedback` may consume.
-        self._prepared = False
-        self._prepared_warm = False
-        self._preparation_time = 0.0
 
     # -- what the problem is, checked against what was compiled -----------------
 
@@ -696,6 +700,16 @@ class Ocp:
         return configure_fixed_data(
             self.solver, self._chamber, self.scale, self.parameters, self.hydraulics
         )
+
+    # -- physical state <-> the QP's own coordinates -----------------------------
+
+    def _to_qp(self, x: np.ndarray) -> np.ndarray:
+        """Convert a physical state, or a stack of them, to what the solver holds."""
+        return np.asarray(x, dtype=float) / self._x_scale
+
+    def _to_physical(self, x: np.ndarray) -> np.ndarray:
+        """Convert what the solver holds back to N m and rad."""
+        return np.asarray(x, dtype=float) * self._x_scale
 
     # -- the model, asked the two questions the solver does not answer ----------
 
@@ -743,14 +757,14 @@ class Ocp:
 
     def _integrate(self, predictor, x: np.ndarray, u: np.ndarray) -> np.ndarray:
         predictor.set("p", self._model_parameter())
-        predictor.set("x", x)
+        predictor.set("x", self._to_qp(x))
         predictor.set("u", u)
         status = predictor.solve()
         if status != 0:
             raise RuntimeError(
                 f"the dead-time predictor answered {status_word(status)}"
             )
-        predicted = predictor.get("x")
+        predicted = self._to_physical(predictor.get("x"))
         # acados can report success with a NaN state.
         if not np.all(np.isfinite(predicted)):
             raise RuntimeError(
@@ -813,12 +827,12 @@ class Ocp:
         parameter = self._model_parameter()
         for stage in range(self.intervals):
             self._stepper.set("p", parameter)
-            self._stepper.set("x", states[stage])
+            self._stepper.set("x", self._to_qp(states[stage]))
             self._stepper.set("u", inputs[stage])
             if self._stepper.solve() != 0:
                 states[stage + 1 :] = x0
                 break
-            states[stage + 1] = self._stepper.get("x")
+            states[stage + 1] = self._to_physical(self._stepper.get("x"))
         return Guess(states, inputs)
 
     def carried(self, solution: Solution) -> Guess:
@@ -974,10 +988,9 @@ class Ocp:
         """
         Write everything the solve reads except the initial-state bound's own value.
 
-        Returns whether the cycle is warm. Split out of `solve` so `prepare` can
-        run it against a predicted state one cycle early. `in_flight`: the command
-        the JTC plays over [t, t+Ts), what stage 0's move cost prices against;
-        `None` leaves it out.
+        Returns whether the cycle is warm. `in_flight`: the command the JTC
+        plays over [t, t+Ts), what stage 0's move cost prices against; `None`
+        leaves it out.
 
         Boxes, references and the seed are built for the whole horizon at once and
         `p`/`x`/`u` go down flat: at N = 80 the per-stage Python cost 7 ms of the
@@ -1065,6 +1078,9 @@ class Ocp:
                 )
             self.solver.cost_set(0, "W", weight)
 
+        # These boxes go down unconverted, and that is an invariant and not an
+        # omission: `problem.state_scale` raises unless every boxed row stands
+        # at scale 1, so the box *is* in the QP's own coordinates already.
         self.solver.set_flat("p", np.tile(parameter, intervals + 1))
         for stage in range(intervals):
             self.solver.cost_set(stage, "yref", reference[stage])
@@ -1074,28 +1090,25 @@ class Ocp:
             intervals, "yref", reference[intervals, : problem.NY_TERMINAL]
         )
         # Initial condition: every row, actuator states included, pinned at x0.
-        self.solver.constraints_set(0, "lbx", x0)
-        self.solver.constraints_set(0, "ubx", x0)
+        self.solver.constraints_set(0, "lbx", self._to_qp(x0))
+        self.solver.constraints_set(0, "ubx", self._to_qp(x0))
 
         seed = guess if warm else self.cold_start(x0)
         states = seed.states.copy()
         states[0] = x0
         states[1:, self._boxed] = np.clip(states[1:, self._boxed], lower[1:], upper[1:])
         inputs = np.clip(seed.inputs, -self._u_max, self._u_max)
-        self.solver.set_flat("x", states.reshape(-1))
+        self.solver.set_flat("x", self._to_qp(states).reshape(-1))
         self.solver.set_flat("u", inputs.reshape(-1))
         # The iterate as written, not the caller's guess: a cold cycle rolled its
         # own and a warm one was clipped, so this is the only seed a replay can
         # hand back and get the same QP.
         self._written = {
-            # Two readings of one state here, and they come apart under the
-            # split: `x0` is the point this problem is linearised about, `bound`
-            # the initial-state constraint. `feedback` moves the second alone,
-            # which is the whole of the initial value embedding -- a replay that
-            # linearises about the bound solves another QP.
+            # One state: the point this problem is linearised about *and* the
+            # initial-state bound. The two were separate fields while the
+            # preparation/feedback split existed, which is what let them differ
+            # (issue 226 removed it).
             "x0": x0,
-            "bound": x0,
-            "split": False,
             "q_eq": np.asarray(q_eq, dtype=float),
             "path": path,
             "guess": Guess(states, inputs),
@@ -1108,10 +1121,8 @@ class Ocp:
         }
         return warm
 
-    def _read_solution(
-        self, status: int, solve_time: float, warm: bool, preparation_time: float
-    ) -> Solution:
-        """Read back what the solver answered, whichever phases produced it."""
+    def _read_solution(self, status: int, solve_time: float, warm: bool) -> Solution:
+        """Read back what the solver answered."""
         intervals = self.intervals
         qp_status = _last(self.solver.get_stats("qp_stat"))
         qp_iterations = _last(self.solver.get_stats("qp_iter"))
@@ -1119,7 +1130,9 @@ class Ocp:
 
         # One call per field rather than one per stage: 161 crossings into acados
         # sat between the solve and the publish (issue 187).
-        states = self.solver.get_flat("x").reshape(intervals + 1, self.nx)
+        states = self._to_physical(
+            self.solver.get_flat("x").reshape(intervals + 1, self.nx)
+        )
         inputs = self.solver.get_flat("u").reshape(intervals, cs.NU_PROGRESS)
 
         violation, penalty, used_slack = self._slack_taken()
@@ -1159,19 +1172,9 @@ class Ocp:
             violation=violation,
             progress_advance=advance,
             warm_started=warm,
-            preparation_time_s=preparation_time,
         )
 
-    # -- the three ways to spend a cycle -----------------------------------------
-
-    def _set_phase(self, phase: int) -> None:
-        """
-        Select PREPARATION_AND_FEEDBACK (0), PREPARATION (1) or FEEDBACK (2).
-
-        acados refuses the option outside `SQP_RTI`, so a swept `nlp_solver_type`
-        keeps the combined path and never reaches here with a split phase.
-        """
-        self.solver.options_set("rti_phase", int(phase))
+    # -- one cycle, solved whole -------------------------------------------------
 
     def _resolved_path(self, horizon, path: PathCycle | None) -> PathCycle:
         """
@@ -1203,82 +1206,29 @@ class Ocp:
         in_flight=None,
     ) -> Solution:
         """
-        One whole RTI step, linearisation and QP together.
+        One whole RTI step, linearisation and QP together, every cycle.
 
-        The path taken when nothing was prepared for this cycle: the first one,
-        one after a failure, or one whose problem moved under the preparation.
+        **The preparation/feedback split is gone** (issue 226). It cost nothing
+        offline and bought 4.7 ms of measurement-to-command latency, but live it
+        refused 24-28 % of cycles, every one of them a feedback phase. Replaying
+        the 45 dumped ticks said why, and it is not conditioning: with the bound
+        left at the preparation's own linearisation point the feedback phase
+        converges on exactly the ticks a whole solve converges on (19/45, tick
+        for tick); with the measured bound it converges on none. Moving the
+        bound alone is what fails, and `q_a` alone reproduces it -- the machine
+        sits outside the control-safe position box (see `position_box`), so that
+        box is pinned to the *predicted* position and a measurement a
+        thousandth of a radian further out leaves stage 1 unreachable.
+        Falling back to a whole solve in the same cycle recovers 20 of the 21
+        but costs 16 ms p50 and 59 ms max against a 60 ms budget, before live
+        contention; solving whole costs 6.8 ms p50 (issue 223) and recovers 21.
         """
         cycle = self._resolved_path(horizon, path)
         x0 = self._checked_x0(x0, horizon, q_eq, cycle)
-        # A preparation this call overwrites is gone, and must not be consumable
-        # by a later `feedback`.
-        self._prepared = False
         warm = self._write_problem(x0, cycle, q_eq, guess, in_flight)
-        if self.split_rti:
-            self._set_phase(0)
         status = int(self.solver.solve())
         return self._read_solution(
-            status, float(self.solver.get_stats("time_tot")), warm, 0.0
-        )
-
-    def prepare(
-        self,
-        x0: np.ndarray,
-        horizon,
-        q_eq: np.ndarray,
-        guess: Guess | None = None,
-        path: PathCycle | None = None,
-        in_flight=None,
-    ) -> float:
-        """
-        Everything but the QP, against a **predicted** state, one cycle early.
-
-        `x0` is where the machine is expected to be when the next cycle's plan
-        takes effect, not where it is now: the whole point is that this runs
-        before that cycle's measurement exists. Returns the seconds it cost,
-        which are not on the measurement-to-command path.
-        """
-        cycle = self._resolved_path(horizon, path)
-        x0 = self._checked_x0(x0, horizon, q_eq, cycle)
-        self._prepared_warm = self._write_problem(x0, cycle, q_eq, guess, in_flight)
-        self._set_phase(1)
-        self.solver.solve()
-        self._prepared = True
-        self._preparation_time = float(self.solver.get_stats("time_tot"))
-        return self._preparation_time
-
-    def feedback(self, x0: np.ndarray) -> Solution:
-        """
-        Solve the QP alone, against the measured state, on the last `prepare`.
-
-        Only the initial-state bound moves between the two phases -- that is the
-        initial value embedding, and it is the whole of what the measurement is
-        allowed to change once the linearisation is standing.
-        """
-        if not self._prepared:
-            raise RuntimeError(
-                "the feedback phase was asked for without a preparation to stand "
-                "on; a cycle whose preparation was invalidated takes `solve`"
-            )
-        self._prepared = False
-        # The preparation's own path: only the initial-state bound may move here.
-        x0 = self._origined_x0(x0, self._last_path)
-        # The bound only. Writing `x` here as well would move the point the
-        # preparation linearised about, and the QP step -- already computed to
-        # travel from that point to this bound -- would land on top of it: a
-        # measurement 0.05 off the prediction came back as 0.1.
-        self.solver.constraints_set(0, "lbx", x0)
-        self.solver.constraints_set(0, "ubx", x0)
-        # The one thing this phase moves. `x0` is left as the preparation wrote
-        # it, so a dump of this tick carries both and a replay can repeat the
-        # pair of calls instead of collapsing them onto one state.
-        self._written["bound"] = x0
-        self._written["split"] = True
-        self._set_phase(2)
-        status = int(self.solver.solve())
-        feedback_time = float(self.solver.get_stats("time_tot"))
-        return self._read_solution(
-            status, feedback_time, self._prepared_warm, self._preparation_time
+            status, float(self.solver.get_stats("time_tot")), warm
         )
 
     def last_problem(self) -> dict:
@@ -1291,20 +1241,7 @@ class Ocp:
         residuals are recomputed because `SQP_RTI` keeps none -- all four come
         back zero otherwise -- and `res_stat` alone separates a NaN that arrived
         in the data from one the linearisation produced.
-
-        It relinearises, so it may not run on top of a standing preparation:
-        the next `feedback` would then apply a QP step computed about a point
-        the solver no longer holds, which is unannounced motion. Today a
-        non-zero `qp_status` is always `FAILED` and `Cycle.prepare_next`
-        early-returns on that, so the guard never fires -- it is here so that
-        widening the dump's trigger raises instead of bumping the boom.
         """
-        if self._prepared:
-            raise RuntimeError(
-                "the last problem cannot be read back while a preparation stands: "
-                "recomputing the residuals relinearises, and the feedback phase "
-                "would then step from a point the solver no longer holds"
-            )
         return dict(
             self._written,
             p=self.solver.get_flat("p").reshape(self.intervals + 1, problem.NP),
@@ -1373,7 +1310,9 @@ class Ocp:
             )
             if terminal:
                 value = np.asarray(
-                    self._terminal_residual(solution.states[stage], parameter)
+                    self._terminal_residual(
+                        self._to_qp(solution.states[stage]), parameter
+                    )
                 ).reshape(-1)
                 terms.terminal += float(
                     0.5 * terminal_diagonal @ (value - reference) ** 2
@@ -1381,7 +1320,9 @@ class Ocp:
                 continue
             value = np.asarray(
                 self._residual(
-                    solution.states[stage], solution.inputs[stage], parameter
+                    self._to_qp(solution.states[stage]),
+                    solution.inputs[stage],
+                    parameter,
                 )
             ).reshape(-1)
             weight = diagonal

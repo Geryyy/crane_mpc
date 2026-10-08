@@ -29,6 +29,14 @@ crane_mpc:
     # only -- symbolic.py carries no delay, so a second one double-counts.
     sensor_to_valve_delay: 0.06
     max_state_age: 0.2
+    # A fixed constant added to every Hessian **diagonal** -- it damps the
+    # Newton step, it does not move the minimiser. It is the entirety of the
+    # regularisation on the four command-lag rows, which appear in no residual
+    # and so have no Gauss-Newton curvature of their own. On the unscaled
+    # problem it was also 100x the force rows' curvature, so it damped those to
+    # a hundredth and the single RTI step barely moved them; issue 226's state
+    # scaling lifted that curvature past it (13 on the rotator, 1e5 on luffing)
+    # and `weights.tau_a` had to move with it. Not swept.
     levenberg_marquardt: 1.0e-6
     # C4: command a state, `u` its rate. `du: 10` and false is C3.
     command_state: true
@@ -81,7 +89,25 @@ crane_mpc:
       # tilt 0.056, tip 0.033, peak sway 0.163 -> 0.131 rad. Not the 0.02 rad/s
       # the PID JTC reaches; no weight in the sweep got there.
       dq_u: [1024.0, 1024.0]
-      tau_a: [1.0e-8, 1.0e-8, 1.0e-8, 1.0e-8, 1.0e-8, 1.0e-8]
+      # 1e-6 from 1e-8 (issue 226), and this **is** a 100x retune of the effort
+      # cost, not a restatement: `levenberg_marquardt` damps a Newton step, it
+      # does not move a minimiser. What it was doing is still why the number
+      # moved. The force residual row *is* the state (`symbolic.py` puts
+      # `x[X_ACTUATED_FORCE:]` in the residual unmodified), so unscaled its
+      # Gauss-Newton curvature was this weight, 1e-8, and the regulariser's
+      # 1e-6 on the same diagonal damped every step in that direction to a
+      # hundredth -- the single RTI step hardly moved the force states. Scaling
+      # the force state lifted the curvature past the regulariser (13 on the
+      # rotator, 1e5 on luffing) and the damping went with it, which is a
+      # change nobody asked for; 1e-6 buys the resistance back as cost.
+      # Measured, `wire_chain` on this A2B move (latency 26 ms, empty, MuJoCo
+      # and so **not** the machine): against the unscaled problem, final error
+      # 0.0015 -> 0.0001 rad, peak tip sway 0.024 -> 0.018, late tip rate
+      # 0.032 -> 0.027, QP iterations unmoved; leaving it at 1e-8 instead costs
+      # 0.0200 rad of final error and 0.125 rad/s of late tip sway. Not swept
+      # under load against droop, and `yref`'s force reference is `h_eff(x0)`
+      # frozen for the whole 3.54 s horizon -- see the issue notes.
+      tau_a: [1.0e-6, 1.0e-6, 1.0e-6, 1.0e-6, 1.0e-6, 1.0e-6]
       u: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
       # C4's rate cost: 0.1 kicks, 3 is no better.
       du: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]

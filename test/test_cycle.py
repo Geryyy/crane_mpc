@@ -388,39 +388,6 @@ def test_a_silence_keeps_the_count_and_drops_the_wall_clock_mark():
     assert one.progress_stalled
 
 
-# -- the preparation, and everything that must invalidate it -------------------
-#
-# A preparation is last cycle's linearisation of this cycle's problem. Standing
-# on a stale one is silent: the solve returns 0 and the plan is optimal for a
-# problem the machine is not in. These check that every way the problem can move
-# puts the cycle back on the whole solve.
-
-
-def prepared_cycle():
-    one = cycle()
-    one.prepared = True
-    one.prepared_horizon = one.horizon.copy()
-    return one
-
-
-def test_a_preparation_stands_only_for_the_plan_it_was_taken_on():
-    one = prepared_cycle()
-    assert one.preparation_still_applies()
-
-    # A resample the cadence moved: same reference, different knots.
-    one.horizon = one.horizon.copy()
-    one.horizon.q_a_ref[2, 0] += 1e-6
-    assert not one.preparation_still_applies()
-
-
-def test_a_new_reference_drops_the_preparation():
-    """`adopt_reference` does not call `forget_plan` -- the warm start survives
-    a re-plan -- so the preparation has to be dropped on its own."""
-    one = prepared_cycle()
-    one.adopt_reference(hz.Knots.zeros(KNOTS), 0)
-    assert not one.prepared
-
-
 @pytest.mark.parametrize(
     "break_it",
     [
@@ -431,87 +398,14 @@ def test_a_new_reference_drops_the_preparation():
     ],
 )
 def test_every_break_in_the_output_stream_is_a_reactivation(break_it):
-    one = prepared_cycle()
+    one = cycle()
     # A cycle that has already seeded, so re-arming below means something.
     one.seed_force = False
     break_it(one)
-    assert not one.prepared
-    assert one.prepared_horizon is None
     # The force row comes back from the measurement, not from before the break:
     # after the escalation the arm claim is released, so the pose it held may
     # not be the pose it comes back to.
     assert one.seed_force
-
-
-class StubOcp:
-    """Records whether `prepare_next` got as far as linearising anything."""
-
-    split_rti = True
-    suppresses_moves = True
-
-    def __init__(self):
-        self.prepared_with = []
-        self.in_flight = None
-
-    def prepare(self, x0, horizon, q_eq, guess, path=None, in_flight=None):
-        self.prepared_with.append((x0, horizon, q_eq, guess, path))
-        self.in_flight = in_flight
-        return 0.001
-
-
-def preparable_cycle():
-    """A cycle with everything `prepare_next` needs, so a refusal means something."""
-    one = cycle()
-    one.ocp = StubOcp()
-    one.guess = object()
-    one.reference = hz.Knots.zeros(KNOTS)
-    one.reference.t[:] = np.linspace(0.0, Ts * (KNOTS - 1), KNOTS)
-    one.reference_anchored = True
-    one.reference_progress = 0.0
-    return one
-
-
-def test_a_prepared_cycle_linearises_about_the_state_it_predicts():
-    one = preparable_cycle()
-    answer = solution(Outcome.CONVERGED)
-    one.prepare_next(answer)
-
-    assert one.prepared
-    x0, _, _, _, _ = one.ocp.prepared_with[0]
-    # states[1], the optimizer's own one step ahead -- not the state this cycle
-    # measured, and not a second integration.
-    assert np.array_equal(x0, answer.states[1])
-
-
-def test_a_preparation_prices_the_command_that_will_be_in_flight():
-    """Issue 121: the move cost is written a cycle early, so it has to stand on
-    what the next `propagate` puts in flight -- this cycle's `u0` -- and fall
-    when something else went out instead (shadow's follower)."""
-    one = preparable_cycle()
-    one.last_input = np.arange(cs.NU_PROGRESS, dtype=float)  # what `advance` left
-    one.prepare_next(solution(Outcome.CONVERGED))
-    assert np.array_equal(one.ocp.in_flight, one.last_input)
-
-    one.horizon = one.prepared_horizon.copy()
-    one.applied_inputs = [one.last_input.copy()]
-    assert one.preparation_still_applies()
-    one.applied_inputs = [one.last_input + 0.1]
-    assert not one.preparation_still_applies()
-
-
-def test_a_failed_solve_prepares_nothing_for_the_next_cycle():
-    one = preparable_cycle()
-    one.prepare_next(solution(Outcome.FAILED))
-    assert not one.prepared
-    assert one.ocp.prepared_with == []
-
-
-def test_without_a_warm_start_there_is_nothing_to_prepare_from():
-    one = preparable_cycle()
-    one.guess = None
-    one.prepare_next(solution(Outcome.CONVERGED))
-    assert not one.prepared
-    assert one.ocp.prepared_with == []
 
 
 def test_the_progress_the_solver_bought_is_read_as_a_path_parameter():
@@ -817,7 +711,6 @@ ORDER = (
     "ladder",
     "publish",
     "advance",
-    "prepare_next",
 )
 
 
@@ -842,7 +735,6 @@ def test_step_runs_the_one_order_both_callers_used_to_copy():
         "solve": (answer, ""),
         "ladder": Verdict("published", published=True),
         "advance": None,
-        "prepare_next": None,
     }
     for name, value in returns.items():
         setattr(one, name, lambda *_, n=name, v=value, **__: (said.append(n), v)[1])

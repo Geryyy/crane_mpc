@@ -758,7 +758,28 @@ falls to 0 % and the solve maximum halves. Both are in `SOLVER_TUNING`.
 `qpscaling_scale_constraints` / `qpscaling_scale_objective` are the knobs this
 problem most obviously wants — its QP rows run from radians to the C3 force
 state's 10^4-10^5 N — and **acados raises `NotImplementedError` for both under
-`SQP_RTI`**. Scaling the force rows has to happen in `problem.py` or not at all.
+`SQP_RTI`**. So issue 226 scales the state in `problem.py` instead: the OCP is
+posed in `x = S x_s` with `S` the force rows' own per-axis maximum
+(`problem.state_scale`, the same divisor constraint 6 uses), and `solver.py`
+converts at every boundary, so nothing outside it sees a scaled state. The
+weights, the bounds and the optimum do not move — a diagonal change of
+variables — only the conditioning: `sqrt(w) dy/dx` on the force rows goes from
+10^-4 to 10-40, beside the tracking rows' 6-32.
+
+### The preparation/feedback split is gone
+
+Issue 226 removed it. Offline it was free and bought 4.7 ms of
+measurement-to-command latency; live it refused 24-28 % of cycles, every one of
+them a feedback phase (issue 223 §2). Replaying the 45 dumped ticks: with the
+initial-state bound left at the preparation's own linearisation point, the
+feedback phase converges on exactly the ticks a whole solve converges on
+(19/45, tick for tick); with the measured bound it converges on none, and
+moving the `q_a` rows of the bound alone reproduces that. The machine sits
+0.24-0.41 rad outside the arm's control-safe position box on every one of those
+ticks, `position_box` therefore pins the hard box to the *predicted* position,
+and a measurement a thousandth of a radian further out leaves stage 1
+unreachable. A whole solve re-poses that box around the measurement and does
+not have the problem.
 
 Two measurement rules this left behind:
 

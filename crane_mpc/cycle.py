@@ -395,13 +395,6 @@ class Cycle:
         #: Measurement-to-solved seconds of the last solve, `None` if unmeasured.
         self.latency_s: float | None = None
         self.guess = None
-        #: A preparation standing for this cycle, and the resampled reference it
-        #: was linearised about. The horizon is what gets re-checked: it is the
-        #: only thing the preparation bakes that a new plan, a re-anchored
-        #: cadence or a slipped clock can move underneath it.
-        self.prepared = False
-        self.prepared_horizon: hz.Knots | None = None
-        self.prepared_in_flight: np.ndarray | None = None
         self.measured: np.ndarray | None = None
         self.x0: np.ndarray | None = None
         self.q_eq = np.zeros(PASSIVE_DOF)
@@ -454,10 +447,6 @@ class Cycle:
         self.path_origin = 0.0
         # Stall watch is per plan: a new reference is the re-plan a stall asks for.
         self.forget_stall()
-        # A preparation is a linearisation of the plan that was; this is another
-        # plan. `forget_plan` is not called here -- the warm start survives a
-        # re-plan -- so the preparation has to be dropped on its own.
-        self.forget_preparation()
 
     def adopt_path(self, control: np.ndarray, duration: float, stamp_ns: int) -> None:
         """
@@ -477,9 +466,6 @@ class Cycle:
             # leaving them apart is the truncation the anchor above describes.
             self.reference_progress = 0.0
             self.path_origin = 0.0
-        # A standing preparation was linearised about whichever path last cycle
-        # resolved; this may be the cycle that stops being the window fit.
-        self.forget_preparation()
 
     def adopt_mode(self, requested: str) -> str:
         """Move to `requested` and cold start. Returns the mode left behind."""
@@ -520,7 +506,7 @@ class Cycle:
         Run the whole cycle, in the one order it may be run in.
 
         Gates, state, follower, the dead-time roll, the solve, the ladder,
-        `publish()`, then `advance` and the next cycle's preparation. Every
+        `publish()`, then `advance`. Every
         caller runs this rather than copying the order: the copy in
         `wire_chain` had already drifted -- its own `jtc_output` rule and no
         `adopt_follower` at all.
@@ -572,10 +558,6 @@ class Cycle:
         if publish is not None:
             publish()
         self.advance(solution, now_ns, bounds.min_progress_rate, bounds.max_stall_time)
-        # After `advance`, which moves the progress and the cadence anchor the next
-        # cycle resamples on; and after the horizon went out, so the linearisation
-        # runs in the part of the cycle nobody is waiting on.
-        self.prepare_next(solution)
         self.write_failing_tick(solution, failing)
         return done
 
@@ -834,25 +816,19 @@ class Cycle:
 
         A refusal has already stopped the publisher; the caller only reports it.
 
-        Takes the feedback phase alone when last cycle prepared this one on the
-        same plan; otherwise the whole solve, which is what every cycle did
-        before the split existed.
+        One whole solve, every cycle: the preparation/feedback split refused
+        24-28 % of live cycles and `Ocp.solve` says why it is gone (issue 226).
         """
-        on_preparation = self.prepared and self.preparation_still_applies()
-        self.forget_preparation()
         try:
-            if on_preparation:
-                solution = self.ocp.feedback(self.x0)
-            else:
-                solution = self.ocp.solve(
-                    self.x0,
-                    self.horizon,
-                    self.q_eq,
-                    self.guess,
-                    path=self.path,
-                    # C4 prices `dc` on every stage; no stage-0 move cost.
-                    in_flight=None if self.command_state else self.applied_inputs[0],
-                )
+            solution = self.ocp.solve(
+                self.x0,
+                self.horizon,
+                self.q_eq,
+                self.guess,
+                path=self.path,
+                # C4 prices `dc` on every stage; no stage-0 move cost.
+                in_flight=None if self.command_state else self.applied_inputs[0],
+            )
         except Exception as error:
             self.applied_previous = False
             self.consecutive_failures += 1
@@ -901,87 +877,12 @@ class Cycle:
             self.failing_ticks.write(dump.tick(self, solution, reference))
         except Exception as refusal:
             # A diagnostic may not take the timer callback down with it -- but it
-            # may not fail silently either: `Ocp.last_problem` refuses on top of
-            # a standing preparation, so widening the trigger to a status
-            # `prepare_next` does not early-return on lands here, and a `pass`
-            # would turn that into a dump that writes nothing for a whole run.
-            # Spends the budget, so one escalation cannot repeat the log line.
+            # may not fail silently either: a `pass` would turn one unreadable
+            # problem into a dump that writes nothing for a whole run. Spends
+            # the budget, so one escalation cannot repeat the log line.
             self.failing_ticks.refuse(
                 f"the failing tick could not be read back: {refusal}"
             )
-
-    def preparation_still_applies(self) -> bool:
-        """
-        Whether the plan the preparation linearised is the plan this cycle has.
-
-        The reference is compared, not the state: the preparation is *meant* to
-        stand on a predicted state, and the feedback phase carries the measured
-        one in through the initial-state bound. What it may not do is answer on
-        another plan -- a re-plan, a re-anchored cadence or a slipped clock all
-        move the resampled knots, and any of them makes the linearisation wrong
-        rather than merely stale.
-        """
-        if self.prepared_horizon is None or self.horizon is None:
-            return False
-        # Stage 0's move cost stands on the preparer's in-flight command; in
-        # shadow the follower's replaces it.
-        if self.prepared_in_flight is not None and not np.array_equal(
-            self.prepared_in_flight, self.applied_inputs[0]
-        ):
-            return False
-        return all(
-            np.array_equal(
-                getattr(self.prepared_horizon, block), getattr(self.horizon, block)
-            )
-            for block in ("t", "q_a_ref", "dq_a_ref")
-        )
-
-    def prepare_next(self, solution) -> None:
-        """
-        Linearise the next cycle now, about the state this one predicts for it.
-
-        `states[1]` is that prediction already: the optimizer's own one step
-        ahead, on the plan that is about to go out, so no second integration is
-        needed. Runs after `advance`, which is what moves `reference_progress`
-        and the cadence anchor to where the next cycle will resample them.
-
-        Best effort throughout -- anything unexpected leaves no preparation, and
-        the next cycle solves whole.
-        """
-        if self.ocp is None or not getattr(self.ocp, "split_rti", False):
-            return
-        if solution.outcome is Outcome.FAILED or self.guess is None:
-            return
-        if self.reference is None or not self.reference_anchored:
-            return
-        rejection, horizon = hz.resample(
-            self.reference, self.reference_progress, self.grid
-        )
-        if rejection is not None:
-            return
-        predicted = solution.states[1]
-        q_eq = predicted[cs.X_PASSIVE_POSITION : cs.X_PASSIVE_POSITION + PASSIVE_DOF]
-        try:
-            # `advance` has already moved `path_origin` on, so this resolves the
-            # path as the *next* cycle will -- otherwise the preparation would
-            # stand on a path one interval behind the feedback phase's.
-            # `advance` set `last_input` to what `propagate` will put in flight
-            # next cycle.
-            self.ocp.prepare(
-                predicted,
-                horizon,
-                q_eq,
-                self.guess,
-                path=self.resolved_path(),
-                in_flight=None if self.command_state else self.last_input,
-            )
-        except Exception:
-            self.forget_preparation()
-            return
-        self.prepared = True
-        self.prepared_horizon = horizon
-        if self.ocp.suppresses_moves:
-            self.prepared_in_flight = self.last_input.copy()
 
     def ladder(self, solution, max_consecutive_failures: int, solve_budget_s: float):
         """Publish this solve, shift the last one, or hand control back."""
@@ -1261,12 +1162,6 @@ class Cycle:
         self.progress_stalled = False
         self.progress_marked = False
 
-    def forget_preparation(self) -> None:
-        """Drop a standing preparation: next cycle solves whole, as it used to."""
-        self.prepared = False
-        self.prepared_horizon = None
-        self.prepared_in_flight = None
-
     def forget_plan(self) -> None:
         """Drop the warm start and the horizon a shift would be taken from."""
         # Every break in output -- gate, escalation, payload step, mode change,
@@ -1276,7 +1171,6 @@ class Cycle:
         # that true of `carried`: `read_state` rebuilds the force row from
         # `static_hold_force` at the measured pose, which after §6's escalation
         # released the arm claim is the only pose still known to hold.
-        self.forget_preparation()
         self.seed_force = True
         self.dq_a_carried = None
         self.velocity_carry = VelocityCarry()

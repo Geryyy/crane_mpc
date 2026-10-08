@@ -37,13 +37,6 @@ def report(record) -> str:
             f"carried a NaN in: at {status_word(qp_status)} the QP was hard, not "
             "poisoned"
         )
-    if bool(record["split"]):
-        gap = np.max(np.abs(np.asarray(record["bound"]) - np.asarray(record["x0"])))
-        # The gap is the measurement the preparation did not have, and under a
-        # slack-free stage 0 it is what can make the QP infeasible on its own.
-        phase = f"prepare/feedback, bound {gap:g} off the linearisation point"
-    else:
-        phase = "one whole step, so one initial state"
     return "\n".join(
         [
             f"tick {int(record['cycle'])}, stamped {int(record['stamp_ns'])} ns: "
@@ -53,7 +46,6 @@ def report(record) -> str:
             f"{int(record['qp_iterations'])} QP iterations in "
             f"{1e3 * float(record['solve_time_s']):.1f} ms, "
             f"{'warm' if bool(record['warm']) else 'cold'} started",
-            f"phase: {phase}",
             f"residuals [stat, eq, ineq, comp]: "
             f"{np.asarray(record['residuals'], dtype=float)}",
             f"payload {float(record['payload_mass_kg']):g} kg at "
@@ -75,14 +67,10 @@ def replay(ocp, record):
     `None`: the resampled reference reaches the QP only through the path, which
     the record carries resolved -- the window fit included.
 
-    **`split` is honoured, and it decides the answer.** A tick the node took the
-    feedback phase on has two initial states, and they are different by
-    construction: `x0` is the predicted one the preparation linearised about,
-    `bound` the measured one the QP is pinned to. `solve` collapses them onto
-    one, and stage 0 is pinned with no slack -- so a `MIN_STEP` the measured
-    bound caused does not reproduce from the predicted state. The onset tick of
-    every escalation is a split one (the cycle before it converged, so it
-    prepared), which is exactly the tick worth replaying.
+    One `solve`, because that is what the node takes. A dump written before
+    issue 226 carries a `split` flag and a second initial state (`bound`) from
+    the preparation/feedback split; both are ignored, so such a tick replays as
+    the node would run it today and not as it ran then.
 
     `cold=False`: a fresh solver stands at zero payload, so a dump off a loaded
     move would read as a payload step, force the cold start and throw away that
@@ -107,10 +95,7 @@ def replay(ocp, record):
         ),
         in_flight=None if in_flight.size == 0 else in_flight,
     )
-    if not bool(record["split"]):
-        return ocp.solve(*arguments, **keywords)
-    ocp.prepare(*arguments, **keywords)
-    return ocp.feedback(record["bound"])
+    return ocp.solve(*arguments, **keywords)
 
 
 def main(argv=None) -> int:

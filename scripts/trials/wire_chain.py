@@ -58,6 +58,7 @@ from crane_model.symbolic import PAYLOAD_MOUNT_LINK
 from crane_model.viewing import SpaceGate
 from crane_mpc import cycle as cy
 from crane_mpc import horizon as hz
+from crane_mpc import problem as ocp_problem
 from growth import growth
 from harness import ACTUATED, PASSIVE, PLANNED, cs, tune_planner
 from hunting import REVERSAL_FRACTION, reversal_fraction
@@ -420,6 +421,7 @@ def fly(options, parameters, ocp, chain, equilibrium, plan, coast, swing=None):
     # Per cycle, beside the milliseconds: solve time is ~linear in this and the
     # ms are the machine's, so a regression reads off iterations first (issue 223).
     qp_iterations = []
+    iteration_cap = int(ocp_problem.solver_tuning()["qp_solver_iter_max"])
     # Wall seconds from the cycle instant to the horizon on the wire -- the
     # margin the timer callback has left, solve included. Offline wall time is
     # not the machine's, but what is Python here is Python there (issue 187).
@@ -624,6 +626,16 @@ def fly(options, parameters, ocp, chain, equilibrium, plan, coast, swing=None):
                 np.percentile(qp_iterations, [50, 90, 100]).tolist()
                 if qp_iterations
                 else []
+            ),
+            # Share of cycles that stopped at `qp_solver_iter_max` rather than
+            # converging. Not the same as `nonzero_status`: a capped QP answers
+            # `ACADOS_MAXITER`, which the NLP accepts, so it publishes its own
+            # truncated step and reads as healthy -- the only way to see the
+            # cap being hit is to count it (issue 226).
+            "qp_iter_capped": (
+                float(np.mean(np.asarray(qp_iterations) >= iteration_cap))
+                if qp_iterations
+                else 0.0
             ),
             # p50/p90/p100, cycle instant to publish
             "tick_to_publish_s": (

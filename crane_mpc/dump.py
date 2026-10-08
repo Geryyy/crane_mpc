@@ -47,7 +47,6 @@ ABSENT = np.zeros(0)
 #: only the block says which of them carried the NaN in.
 INPUTS = (
     "x0",
-    "bound",
     # Carries its own NaN source: the force rows are `h_eff` at `x0` and
     # nothing checks them, so a finite state can still write a non-finite one.
     "yref",
@@ -69,12 +68,15 @@ def tick(cycle, solution, reference) -> dict:
     """
     Everything one solve was handed, and what it answered.
 
-    `Ocp.last_problem` and not the cycle's own fields for what reached the QP: a
-    cycle that took the feedback phase had its problem written by `prepare`, one
-    cycle and one predicted state earlier, and the cycle's `x0`/`guess`/path of
-    *now* would be a problem nobody solved. `reference` is passed rather than
-    read off the cycle because the ladder has had it by then --
+    `Ocp.last_problem` and not the cycle's own fields for what reached the QP:
+    the cycle's `x0`/`guess`/path are rebuilt per cycle and the ladder has
+    already moved some of them by the time a dump is written. `reference` is
+    passed rather than read off the cycle for the same reason --
     `Cycle.failing_reference` takes the copy.
+
+    Dumps written before issue 226 carry two more fields, `bound` and `split`:
+    the initial-state bound of the preparation/feedback split, which is gone.
+    `load` reads them, nothing here does.
     """
     ocp = cycle.ocp
     written = ocp.last_problem()
@@ -85,8 +87,6 @@ def tick(cycle, solution, reference) -> dict:
         "cycle": cycle.cycles,
         "stamp_ns": cycle.timing.stamp_ns(),
         "x0": written["x0"],
-        "bound": written["bound"],
-        "split": written["split"],
         "yref": written["yref"],
         "t": reference.t,
         "q_a_ref": reference.q_a_ref,

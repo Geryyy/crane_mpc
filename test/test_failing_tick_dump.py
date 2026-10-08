@@ -11,6 +11,7 @@ same status. A dump that could not be replayed would be a second guess.
 import math
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -118,78 +119,21 @@ def test_a_non_finite_parameter_is_dumped_and_replays_to_the_same_status(ocp, tm
     assert "ACADOS_NAN_DETECTED" in replay_tick.report(record)
 
 
-def test_a_tick_off_the_feedback_phase_replays_on_both_of_its_initial_states(
-    ocp, tmp_path
-):
-    """
-    The onset tick of every escalation is a split one, and it has two `x0`s.
-
-    The cycle before it converged, so it prepared -- so the tick that explains
-    the fault is linearised about a *predicted* state and pinned to a
-    *measured* one. Stage 0 is pinned with no slack, so a replay that collapses
-    the pair solves a different QP and reports "does not reproduce" on a tick
-    whose data was fine. What is asserted is that the replay rebuilds the
-    problem the dump recorded, read back through `Ocp.last_problem`.
-    """
-    cycle = holding_cycle(ocp)
-    cycle.failing_ticks = dump.Sink(tmp_path / "ticks", 2)
-    clean, refusal = cycle.solve()
-    assert not refusal and clean.qp_status == 0
-
-    # What `prepare_next` does, without the reference plumbing a node has: the
-    # next cycle linearised about this one's own one-step prediction.
-    predicted = clean.states[1]
-    q_eq = predicted[cs.X_PASSIVE_POSITION : cs.X_PASSIVE_POSITION + cs.K_PASSIVE_DOF]
-    ocp.prepare(
-        predicted,
-        cycle.horizon,
-        q_eq,
-        ocp.carried(clean),
-        path=spoil(ocp, cycle.horizon),
-    )
-    cycle.prepared = True
-    cycle.prepared_horizon = cycle.horizon
-    cycle.prepared_in_flight = None
-    # The measurement the preparation did not have, which is the whole of what
-    # the feedback phase is allowed to move.
-    cycle.x0 = predicted.copy()
-    cycle.x0[cs.X_PLANNED_POSITION] += 0.02
-
-    solution, refusal = cycle.solve()
-    assert not refusal, refusal
-    assert solution.qp_status != 0
-    reference = cycle.failing_reference(solution)
-    cycle.write_failing_tick(solution, reference)
-
-    record = dump.load(sorted((tmp_path / "ticks").glob("*.npz"))[0])
-    assert bool(record["split"]), "a feedback-phase tick has to say so"
-    assert record["bound"] != pytest.approx(record["x0"]), "the two states collapsed"
-
-    replayed = replay_tick.replay(ocp, record)
-    rebuilt = ocp.last_problem()
-    assert bool(rebuilt["split"])
-    assert rebuilt["x0"] == pytest.approx(record["x0"])
-    assert rebuilt["bound"] == pytest.approx(record["bound"])
-    assert np.array_equal(rebuilt["p"], record["p"], equal_nan=True)
-    assert replayed.qp_status == solution.qp_status
-    assert "prepare/feedback" in replay_tick.report(record)
-
-
 def test_a_tick_that_cannot_be_read_back_is_said_once_and_not_retried(ocp, tmp_path):
     """
-    `Ocp.last_problem` refuses on top of a standing preparation -- out loud.
+    `Ocp.last_problem` crosses into acados, so it can refuse -- out loud.
 
-    Unreachable today (a non-zero QP status is `FAILED` and `prepare_next`
-    early-returns on that), but widening the dump's trigger to a status that
-    does prepare lands here, and swallowing it would make the dump write
-    nothing for a whole run with nothing in the log saying so.
+    Swallowing it would make the dump write nothing for a whole run with
+    nothing in the log saying so, and the fault repeats every cycle.
     """
     said = []
     cycle = holding_cycle(ocp)
     cycle.failing_ticks = dump.Sink(tmp_path / "ticks", 5, say=said.append)
     solution, refusal = cycle.solve()
     assert not refusal
-    ocp.prepare(solution.states[1], cycle.horizon, cycle.q_eq, ocp.carried(solution))
+    cycle.ocp = SimpleNamespace(
+        last_problem=lambda: (_ for _ in ()).throw(RuntimeError("no")),
+    )
 
     cycle.write_failing_tick(solution, cycle.horizon)
     assert len(said) == 1 and "could not be read back" in said[0]
