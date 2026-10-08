@@ -8,12 +8,20 @@ loop, with the plant mismatch of `crane_model.mismatch`. The cycle itself is
 """
 
 import dataclasses
+import os
 import shutil
 import sys
 from pathlib import Path
 
 import numpy as np
 import yaml
+
+# Before acados is imported: libgomp reads this once. `crane_mpc.launch.py`
+# pins the node to one thread, so a harness on the image's default (one per
+# core) measures a box the node never runs in -- 8 threads cost 6x the CPU and
+# a *worse* solve here too, p50 4.1 ms against 3.4 (issue 223).
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("OMP_WAIT_POLICY", "passive")
 
 PACKAGE = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PACKAGE / "scripts"))

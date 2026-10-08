@@ -60,10 +60,26 @@ SOLVER_TUNING = {
     # comparable against one Newton step.
     "nlp_solver_max_iter": 1,
     "qp_solver": "PARTIAL_CONDENSING_HPIPM",
-    "hpipm_mode": "BALANCE",
+    # Never swept until issue 223, and it was the whole cost: against BALANCE,
+    # p50 9.6 -> 5.8 ms, p90 14.1 -> 10.4, max 30.3 -> 24.5 over 4 moves x
+    # {empty, 800 kg}, with sway peak, late sway rate and final error identical
+    # to four decimals -- the box, not the controller. ROBUST is 1.6x BALANCE.
+    # It costs 0.9 % of cycles a QP that stops at its cap instead of converging.
+    "hpipm_mode": "SPEED_ABS",
     # None is acados' default, `N`; smaller blocks measured worse.
     "qp_solver_cond_N": None,
-    "qp_solver_iter_max": 50,
+    # What this bounds is the **tail**: at the shipped grid, max solve 54.1 ->
+    # 28.4 ms over 4 moves x {empty, 800 kg}, p50/p90 and every quality column
+    # unmoved. Capped, the QP returns `ACADOS_MAXITER` and the NLP accepts it
+    # (README requirement 1), so a hard cycle publishes its own truncated step
+    # instead of the previous horizon shifted, and `qp_status` says which.
+    # **35, not the ICRA26 iiwa's 20: a cold cycle needs more.** HPIPM starts a
+    # cold cycle from the central path, which costs ~15 iterations before the
+    # step is any good -- `test_a_solve_keeps_its_plan_inside_the_boxes_it_was_
+    # given` fails below 25 and `test_c4_converges_at_the_end_of_the_path_with_
+    # progress_still_running` below 35, both on cold solves. A cold cycle that
+    # fails has nothing to shift and publishes nothing at all.
+    "qp_solver_iter_max": 35,
     # Primal **and** dual, worth 15 -> 5 median QP iterations -- but only because
     # `solver.py` keeps HPIPM's memory across a warm cycle.
     "qp_solver_warm_start": 2,

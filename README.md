@@ -166,8 +166,8 @@ dead time replay the command that was sent instead of the JTC's own output; and
 a `/joint_states` stamp ahead of this node's clock, which is clamped back to the
 tick.
 
-`T_s` and the horizon length have one parameter source. The shipped grid is 80
-knots at 60 ms (79 shooting intervals, 4.74 s from first to last knot). The
+`T_s` and the horizon length have one parameter source. The shipped grid is 60
+knots at 60 ms (59 shooting intervals, 3.54 s from first to last knot). The
 length remains a design value based on a sway period of order two seconds; the
 slowest sway period has never been computed and is not presented as a
 measurement.
@@ -182,7 +182,7 @@ stands at that cycle's measurement instant. `T_s` must also be a whole number of
 model, so the command in flight reaches `ddq` through the rows it actually
 reaches it through.
 
-The configured solve budget is 30 ms; the solve is not
+The configured solve budget is one `T_s`, 60 ms; the solve is not
 interrupted at it, and what it decides is whether the finished step is applied
 (see the next section). The offline performance test prints the measured median
 rather than asserting wall-clock timing on whichever machine runs CI.
@@ -253,7 +253,7 @@ go out on a stream, because they are the only way to tell a tuning problem from 
 modelling one — `tau_a` running decades above `q_a` is a statement about the
 weights, `q_u` refusing to fall with `tau_a` against its constraint is a
 statement about the machine. Eight rows, computed only on cycles that publish:
-**1.5 ms at the shipped 50 knots** on the CI image.
+**1.5 ms at 50 knots** on the CI image.
 
 The four constraint-violation rows are each divided by their own allowance, so
 one unit is one whole allowance past the limit. That normalisation happens in the
@@ -738,6 +738,41 @@ variant pays for a compile.
 
 The `Ts` x `horizon_length` grid is a different question and is answered in
 [config/crane_mpc.yaml](config/crane_mpc.yaml).
+
+### The cost is QP iterations, and two of these knobs were never swept
+
+Issue 223 read the solve against `qp_iterations` on a live Gazebo A2B move:
+**solve time correlates 0.92 with the QP iteration count at ~1.8 ms an
+iteration.** So the two knobs that decide the iteration count decide the cost,
+and both shipped at a value nobody had measured.
+
+`hpipm_mode` shipped `BALANCE` with no provenance. `SPEED_ABS` is 1.7x cheaper
+with the five quality columns identical to four decimals; `ROBUST` is 1.6x
+dearer. `qp_solver_iter_max` shipped 50, where a hard cycle wanders to
+`ACADOS_MINSTEP` and is refused — 29 % of cycles on `--goal out` at 800 kg,
+25 % live — so a third of the move drove on the *previous* horizon shifted a
+knot. At 20 the QP stops at its cap, the NLP accepts that (requirement 1
+above), and this cycle's own truncated step goes out instead: the refused share
+falls to 0 % and the solve maximum halves. Both are in `SOLVER_TUNING`.
+
+`qpscaling_scale_constraints` / `qpscaling_scale_objective` are the knobs this
+problem most obviously wants — its QP rows run from radians to the C3 force
+state's 10^4-10^5 N — and **acados raises `NotImplementedError` for both under
+`SQP_RTI`**. Scaling the force rows has to happen in `problem.py` or not at all.
+
+Two measurement rules this left behind:
+
+- **Pin the thread count.** `crane_mpc.launch.py` runs the node at
+  `OMP_NUM_THREADS=1`, so `harness.py` does too (it sets the default before
+  acados loads). On the image's default of one thread per core the same move
+  costs 6x the CPU *and* a worse solve, p50 4.1 ms against 3.4. A timing taken
+  without it is not the node's.
+- **The live gap is the box, not the problem.** Replaying 30 ticks the live node
+  dumped, on an idle machine at one thread, reproduces the QP iteration count
+  (p50 24 live, 27 replayed) and cuts the milliseconds per iteration from 1.65
+  to 0.67. The 10x between "offline 2.6 ms" and "live 19-29 ms" is ~2.5x of
+  that contention and the rest a corpus difference: the 2.6 ms is this
+  section's easy corpus at 5 QP iterations a cycle, not an A2B move's own ticks.
 
 ## Dependency resolution
 

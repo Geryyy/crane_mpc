@@ -12,13 +12,18 @@ crane_mpc:
     start_signal_action: ""
     jtc_name: trajectory_controller_a2b
 
-    # 39 * 0.06 = 2.34 s still covers the ~2 s sway period and the 2 s
-    # fault-tolerance budget. 80 cost 2x the solve for no measured gain
-    # (wire_chain, 4 moves x 4 latencies: final error, peak and end sway equal). Ts must equal sensor_to_valve_delay and be a whole number of
-    # velocity_loop.yaml ticks, so lookahead is bought in knots, not in a
-    # coarser grid. Publishes at 16.7 Hz against a 25 Hz interface; own issue.
+    # 59 * 0.06 = 3.54 s, 1.5 sway periods. 60 from 40 (issue 223): the knots
+    # are what damps, and once `qp_solver_iter_max` bounds the QP they are
+    # affordable -- paired with `weights.dq_u` 1024 it beats 40 on *every*
+    # column, solve time included (table in the issue's notes). An earlier note
+    # here read "80 cost 2x the solve for no measured gain"; that was measured
+    # at `qp_solver_iter_max: 50`, where the solve was dominated by cycles
+    # wandering to MINSTEP rather than by N. Ts must equal
+    # sensor_to_valve_delay and be a whole number of velocity_loop.yaml ticks,
+    # so lookahead is bought in knots, not in a coarser grid. Publishes at
+    # 16.7 Hz against a 25 Hz interface; own issue.
     Ts: 0.06
-    horizon_length: 40
+    horizon_length: 60
 
     # Transport dead time, common to all six axes, modelled in the predictor
     # only -- symbolic.py carries no delay, so a second one double-counts.
@@ -40,7 +45,7 @@ crane_mpc:
     solve_budget: 0.06
     # 12.5 Hz, the largest decimation not running ahead of a 20 Hz consumer.
     solver_health_decimation: 2
-    # 300 ms of fallback horizon against a 2.34 s one.
+    # 300 ms of fallback horizon against a 3.54 s one.
     max_consecutive_failures: 5
     # One escalation's worth: the five solves it takes to escalate, and nothing
     # from the cycles after it -- the fault repeats and each file is ~130 kB.
@@ -69,7 +74,13 @@ crane_mpc:
       # 256 from 64: the residual swing at the goal is what the descent places with.
       # wire_chain --goal out, latency 26 ms: end sway 0.017 -> 0.008 rad, peak
       # 0.156 -> 0.121, final error 1.9 -> 2.3 mm, no failed solve.
-      dq_u: [256.0, 256.0]
+      # 1024 from 256 (issue 223), and only together with `horizon_length: 60`:
+      # alone at 40 knots it trades the two axes (worst late tilt rate
+      # 0.090 -> 0.074 rad/s, tip 0.066 -> 0.078) and above 1024 it breaks the
+      # solve (2048: 29 % non-zero status). With 60 knots both fall --
+      # tilt 0.056, tip 0.033, peak sway 0.163 -> 0.131 rad. Not the 0.02 rad/s
+      # the PID JTC reaches; no weight in the sweep got there.
+      dq_u: [1024.0, 1024.0]
       tau_a: [1.0e-8, 1.0e-8, 1.0e-8, 1.0e-8, 1.0e-8, 1.0e-8]
       u: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
       # C4's rate cost: 0.1 kicks, 3 is no better.
@@ -100,7 +111,9 @@ crane_mpc:
       progress_rate_headroom: 1.5
       progress_accel_max: 2.0
       # `u_max / 2.34 s`: the command may not traverse its own clamp faster than
-      # the sway period the horizon is sized for. A control bound, like
+      # the ~2 s sway period. 2.34 s was the horizon when this was fitted and
+      # the horizon is now 3.54 s; the number is the sway period's, not N's, so
+      # it did not move with it. A control bound, like
       # `u_clamp_*`, not a physical one -- the valve's own slew limit
       # (0.058/10 ms normalised x end-to-end gain, which is where
       # [5.2, 1.7, 1.8, 3.5, 14.0] came from) lets `u` cross its whole range

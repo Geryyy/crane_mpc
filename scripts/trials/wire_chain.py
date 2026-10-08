@@ -417,6 +417,9 @@ def fly(options, parameters, ocp, chain, equilibrium, plan, coast, swing=None):
     # sampled 1-in-`ticks` and the two clamp ratios are not on one grid.
     u_tick = []
     solve_times = []
+    # Per cycle, beside the milliseconds: solve time is ~linear in this and the
+    # ms are the machine's, so a regression reads off iterations first (issue 223).
+    qp_iterations = []
     # Wall seconds from the cycle instant to the horizon on the wire -- the
     # margin the timer callback has left, solve included. Offline wall time is
     # not the machine's, but what is Python here is Python there (issue 187).
@@ -476,6 +479,7 @@ def fly(options, parameters, ocp, chain, equilibrium, plan, coast, swing=None):
             )
             if step.solution is not None:
                 solve_times.append(step.solution.solve_time_s)
+                qp_iterations.append(step.solution.qp_iterations)
             if step.silence is not None:
                 events["silence"] += 1
             elif step.verdict is None or not step.verdict.published:
@@ -534,6 +538,10 @@ def fly(options, parameters, ocp, chain, equilibrium, plan, coast, swing=None):
     nq = cs.K_PLANNED_DOF
     sway = log[:, 2 + nq : 4 + nq]
     late = sway[-int(round(3.0 / Ts)) :]
+    # The damping half of issue 223 is scored on the *rate*, not the angle: the
+    # published angle carries an uncalibrated offset and `dq_u_settled` is the
+    # limit the tree gates on. Same window as `late`.
+    rate_late = log[-int(round(3.0 / Ts)) :, 4 + 2 * nq : 6 + 2 * nq]
     u0 = log[:, -nq:]
     u0 = u0[np.all(np.isfinite(u0), axis=1)]
     # Ticks of the coast loop land in `u_tick` too, but only after this scoring.
@@ -587,6 +595,7 @@ def fly(options, parameters, ocp, chain, equilibrium, plan, coast, swing=None):
             ),
             "sway_peak": np.abs(sway).max(axis=0).tolist(),
             "sway_late": np.abs(late).max(axis=0).tolist(),
+            "sway_rate_late": np.abs(rate_late).max(axis=0).tolist(),
             # The gate: |u| over u_clamp on its side, per axis. > 1 is outside
             # Psi's fitted domain, i.e. `past_clamp`.
             "u_clamp_ratio": np.maximum(
@@ -609,6 +618,11 @@ def fly(options, parameters, ocp, chain, equilibrium, plan, coast, swing=None):
             "solve_time_s": (
                 np.percentile(solve_times, [50, 90, 100]).tolist()
                 if solve_times
+                else []
+            ),
+            "qp_iterations": (
+                np.percentile(qp_iterations, [50, 90, 100]).tolist()
+                if qp_iterations
                 else []
             ),
             # p50/p90/p100, cycle instant to publish

@@ -731,3 +731,34 @@ Two things 211 should weigh against it, neither new:
 - `horizon_length=20` is 1.2 s, and nothing here checks that 1.2 s covers the
   longest CBS move. A horizon shorter than the move's own settling time fails in
   a way that does not show as sway.
+
+## 6. The shipped settings moved — issue 223
+
+`horizon_length` 40 -> 60, `weights.dq_u` 256 -> 1024, `hpipm_mode` BALANCE ->
+SPEED_ABS, `qp_solver_iter_max` 50 -> 35. Those came out of a cost-and-damping
+sweep, not out of this study, so the gate was §5.2's envelope re-run on both:
+
+    ./scripts/trials/sweep_robust.py --latency 0.026 --payload-mass 800 \
+        --samples 0 --jobs 7 --by-plant --band <family>=<values>
+    # new: as shipped.  old: CRANE_MPC_OCP_OPTIONS='{"hpipm_mode":"BALANCE",
+    #      "qp_solver_iter_max":50}' --set horizon_length=40 --set weights.dq_u=256.0
+
+Same seven families, three moves a cell, 34 distinct cells = 102 runs each.
+
+**New 0/102, old 0/102.** No cell fails at either setting, so the envelope is
+unchanged and the question this section was asked is answered "no worse". Three
+things to read with it:
+
+- **Neither column is §5.2's.** §5.2 scored shipped at 7/87 and that does not
+  reproduce: 209 had already established these tables do not hold on today's
+  `crane_mpc`, and the PZS description has since moved again (issues 222, 224).
+  The `old` column is the like-for-like baseline, measured in this same run.
+- **`handbk` is where the new setting shows.** On the *nominal* plant the old
+  setting hands back on 0.27 of its cycles and the new one on 0.00 — the
+  `qp_solver_iter_max` change, which converts a cycle that would wander to
+  `ACADOS_MINSTEP` and be refused into one that publishes its own truncated
+  step. Most mismatched cells move the same way.
+- **The unsettled cells are the same cells**, and about as unsettled: Psi x1.3
+  `late` 0.352 against 0.363, COM +0.5 m 0.237 against 0.228, payload 80 kg
+  0.172 against 0.199. Nothing here widens the envelope and nothing narrows it;
+  §3's and §5's conclusions about *which* mismatch is survivable stand.

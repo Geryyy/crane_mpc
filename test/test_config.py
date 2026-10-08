@@ -14,6 +14,10 @@ from crane_mpc.config import (
     machine_limits,
 )
 
+#: The sway period `du_max` is sized against, s. A design value of order two
+#: seconds; `wiki/mpc.md` §4 says the slowest case has never been computed.
+SWAY_PERIOD_S = 2.34
+
 
 def read_parameters(name):
     share = get_package_share_directory("crane_mpc")
@@ -54,10 +58,19 @@ def test_the_command_may_not_slew_faster_than_the_sway_it_shapes(shipped):
     normalised) `u` crosses its whole clamp inside one 60 ms knot and the
     single-iteration SQP reversed the command every other cycle, which shook the
     empty pendulum for the length of the hold (issue 214).
+
+    **The time it is divided by is the sway period, not the horizon.** The two
+    were the same 2.34 s when the five numbers were fitted and the horizon has
+    since moved to 3.54 s (issue 223), so this used to read `horizon_length`.
+    What the rule is about is the mode the command must not excite; retrying it
+    to the longer horizon was measured and is a small loss everywhere -- max
+    solve 25.6 -> 40.8 ms, non-zero status 1.7 -> 2.2 %, late sway rate and
+    final error marginally worse, peak sway marginally better.
     """
-    horizon = (int(shipped["horizon_length"]) - 1) * float(shipped["Ts"])
     command = np.asarray(shipped["limits"]["u_max"][: len(shipped["limits"]["du_max"])])
-    assert np.allclose(shipped["limits"]["du_max"], command / horizon, rtol=5.0e-3)
+    assert np.allclose(
+        shipped["limits"]["du_max"], command / SWAY_PERIOD_S, rtol=5.0e-3
+    )
 
 
 def test_a_scalar_that_is_not_a_number_is_refused(shipped):
