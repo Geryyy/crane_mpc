@@ -44,6 +44,22 @@ def test_the_shipped_configuration_is_accepted(shipped):
     assert list(shipped["weights"]["q_u"]) == [0.0, 0.0]
 
 
+def test_the_command_may_not_slew_faster_than_the_sway_it_shapes(shipped):
+    """
+    `du_max` is a control bound, not the valve's slew limit.
+
+    Nothing in `check_settings` ties the two -- the guard is positivity -- so
+    this is the only thing holding the rule the five numbers were picked by. At
+    the valve's own limit (`[5.2, 1.7, 1.8, 3.5, 14.0]`, 0.058 per 10 ms
+    normalised) `u` crosses its whole clamp inside one 60 ms knot and the
+    single-iteration SQP reversed the command every other cycle, which shook the
+    empty pendulum for the length of the hold (issue 214).
+    """
+    horizon = (int(shipped["horizon_length"]) - 1) * float(shipped["Ts"])
+    command = np.asarray(shipped["limits"]["u_max"][: len(shipped["limits"]["du_max"])])
+    assert np.allclose(shipped["limits"]["du_max"], command / horizon, rtol=5.0e-3)
+
+
 def test_a_scalar_that_is_not_a_number_is_refused(shipped):
     shipped["Ts"] = 0.0
     assert "control cycle" in refusal(shipped)

@@ -618,7 +618,18 @@ def test_c4_solves_at_rest_inside_its_boxes(c4_ocp):
 
 
 def test_c4_converges_at_the_end_of_the_path_with_progress_still_running(c4_ocp):
-    """Live, every goal ended in QP status 3: `v_s` carried onto a spent path."""
+    """
+    Live, every goal ended in QP status 3: `v_s` carried onto a spent path.
+
+    `s` was zero to 1e-9 here until `du_max` became a control bound (issue 214):
+    with a tenth of the joint command rate the optimizer buys a little path
+    instead, and `s` creeps to ~8e-3 over the horizon. That moves nothing --
+    `bspline.casadi_value`/`casadi_slope` clamp `theta` to 1, so the reference is
+    the goal either way, the `theta` residual prices the creep at its own weight,
+    and `_origined_x0` re-clamps `s` next cycle so it cannot accumulate. The
+    status is what this test was diagnosed by and it is still zero; the bound
+    keeps a *runaway* `v_s` -- the actual fault -- failing.
+    """
     x = c4_state(c4_ocp, np.zeros(PLANNED))
     position = x[cs.X_PLANNED_POSITION : cs.X_PLANNED_POSITION + PLANNED]
     q_eq = x[cs.X_PASSIVE_POSITION : cs.X_PASSIVE_POSITION + cs.K_PASSIVE_DOF]
@@ -626,4 +637,5 @@ def test_c4_converges_at_the_end_of_the_path_with_progress_still_running(c4_ocp)
     end = dataclasses.replace(c4_ocp.window_path(horizon), origin=1.0)
     solution = c4_ocp.solve(x, horizon, q_eq, path=end)
     assert solution.status == 0
-    assert np.allclose(solution.states[:, cs.X_PROGRESS], 0.0, atol=1e-9)
+    progress = solution.states[:, cs.X_PROGRESS]
+    assert np.all(progress >= 0.0) and progress.max() < 0.02, progress.max()
