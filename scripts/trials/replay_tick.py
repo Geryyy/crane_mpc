@@ -65,7 +65,7 @@ def replay(ocp, record):
     The recorded iterate goes back as the warm start, so what is written is the
     seed the dumped cycle actually solved from, clipping included. `horizon` is
     `None`: the resampled reference reaches the QP only through the path, which
-    the record carries resolved -- the window fit included.
+    every record carries -- a cycle without one never solved (issue 188).
 
     One `solve`, because that is what the node takes. A dump written before
     issue 226 carries a `split` flag and a second initial state (`bound`) from

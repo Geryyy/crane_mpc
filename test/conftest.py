@@ -10,6 +10,11 @@ it once.
 
 `shipped_init_args` is the other half: the declaration carries no defaults, so a
 node gets its values the one way a deployment does -- the shipped config file.
+
+`window_path` is a test-only path builder. Every `Ocp.solve` needs the path its
+cost is written against (issue 188 deleted the fit-the-window fallback), and a
+solver test that only cares about boxes, warm starts or cost rows still needs
+*some* path; the horizon's own knots are the one it used to get for free.
 """
 
 import os
@@ -18,11 +23,27 @@ from pathlib import Path
 import crane_ocp_export as ox
 import pytest
 from ament_index_python.packages import get_package_share_directory
+from crane_model import symbolic as cs
 from crane_mpc import problem
 from crane_mpc import solver as ocp_runtime
+from crane_mpc.solver import PathCycle
 
 #: Configurations already exported this session, by key digest.
 _DONE: set = set()
+
+
+def window_path(ocp, horizon, origin: float = 0.0) -> PathCycle:
+    """
+    Fit this horizon's own knots as the path.
+
+    `bspline.fit` reads knot `i` at `i/intervals`, so a window's own pace is one
+    window per `intervals * Ts`.
+    """
+    return PathCycle(
+        control=ocp_runtime.path_control(horizon.q_a_ref[:, : cs.K_PLANNED_DOF]),
+        origin=origin,
+        nominal_rate=problem.nominal_progress_rate(ocp.parameters),
+    )
 
 
 def shipped_config() -> Path:

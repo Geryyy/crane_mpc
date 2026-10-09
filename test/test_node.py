@@ -135,8 +135,15 @@ def reference(node, target=POSE):
 
 
 def configured(node):
+    """Description, plan and state: both halves of the plan, since only a pair drives.
+
+    The curve is published with the reference's own stamp -- unpaired, the node
+    refuses the cycle and there is no window fit left to publish off (issue 188).
+    """
     node.on_robot_description(String(data=problem.default_description().read_text()))
-    node.on_reference(reference(node))
+    plan = reference(node)
+    node.on_reference(plan)
+    node.on_path(joint_path(plan.header.stamp))
     node.on_joint_state(joint_state(node))
     return node
 
@@ -173,7 +180,9 @@ def test_without_a_description_nothing_is_published(node):
 
 def test_without_a_measured_state_nothing_is_published(node):
     node.on_robot_description(String(data=problem.default_description().read_text()))
-    node.on_reference(reference(node))
+    plan = reference(node)
+    node.on_reference(plan)
+    node.on_path(joint_path(plan.header.stamp))
     node.update()
     assert node.published == {}
     assert "no measured state" in node._last_silence
@@ -413,13 +422,37 @@ def joint_path(stamp, target=POSE):
     return message
 
 
-def test_the_planners_curve_replaces_the_window_fit(node):
+def test_without_the_plans_curve_nothing_is_published(node):
+    """
+    A re-plan gap and a stamp mismatch both stop the publisher (issue 188).
+
+    The window fit that used to cover them ran live, nothing deterministic
+    covered it, and from outside the node a fallback cycle read exactly like a
+    followed curve -- which is the mode a lab run is meant to be under test in.
+    """
     node.on_robot_description(String(data=problem.default_description().read_text()))
     plan = reference(node)
     node.on_reference(plan)
     node.on_joint_state(joint_state(node))
-    # Nothing published geometry yet, so the OCP fits this cycle's own window.
-    assert node._cycle.resolved_path() is None
+    node.update()
+    assert node.published == {}
+    assert "no usable curve has arrived" in node._last_silence
+
+    paired = Time.from_msg(plan.header.stamp).nanoseconds
+    node.on_path(joint_path(Time(nanoseconds=paired + 1).to_msg()))
+    node.on_joint_state(joint_state(node))
+    node.update()
+    assert node.published == {}
+    # Both stamps, so the pairing can be checked without reading source.
+    assert f"{paired + 1} ns" in node._last_silence
+    assert f"{paired} ns" in node._last_silence
+
+
+def test_the_planners_curve_is_fitted_once_on_arrival(node):
+    node.on_robot_description(String(data=problem.default_description().read_text()))
+    plan = reference(node)
+    node.on_reference(plan)
+    node.on_joint_state(joint_state(node))
 
     node.on_path(joint_path(plan.header.stamp))
     path = node._cycle.resolved_path()
@@ -457,40 +490,11 @@ def test_a_silence_is_said_once_and_not_every_cycle(node):
     assert sum("no robot description" in text for _, text in logs.lines) == 1
 
     node.on_robot_description(String(data=problem.default_description().read_text()))
-    node.on_reference(reference(node))
-    node.update()
-    assert sum("no measured state" in text for _, text in logs.lines) == 1
-
-
-def test_which_branch_drives_the_position_reference_is_said_out_loud(node):
-    """
-    A curve that does not pair by stamp was dropped without a word (issue 162).
-
-    From outside the node that read exactly like a followed curve, which is the
-    mode a run is meant to be under test in.
-    """
-    logs = Logs()
-    node.get_logger = lambda: logs
-    node.on_robot_description(String(data=problem.default_description().read_text()))
     plan = reference(node)
     node.on_reference(plan)
-    node.on_joint_state(joint_state(node))
-
-    paired = Time.from_msg(plan.header.stamp).nanoseconds
-    node.on_path(joint_path(Time(nanoseconds=paired + 1).to_msg()))
-    node.update()
-    assert any(
-        f"{paired + 1} ns" in text and f"{paired} ns" in text for _, text in logs.lines
-    )
-
-    logs.lines.clear()
     node.on_path(joint_path(plan.header.stamp))
     node.update()
-    assert any("the planner's curve" in text for _, text in logs.lines)
-    # Once per change and not once per cycle: it is said in the 25 Hz callback.
-    logs.lines.clear()
-    node.update()
-    assert not any("solving against" in text for _, text in logs.lines)
+    assert sum("no measured state" in text for _, text in logs.lines) == 1
 
 
 def test_a_cycle_late_end_to_end_is_not_published_as_converged(node):

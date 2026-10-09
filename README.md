@@ -320,8 +320,13 @@ exactly where the sway terms live.
 A silence is this node's reactivation — it stopped publishing, the receiver ran
 its expiry ramp, and the cycle that resumes is solving for a machine that has
 been moving under someone else's command since. Carrying the warm start across it
-would resume with state accumulated in a different situation. `cold_starts()`
-counts them, and a healthy run of any length has exactly one.
+would resume with state accumulated in a different situation. Nothing counts
+them; `applied_previous_solution` on the health stream is the nearest proxy. A
+healthy run costs **one per plan, not one per run**: `crane_planning` publishes
+the reference and the curve as two calls, so a cycle can land between them, and
+with the window fit gone (issue 188) that cycle refuses and `forget_plan` drops
+the warm start. The JTC's unconsumed tail covers the gap, so it is a solve-budget
+spike at a move boundary rather than a break in motion.
 
 **A stalled reference is a silence too.** `max_reference_age`,
 `min_progress_rate` and `max_stall_time` decide it: a plan is spent in virtual
@@ -636,11 +641,17 @@ and the timed `JointTrajectory` on `/crane/reference`. The cost is written again
 the curve and chooses where on it to be, so it needs no timing; `duration` is the
 pace the progress row is priced against, not a schedule.
 
-The two are paired by `header.stamp`, and only a pair drives: a curve whose stamp
-is not the running reference's belongs to another plan, and the node falls back to
-fitting this cycle's own resampled window — which is also what a deployment whose
-planner publishes no geometry keeps doing, unchanged. The curve is fitted to
+The two are paired by `header.stamp`, and **only a pair drives**: a curve whose
+stamp is not the running reference's belongs to another plan, so the cycle falls
+silent and the refusal names both stamps — as the missing-reference refusal does.
+There is no fit-this-cycle's-own-window fallback (issue 188): it aimed the cost at
+geometry no planner chose, nothing deterministic covered it, and a re-plan gap read
+from outside exactly like a followed curve. A deployment whose planner publishes no
+`/crane/joint_path` therefore publishes no horizon. The curve is fitted to
 `PATH_POINTS` control points once, when it arrives.
+
+A reference with no paired curve never anchors, so it does not age while it waits:
+`max_reference_age` counts only from the first cycle that solved.
 
 On the curve, the positions that go out to the controller are the curve at the
 progress the solve chose, `c(origin + s)` per knot, rather than the timed

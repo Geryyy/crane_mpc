@@ -243,8 +243,6 @@ class MpcNode(Node):
         self._controller_state: JointTrajectoryControllerState | None = None
         self._last_health: SolverHealth | None = None
         self._last_settled: SwaySettled | None = None
-        #: Last `Cycle.path_source` said out loud; said again only when it changes.
-        self._last_path_source: str | None = None
         #: One instant per cycle, shared by every report that cycle writes.
         self._stamp = self.get_clock().now().to_msg()
 
@@ -286,23 +284,6 @@ class MpcNode(Node):
             f"machine. dq_a_divergence_max watches it, on {SHADOW_COMPARISON_TOPIC}, "
             "and nothing corrects it."
         )
-
-    def say_path_source(self) -> None:
-        """
-        Say what this cycle is solved against, whenever that changes.
-
-        Whether the curve is followed was only knowable by reading source: a curve
-        that does not pair by stamp is dropped without a word, and reads from
-        outside exactly like one that drove. Info and not warn: every re-plan has a
-        window where the new reference is in hand and its curve is not, so a warn
-        there would fire on every healthy move. What is solved against, not what
-        went out -- the shift rung publishes the previous horizon.
-        """
-        source = self._cycle.path_source()
-        if source == self._last_path_source:
-            return
-        self._last_path_source = source
-        self.get_logger().info(f"crane_mpc is solving against {source}.")
 
     def warn_divergence(self) -> None:
         """Report a carried velocity that has walked away from the measured one."""
@@ -540,7 +521,8 @@ class MpcNode(Node):
 
         Refused, the node keeps whatever curve it had and `Cycle.resolved_path`
         pairs by stamp, so a refusal cannot silently attach the last plan's
-        geometry to this one -- it falls back to the window fit instead.
+        geometry to this one -- the cycle falls silent and `Cycle.path_refusal`
+        names both stamps.
         """
         if self._path_message is None or not self.ready():
             return
@@ -549,8 +531,8 @@ class MpcNode(Node):
         )
         if samples is None:
             self.get_logger().warn(
-                f"the path on {JOINT_PATH_TOPIC} was refused, so the horizon's own "
-                f"knots are the path this node follows: {why}."
+                f"the path on {JOINT_PATH_TOPIC} was refused, so this plan has no "
+                f"curve and nothing goes out on {HORIZON_TOPIC}: {why}."
             )
             self._path_message = None
             return
@@ -632,7 +614,6 @@ class MpcNode(Node):
             self.say_silence(step.silence)
             return
         self._silent_why = None
-        self.say_path_source()
         self.warn_divergence()
 
         if step.refusal:

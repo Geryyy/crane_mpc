@@ -18,7 +18,7 @@ import numpy as np
 import pytest
 import yaml
 from ament_index_python.packages import get_package_share_directory
-from conftest import export_for
+from conftest import export_for, window_path
 from crane_model import hydraulic_limits
 from crane_model import symbolic as cs
 from crane_mpc import dump, problem
@@ -67,12 +67,14 @@ def holding_cycle(ocp):
     reference.t[:] = [0.0, ocp.Ts * ocp.intervals]
     reference.q_a_ref[:, :PLANNED] = POSE[:PLANNED]
     _, cycle.horizon = resample(reference, 0.0, Grid(ocp.Ts, ocp.intervals + 1))
+    # Every cycle past `gates` carries the curve its cost is written against (188).
+    cycle.path = window_path(ocp, cycle.horizon)
     return cycle
 
 
 def spoil(ocp, horizon):
     """The planner's curve with one non-finite control point: `p`'s own NaN."""
-    window = ocp.window_path(horizon)
+    window = window_path(ocp, horizon)
     control = window.control.copy()
     control[len(control) // 2, 0] = np.nan
     return PathCycle(control, origin=0.0, nominal_rate=window.nominal_rate)

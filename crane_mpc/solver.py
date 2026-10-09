@@ -127,10 +127,9 @@ class PathCycle:
     already spent and `s` carries only the rest -- `theta = origin + s`.
 
     `nominal_rate` is the plan's own pace in path parameter per second, which
-    depends on what the path spans and so cannot be derived here: the node fits
-    one horizon window per cycle (`Ocp.window_path`), an offline harness fits a
-    whole move once. Everything else about the two is the same, which is the
-    point of naming it.
+    depends on what the path spans and so cannot be derived here: `1/duration`
+    off `/crane/joint_path` live, an offline harness' own move span. Every cycle
+    brings one -- there is no fit-the-window fallback (issue 188).
     """
 
     control: np.ndarray
@@ -900,9 +899,8 @@ class Ocp:
         """
         Validate the cycle's arguments and return `x0` with `s` re-origined.
 
-        `horizon` may be absent: a caller that brought its own `PathCycle` has no
-        resampled knots to check, and the path it did bring is checked by
-        `_resolved_path`.
+        `horizon` may be absent: an offline caller has no resampled knots to
+        check, and the path it brought is checked by `_checked_path`.
         """
         x0 = self._origined_x0(x0, path)
         if horizon is None:
@@ -936,22 +934,6 @@ class Ocp:
     def _path_parameters(self, path: PathCycle) -> np.ndarray:
         """Pack the model parameters, this path and where the cycle starts on it."""
         return stage_parameters(self._base_parameter, path.origin, path.control)
-
-    def window_path(self, horizon) -> PathCycle:
-        """
-        Fit this horizon's own knots as the path, starting at 0: the interim source.
-
-        `crane_planning` holds the curve as geometry and stage 2 of
-        `docs/features/path-following-mpc` hands it over whole -- at which point
-        a caller builds the `PathCycle` itself and this stops being the default.
-        `bspline.fit` reads knot `i` at `i/intervals`, so a window's own pace is
-        one window per `intervals * Ts`.
-        """
-        return PathCycle(
-            control=path_control(horizon.q_a_ref[:, : cs.K_PLANNED_DOF]),
-            origin=0.0,
-            nominal_rate=problem.nominal_progress_rate(self.parameters),
-        )
 
     def nominal_progress(self, stage: int, path: PathCycle) -> float:
         """
@@ -1182,19 +1164,19 @@ class Ocp:
 
     # -- one cycle, solved whole -------------------------------------------------
 
-    def _resolved_path(self, horizon, path: PathCycle | None) -> PathCycle:
+    def _checked_path(self, path: PathCycle | None) -> PathCycle:
         """
-        Return the path this cycle is written against: the caller's, or the window's.
+        Return the path this cycle is written against. Every cycle brings one.
 
-        A caller that hands one over owns where it starts and how fast the plan
-        means to spend it; one that does not gets the horizon's own knots fitted
-        per cycle, which is what the node has until `crane_planning` publishes
-        geometry.
+        The caller owns where it starts and how fast the plan means to spend it.
+        There is no fallback fit of the horizon's own window: it aimed the cost at
+        geometry no planner chose, and no deterministic oracle covered it (188).
         """
         if path is None:
-            if horizon is None:
-                raise ValueError("a cycle needs either a horizon or a path")
-            return self.window_path(horizon)
+            raise ValueError(
+                "a cycle needs the path its cost is written against; there is no "
+                "window fit to fall back on"
+            )
         if float(path.nominal_rate) <= 0.0:
             raise ValueError(
                 f"the path's nominal rate is {path.nominal_rate:g}; a plan that never "
@@ -1229,7 +1211,7 @@ class Ocp:
         but costs 16 ms p50 and 59 ms max against a 60 ms budget, before live
         contention; solving whole costs 6.8 ms p50 (issue 223) and recovers 21.
         """
-        cycle = self._resolved_path(horizon, path)
+        cycle = self._checked_path(path)
         x0 = self._checked_x0(x0, horizon, q_eq, cycle)
         warm = self._write_problem(x0, cycle, q_eq, guess, in_flight)
         status = int(self.solver.solve())

@@ -27,7 +27,7 @@ from crane_mpc.cycle import (
     watch_progress,
 )
 from crane_mpc.equilibrium import RO, Equilibrium
-from crane_mpc.solver import Outcome, Solution, Violation
+from crane_mpc.solver import Outcome, PathCycle, Solution, Violation
 from crane_mpc.solver import path_control as ocp_path_control
 from crane_msgs.msg import SolverHealth, SupervisorStatus
 from rclpy.time import Time
@@ -37,10 +37,22 @@ Ts = 0.04
 BOUNDS = Bounds(1.0, 0.5, 0.2, 3, 0.1, 2.0)
 
 
+def line(places=40):
+    """A joint-space straight line, 0 -> 1 on every planned axis, as control points."""
+    samples = np.linspace(np.zeros(cs.K_PLANNED_DOF), np.ones(cs.K_PLANNED_DOF), places)
+    return ocp_path_control(samples)
+
+
 def cycle(mode="active"):
     # `delay == Ts` is the one timing invariant `config.check_settings` enforces.
     made = Cycle(Timing(Ts, Ts), hz.Grid(Ts, KNOTS), mode)
     made.horizon = hz.Knots.zeros(KNOTS)
+    # Every cycle past `gates` is written against a paired curve (188). This one
+    # spans exactly one grid window, so `path_span()` is `grid.duration()` and the
+    # advance arithmetic below still reads in `Ts`.
+    made.path = PathCycle(
+        control=line(), origin=0.0, nominal_rate=1.0 / hz.Grid(Ts, KNOTS).duration()
+    )
     return made
 
 
@@ -494,10 +506,11 @@ def test_every_break_in_the_output_stream_is_a_reactivation(break_it):
 
 def test_the_progress_the_solver_bought_is_read_as_a_path_parameter():
     """
-    `s` spans the horizon's window, so a cycle's advance is `s` x that window.
+    `s` spans the path, so a cycle's advance is `s` x `path_span()` seconds.
 
-    Read as seconds it is a factor `duration()` short -- here 4.8x -- which is a
-    plan that crawls, not one that stalls, so nothing else in this file sees it.
+    Read as seconds it is a factor `path_span()` short -- here 4.8x on `cycle`'s
+    window-wide curve -- which is a plan that crawls, not one that stalls, so
+    nothing else in this file sees it.
     """
     window = hz.Grid(Ts, KNOTS).duration()
     one = cycle()
@@ -522,9 +535,9 @@ def test_a_refused_solve_spends_one_interval_and_not_what_its_iterate_claims():
     the machine consumes is one interval of *that* plan -- not whatever `s` a
     solver that did not converge happens to hold.
 
-    Reading the iterate let the window run `progress_rate_headroom * duration()`
-    ahead per cycle, five cycles deep before the publisher stops, and the next
-    converged cycle then refits the path to a window the machine is not in.
+    Reading the iterate let both readings run `progress_rate_headroom *
+    path_span()` ahead per cycle, five cycles deep before the publisher stops,
+    leaving the next converged cycle origined where the machine is not.
     """
     window = hz.Grid(Ts, KNOTS).duration()
     for outcome in (Outcome.FAILED, Outcome.BUDGET_EXCEEDED):
@@ -536,7 +549,7 @@ def test_a_refused_solve_spends_one_interval_and_not_what_its_iterate_claims():
         assert one.reference_progress < window
 
 
-# -- the planner's curve, against the window fit it replaces ---------------------
+# -- the planner's curve, the only thing a cycle may be written against ----------
 
 
 def curve_cycle(duration=2.0, stamp_ns=1000):
@@ -546,8 +559,8 @@ def curve_cycle(duration=2.0, stamp_ns=1000):
     one.reference.t[:] = np.linspace(0.0, Ts * (KNOTS - 1), KNOTS)
     one.reference_stamp_ns = stamp_ns
     one.reference_anchored = True
-    samples = np.linspace(np.zeros(cs.K_PLANNED_DOF), np.ones(cs.K_PLANNED_DOF), 40)
-    one.adopt_path(ocp_path_control(samples), duration, stamp_ns)
+    one.adopt_path(line(), duration, stamp_ns)
+    one.path = one.resolved_path()
     return one
 
 
@@ -561,24 +574,43 @@ def test_a_curve_drives_only_the_plan_it_was_published_with():
     assert one.resolved_path() is None
 
 
-def test_the_fallback_names_the_two_stamps_that_did_not_pair():
-    """The mismatch is the silent case, and the one a real run hits."""
+def test_a_plan_without_its_curve_refuses_the_cycle_and_names_both_stamps():
+    """
+    The mismatch is the case every re-plan passes through, and the one that used
+    to fall back to a window fit no oracle covered (188). It now reads like the
+    missing-reference refusal: nothing published, and the reason said.
+    """
     one = curve_cycle(stamp_ns=1000)
-    assert one.path_source() == f"the planner's curve on {JOINT_PATH_TOPIC}"
-
     one.reference_stamp_ns = 2000
-    said = one.path_source()
-    assert "the horizon's own knots" in said
+    silence = one.gates(0, 1.0, 0.5)
+    assert silence is not None
     # Both numbers, so the pairing can be checked without reading source.
-    assert "1000 ns" in said and "2000 ns" in said
+    assert "1000 ns" in silence.why and "2000 ns" in silence.why
+    assert HORIZON_TOPIC in silence.warning and JOINT_PATH_TOPIC in silence.warning
 
+    # No curve at all is the other half, and says so rather than naming a stamp.
     one.path_control = None
-    assert "no usable curve has arrived" in one.path_source()
+    assert "no usable curve has arrived" in one.gates(0, 1.0, 0.5).why
+
+
+def test_a_reference_without_a_curve_does_not_anchor_and_so_does_not_age():
+    """
+    The refusal sits before the anchor, so the re-plan window costs no plan.
+
+    Anchored first, the gap between the reference and its curve would be spent
+    against `max_reference_age` -- and a late curve would start part-way along
+    itself, which is what `adopt_path` used to have to undo.
+    """
+    one = curve_cycle(duration=2.0, stamp_ns=0)
+    one.reference_anchored = False
+    one.path_control = None
+    assert one.gates(1_000_000_000, 1.0, 0.5) is not None
+    assert not one.reference_anchored
+    assert one.reference_progress == 0.0 and one.path_origin == 0.0
 
 
 def test_the_advance_moves_both_readings_of_where_the_plan_is():
     one = curve_cycle(duration=2.0)
-    one.path = one.resolved_path()
     one.advance(solution(Outcome.CONVERGED, progress_advance=0.25), 0, 0.0, 1.0)
     # A quarter of the path bought is a quarter of the path spent, which on a 2 s
     # plan is 0.5 s of it: one quantity, two units.
@@ -589,7 +621,6 @@ def test_the_advance_moves_both_readings_of_where_the_plan_is():
 def test_the_last_sliver_of_path_is_taken_whole_so_the_plan_can_end():
     """Buying a share of what is left never reaches 1: live, every goal stalled there."""
     one = curve_cycle(duration=2.0)
-    one.path = one.resolved_path()
     nominal = one.Ts / one.path_span()
     one.path_origin = 1.0 - 0.5 * nominal
     one.advance(
@@ -600,19 +631,17 @@ def test_the_last_sliver_of_path_is_taken_whole_so_the_plan_can_end():
     assert not one.progress_stalled
 
 
-def test_the_window_fallback_advances_exactly_as_it_did():
-    one = cycle()
-    one.reference = hz.Knots.zeros(KNOTS)
-    one.reference_anchored = True
-    one.path = None
-    one.advance(solution(Outcome.CONVERGED, progress_advance=0.25), 0, 0.0, 1.0)
-    # `s` spans the window when nobody hands a path over, so virtual time moves by
-    # the fraction of the window bought -- the arithmetic this refactor replaced.
-    assert one.reference_progress == pytest.approx(0.25 * hz.Grid(Ts, KNOTS).duration())
-
-
 def test_the_curve_is_what_the_follower_is_given_to_chase():
+    """
+    `sigma = origin + s`, and the origin is not zero on any cycle past the first.
+
+    Pinned part-way along the curve on purpose: with the window fit gone (188)
+    every driving cycle runs at `origin > 0`, so a dropped or sign-flipped origin
+    would command the right curve at the wrong place -- smooth motion to
+    somewhere nobody planned, which the JTC's integral action would chase.
+    """
     one = curve_cycle()
+    one.path_origin = 0.4
     one.path = one.resolved_path()
     one.tool_position = 0.0
     answer = solution(Outcome.CONVERGED)
@@ -624,57 +653,25 @@ def test_the_curve_is_what_the_follower_is_given_to_chase():
     # solved state (which counts up into the thousands here) and not the resample.
     for knot, place in enumerate(progress):
         assert one.horizon.q_a_ref[knot, : cs.K_PLANNED_DOF] == pytest.approx(
-            np.full(cs.K_PLANNED_DOF, place), abs=1e-9
+            np.full(cs.K_PLANNED_DOF, 0.4 + place), abs=1e-9
         )
 
 
 def test_a_curve_anchors_at_the_plans_start_and_not_the_planning_latency():
     one = curve_cycle(duration=2.0, stamp_ns=0)
     one.reference_anchored = False
-    # The plan was solved a second before this cycle. A time-indexed reference skips
-    # that second, because its first seconds are past; a path-following one may not,
-    # since `path_origin` starts at the curve's start and it is *this* reading the
-    # `max_reference_age` gate tests. Anchored a second in, that gate fires half a
-    # second of plan before the path is spent.
-    now = 1_000_000_000
-    assert one.gates(now, 1.0, 0.5) is None
+    # The plan was solved a second before this cycle. A time-indexed reference would
+    # skip that second, because its first seconds are past; a path-following one may
+    # not, since `path_origin` starts at the curve's start and it is *this* reading
+    # the `max_reference_age` gate tests. Anchored a second in, that gate fires half
+    # a second of plan before the path is spent.
+    assert one.gates(1_000_000_000, 1.0, 0.5) is None
     assert one.reference_progress == 0.0
-
-    without = curve_cycle(duration=2.0, stamp_ns=0)
-    without.reference_anchored = False
-    without.path_control = None
-    assert without.gates(now, 1.0, 0.5) is None
-    # Knot 0 is due `command_delay` after now: one `Ts` on, zero delay here.
-    assert without.reference_progress == pytest.approx(1.0 + without.command_delay)
-
-
-def test_a_late_curve_puts_both_readings_back_at_the_plans_start():
-    one = curve_cycle()
-    # It arrived after its own reference, which was anchored and spent as a
-    # time-indexed one; leaving the two readings apart is the same truncation.
-    one.reference_progress = 1.2
-    one.path_origin = 0.3
-    one.adopt_path(one.path_control, one.path_duration, one.reference_stamp_ns)
-    assert one.reference_progress == 0.0
-    assert one.path_origin == 0.0
-
-
-def test_the_curve_is_not_charged_while_the_window_fit_drives():
-    one = curve_cycle()
-    one.reference_stamp_ns = 2000
-    one.path = one.resolved_path()
-    assert one.path is None
-    one.advance(solution(Outcome.CONVERGED, progress_advance=0.25), 0, 0.0, 1.0)
-    # Nothing was spent on a path this cycle was not written against. Charged, a
-    # curve arriving later would start part-way along itself -- and 49 such cycles
-    # would start it at the goal, with `remaining()` zero and no way back.
-    assert one.path_origin == 0.0
 
 
 def test_a_spent_path_charges_time_so_the_plan_can_still_expire():
     one = curve_cycle(duration=2.0)
     one.path_origin = 1.0
-    one.path = one.resolved_path()
     # `remaining()` is zero at the end of the curve, so a converged solve buys no
     # progress. Without charging the interval anyway, neither the expiry gate nor
     # `watch_progress` would ever move again: the node would hold the goal forever

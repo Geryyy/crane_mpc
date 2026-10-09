@@ -1,6 +1,5 @@
 """The solver wrapper: what it predicts, and what it plans."""
 
-import dataclasses
 import json
 
 import crane_ocp_export as ox
@@ -9,7 +8,7 @@ import pytest
 import yaml
 from acados_template import AcadosOcpSolver, AcadosSimSolver
 from ament_index_python.packages import get_package_share_directory
-from conftest import export_for
+from conftest import export_for, window_path
 from crane_model import hydraulic_limits
 from crane_model import symbolic as cs
 from crane_mpc import problem
@@ -84,6 +83,19 @@ def horizon_holding(ocp, position):
     return horizon
 
 
+def solved(ocp, x0, horizon, q_eq, guess=None, **keywords):
+    """
+    `Ocp.solve` with the horizon's own knots as the path, unless one is passed.
+
+    Every solve needs the curve its cost is written against -- issue 188 deleted
+    the fit-the-window fallback that used to supply it. These tests are about the
+    boxes, the warm start and the cost rows, so any consistent path will do and
+    the window is the one they had.
+    """
+    keywords.setdefault("path", window_path(ocp, horizon))
+    return ocp.solve(x0, horizon, q_eq, guess, **keywords)
+
+
 def test_the_predictor_carries_the_command_that_is_in_flight(ocp, state):
     """
     Issue 125: input reaches `ddq` only via the command-lag/force rows; a
@@ -127,7 +139,7 @@ def test_a_solve_keeps_its_plan_inside_the_boxes_it_was_given(ocp, state):
     horizon = horizon_holding(ocp, position)
     q_eq = state[cs.X_PASSIVE_POSITION : cs.X_PASSIVE_POSITION + cs.K_PASSIVE_DOF]
 
-    solution = ocp.solve(state, horizon, q_eq)
+    solution = solved(ocp, state, horizon, q_eq)
     assert solution.outcome is not Outcome.FAILED
     assert solution.status == 0
     u_max = np.asarray(ocp.parameters["limits"]["u_max"][:PLANNED])
@@ -155,7 +167,7 @@ def test_the_solution_reads_flat_the_way_it_reads_per_stage(ocp, state):
     """
     position = state[cs.X_PLANNED_POSITION : cs.X_PLANNED_POSITION + PLANNED]
     q_eq = state[cs.X_PASSIVE_POSITION : cs.X_PASSIVE_POSITION + cs.K_PASSIVE_DOF]
-    solution = ocp.solve(state, horizon_holding(ocp, position), q_eq)
+    solution = solved(ocp, state, horizon_holding(ocp, position), q_eq)
 
     stages = range(ocp.intervals + 1)
     scale = problem.state_scale(ocp.parameters, ocp.scale)
@@ -179,7 +191,7 @@ def test_the_cost_split_names_where_the_plan_spent(ocp, state):
     horizon.q_a_ref[:, 0] += 0.4
     q_eq = state[cs.X_PASSIVE_POSITION : cs.X_PASSIVE_POSITION + cs.K_PASSIVE_DOF]
 
-    solution = ocp.solve(state, horizon, q_eq)
+    solution = solved(ocp, state, horizon, q_eq)
     terms = ocp.cost_terms(solution, q_eq)
     assert terms.q_a > 0.0
     # Off pose means off path at the tool too, which is the row the split used to drop.
@@ -203,7 +215,7 @@ def test_the_cost_split_leaves_no_residual_row_out(ocp, state):
     horizon.q_a_ref[:, 0] += 0.4
     q_eq = state[cs.X_PASSIVE_POSITION : cs.X_PASSIVE_POSITION + cs.K_PASSIVE_DOF]
 
-    solution = ocp.solve(state, horizon, q_eq)
+    solution = solved(ocp, state, horizon, q_eq)
     terms = ocp.cost_terms(solution, q_eq)
     assert terms.tool > 0.0
 
@@ -231,12 +243,12 @@ def test_the_warm_start_is_the_last_solution_unshifted(ocp, state):
     horizon = horizon_holding(ocp, position)
     q_eq = state[cs.X_PASSIVE_POSITION : cs.X_PASSIVE_POSITION + cs.K_PASSIVE_DOF]
 
-    solution = ocp.solve(state, horizon, q_eq)
+    solution = solved(ocp, state, horizon, q_eq)
     guess = ocp.carried(solution)
     assert guess.warm(ocp.intervals)
     assert np.array_equal(guess.states, solution.states)
     assert np.array_equal(guess.inputs, solution.inputs)
-    assert ocp.solve(solution.states[1], horizon, q_eq, guess).warm_started
+    assert solved(ocp, solution.states[1], horizon, q_eq, guess).warm_started
 
 
 def test_a_payload_step_drops_the_warm_start_whatever_the_caller_passes(ocp, state):
@@ -248,13 +260,13 @@ def test_a_payload_step_drops_the_warm_start_whatever_the_caller_passes(ocp, sta
     horizon = horizon_holding(ocp, position)
     q_eq = state[cs.X_PASSIVE_POSITION : cs.X_PASSIVE_POSITION + cs.K_PASSIVE_DOF]
 
-    guess = ocp.carried(ocp.solve(state, horizon, q_eq))
-    assert ocp.solve(state, horizon, q_eq, guess).warm_started
+    guess = ocp.carried(solved(ocp, state, horizon, q_eq))
+    assert solved(ocp, state, horizon, q_eq, guess).warm_started
 
     ocp.set_payload(120.0, [0.1, 0.0, -0.4])
-    assert not ocp.solve(state, horizon, q_eq, guess).warm_started
+    assert not solved(ocp, state, horizon, q_eq, guess).warm_started
     # And only the step: the cycle after it is warm again.
-    assert ocp.solve(state, horizon, q_eq, guess).warm_started
+    assert solved(ocp, state, horizon, q_eq, guess).warm_started
     ocp.set_payload(0.0, np.zeros(3))
 
 
@@ -340,7 +352,7 @@ def test_a_non_finite_input_never_reaches_a_solve(ocp, state):
     horizon.dq_a_ref[3, 1] = np.nan
     q_eq = state[cs.X_PASSIVE_POSITION : cs.X_PASSIVE_POSITION + cs.K_PASSIVE_DOF]
     with pytest.raises(ValueError, match="the reference"):
-        ocp.solve(state, horizon, q_eq)
+        solved(ocp, state, horizon, q_eq)
 
 
 def test_a_swept_acados_setting_moves_the_export_key(parameters, monkeypatch):
@@ -386,10 +398,10 @@ def test_hpipms_memory_survives_a_warm_cycle_and_not_a_cold_one(ocp, state):
     )[1]
     try:
         # no guess is a cold cycle, and so is the payload step after it
-        guess = ocp.carried(ocp.solve(state, horizon, q_eq))
-        assert ocp.solve(state, horizon, q_eq, guess).warm_started
+        guess = ocp.carried(solved(ocp, state, horizon, q_eq))
+        assert solved(ocp, state, horizon, q_eq, guess).warm_started
         ocp.set_payload(120.0, [0.1, 0.0, -0.4])
-        assert not ocp.solve(state, horizon, q_eq, guess).warm_started
+        assert not solved(ocp, state, horizon, q_eq, guess).warm_started
         ocp.set_payload(0.0, np.zeros(3))
     finally:
         ocp.solver.reset = original
@@ -440,7 +452,7 @@ def test_a_machine_at_rest_asked_to_stay_there_is_commanded_nothing(ocp, paramet
 
     horizon = horizon_holding(ocp, x[rows])
     u_max = np.asarray(parameters["limits"]["u_max"][:PLANNED])
-    solution = ocp.solve(x, horizon, q_eq)
+    solution = solved(ocp, x, horizon, q_eq)
     assert solution.outcome is not Outcome.FAILED
     assert np.max(np.abs(solution.inputs[0, :PLANNED]) / u_max) < 0.05
 
@@ -487,9 +499,9 @@ def test_stage_zero_prices_the_command_in_flight_only_when_asked(
     horizon = horizon_holding(ocp, position)
     in_flight = np.full(cs.NU_PROGRESS, 0.3)
 
-    ocp.solve(state, horizon, q_eq)
+    solved(ocp, state, horizon, q_eq)
     plain = ocp.solver.cost_get(0, "W"), ocp.solver.cost_get(0, "yref")
-    ocp.solve(state, horizon, q_eq, in_flight=in_flight)
+    solved(ocp, state, horizon, q_eq, in_flight=in_flight)
     weight, reference = ocp.solver.cost_get(0, "W"), ocp.solver.cost_get(0, "yref")
 
     assert np.array_equal(plain[0], weight_matrices(values)[0])
@@ -551,7 +563,7 @@ def test_c4_solves_at_rest_inside_its_boxes(c4_ocp):
     x = c4_state(c4_ocp, np.zeros(PLANNED))
     position = x[cs.X_PLANNED_POSITION : cs.X_PLANNED_POSITION + PLANNED]
     q_eq = x[cs.X_PASSIVE_POSITION : cs.X_PASSIVE_POSITION + cs.K_PASSIVE_DOF]
-    solution = c4_ocp.solve(x, horizon_holding(c4_ocp, position), q_eq)
+    solution = solved(c4_ocp, x, horizon_holding(c4_ocp, position), q_eq)
     assert solution.status == 0
     limits = c4_ocp.parameters["limits"]
     assert np.all(
@@ -579,8 +591,8 @@ def test_c4_converges_at_the_end_of_the_path_with_progress_still_running(c4_ocp)
     position = x[cs.X_PLANNED_POSITION : cs.X_PLANNED_POSITION + PLANNED]
     q_eq = x[cs.X_PASSIVE_POSITION : cs.X_PASSIVE_POSITION + cs.K_PASSIVE_DOF]
     horizon = horizon_holding(c4_ocp, position)
-    end = dataclasses.replace(c4_ocp.window_path(horizon), origin=1.0)
-    solution = c4_ocp.solve(x, horizon, q_eq, path=end)
+    end = window_path(c4_ocp, horizon, origin=1.0)
+    solution = solved(c4_ocp, x, horizon, q_eq, path=end)
     assert solution.status == 0
     progress = solution.states[:, cs.X_PROGRESS]
     # `s >= 0` is a hard box, held to the QP's own absolute tolerance and no
