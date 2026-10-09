@@ -354,15 +354,18 @@ crane_mpc:
     description: "How long after a plan has **ended** this node keeps publishing, s, measured
       from the end of the reference and not its stamp. Past the end the horizon holds the goal
       at zero velocity; after that the node publishes **nothing**, so the receiver runs its
-      expiry ramp -- which a publisher still emitting a dead plan would defeat."
+      expiry ramp -- which a publisher still emitting a dead plan would defeat. It is also the
+      **whole move's** budget: the BT's arrival gate watches the horizon and ends the move
+      here, because past it the JTC holds a point no plan chose (issue 239)."
     validation:
       gt<>: [0.0]
 
   max_reference_age_loaded:
     type: double
     read_only: true
-    description: "max_reference_age while a payload is set: the hold that damps a carried
-      load until the tree releases the JTC. Separate because the empty hold went unstable."
+    description: "max_reference_age while a payload is set: how long a carried move may
+      overrun its plan. Separate because the empty hold once went unstable; it does **not**
+      damp the carried load -- held, the tip mode grows (issues 234, 238)."
     validation:
       gt<>: [0.0]
 

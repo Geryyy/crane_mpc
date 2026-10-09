@@ -190,6 +190,13 @@ crane_mpc:
       cylinder_force: [1.0e4, 1.0e4, 1.0e4, 1.0e4, 1.0e4, 1.0e4]
       pump_flow: 1.0e4
 
+    # This pair is the move's whole overrun budget, not just this node's: on
+    # `cbs_mpc_active` the BT's WaitForMoveComplete watches /crane/mpc/horizon and
+    # fails the move as soon as this hold ends, because the JTC then holds the last
+    # horizon point and the arrival and sway gates freeze where they stand (issue
+    # 239). So a move has the plan plus this long to arrive, and nothing downstream
+    # waits past it -- there is no second constant to keep in step.
+    #
     # 20 s, not 4: the machine lags the plan and the JTC played the last horizon
     # open-loop, a stop nobody damped (live: 0.06 rad left at every goal). 4 s was
     # the cap on the *empty* hold because it grew the swing 0.03 -> 0.49 rad at 9 m
@@ -198,10 +205,14 @@ crane_mpc:
     # A2B move (wire_chain, issue 214). The tree deactivating the JTC ends the hold
     # sooner; that drops the plan.
     max_reference_age: 20.0
-    # Carrying: 20 s too. 4 s fell silent while a lifted block still swung 0.027 rad,
-    # which then decayed undamped past the BT's 120 s settle wait; 20 s loaded held
-    # in every carry tried. The pair is one number again, kept as two keys because
-    # the carried case is the one with a measured 120 s consumer behind it.
+    # Carrying: 20 s too, and now for one reason only -- a loaded move needs at
+    # least as long as an empty one to reach its goal. The old reason, that falling
+    # silent sooner left a lifted block swinging undamped through the BT's 120 s
+    # settle wait, is gone with that wait: 239 ends the move at this bound instead.
+    # It does not *earn* the 20 s either. Issue 234 measured the loaded hold as a
+    # pump for the 0.35 Hz tip mode, and issue 238 saw the sway grow right through
+    # it (0.199 -> 0.587 rad/s), so no length of hold settles a carried load; that
+    # is issue 240's, and changing this number does not touch it.
     max_reference_age_loaded: 20.0
 
     # Liveness pair, wall clock. 0.1 is a third of the lowest legitimate
