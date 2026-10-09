@@ -24,7 +24,7 @@ then withdrawn on that metric. Score on the growth rate instead.
   cell per setting, `--by-plant` for one row per sample. The plant-mismatch map
   it was run for, and the settings that came out of it, are `robustness.md`
   (issue 190).
-- `trial.sh <outdir>` — one live arm: tear down by PID, launch headless,
+- `trial.sh <outdir>` — one live arm, isolated via `ralph/sim_env.sh` and the sim lock: launch headless,
   activate `trajectory_controller_a2b`, call `/a2b_movement`, capture.
   `CTRL=pid MOVE=<script>` swaps the arm. ~3 min.
 - `capture.py <seconds> <out.json> [--sim-time|--no-sim-time]` — records
@@ -176,8 +176,8 @@ model before, and the wire has ~10 ms of margin, so an unmatched harness can
 call a live instability stable. Until the table below is filled, treat a
 `wire_chain` stability verdict as unvalidated against Gazebo.
 
-The recording is human-run — it needs a live Gazebo, which the loop may not
-start (PRD §14). The measurement after it is offline.
+The recording needs a live Gazebo; agents may run it isolated (`ralph/sim_env.sh`,
+sim lock, PRD §14 as amended 2026-10-08). The measurement after it is offline.
 
     ./scripts/trials/trial.sh /tmp/a2b-loaded     # one live A2B move, ~3 min
     ./scripts/trials/looptiming.py /tmp/a2b-loaded/cap.json

@@ -6,24 +6,14 @@ S="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WS="$(cd "$S/../../../../.." && pwd)"
 OUT=$1; mkdir -p "$OUT"
 
-# Tear down whatever is running, by PID, never pkill -f (it kills this shell).
-for p in $(ps -eo pid,cmd | grep -E "gz sim|ros2 launch|crane_planner_node|crane_mpc_node|spawner|robot_state_publisher|bt_action_server|lifecycle_manager|grip_traj_server|world_model_node|wall_plan_server|collision_body_handler|parameter_bridge|static_transform|best_accessability|unloading_loadbed|bundle_envelope|gripper_grasp" | grep -v grep | awk '{print $1}'); do
-  [ "$p" = "$$" ] && continue
-  kill "$p" 2>/dev/null
-done
-sleep 5
-for p in $(ps -eo pid,cmd | grep -E "gz sim" | grep -v grep | awk '{print $1}'); do kill -9 "$p" 2>/dev/null; done
-sleep 2
-
-# The sim wants concrete_block_behavior_tree's cyclonedds_sim.xml, and its
-# env hook only sets the var if unset. A shell carrying the machine-local
-# hardware file silently keeps it, multicast off.
-unset CYCLONEDDS_URI
-source /opt/ros/${ROS_DISTRO}/setup.bash
-source "$WS/install/setup.bash"
-ros2 daemon stop >/dev/null 2>&1; ros2 daemon start >/dev/null 2>&1
+# Isolated graph (own domain, Gazebo partition, lo-only DDS) and one sim at a time.
+# Only what this script starts is torn down -- never by name, another session may run a sim.
+source "$WS/ralph/sim_env.sh"
+exec 9>/tmp/ralph-sim.lock; flock 9
 
 setsid nohup "$S/launch.sh" > "$OUT/launch.log" 2>&1 < /dev/null &
+LPID=$!
+trap 'kill -TERM -- -$LPID 2>/dev/null; sleep 5; kill -9 -- -$LPID 2>/dev/null' EXIT
 for i in $(seq 1 60); do
   grep -q "crane_mpc configured on pzs100" "$OUT/launch.log" 2>/dev/null \
     && grep -q "planning for pzs100" "$OUT/launch.log" 2>/dev/null && break
