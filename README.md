@@ -159,12 +159,13 @@ machine's. `crane_msgs/Payload` carries a point mass here — for a gravity mome
 shape and inertia do not enter — which is the same reading
 `crane_planner` gives the same field of the same type.
 
-`/crane/payload_estimate` is the estimator's channel and this node does not read
-it at all (issue 184 deleted the subscription that stored it and nothing else):
-it does not gate configuration and does not change the model under a running
-horizon. Both CBS profiles publish `valid == false` on it today (issue 033), and
-even a valid estimate measures a load rather than stating that one was picked
-up, which is the tree's to say.
+There is no payload *estimate* anywhere in the path: `/crane/payload_estimate`
+and `crane_msgs/PayloadEstimate` are deleted (issue 184 dropped this node's
+subscription, 199 the channel and the message; the only publisher ever written,
+`payload_estimator`, went with `crane_control` in 103),
+and the block's mass comes from the prefab spec by way of the tree. That is the
+intended shape and not a gap — an estimate measures a load rather than stating
+that one was picked up, which is the tree's to say.
 
 ## Timing and command
 

@@ -24,7 +24,6 @@ from .solver import PROGRESS_ROWS, Outcome, PathCycle
 REFERENCE_TOPIC = "/crane/reference"
 JOINT_PATH_TOPIC = "/crane/joint_path"
 JOINT_STATE_TOPIC = "/joint_states"
-PAYLOAD_ESTIMATE_TOPIC = "/crane/payload_estimate"
 CONTROLLER_STATE_TOPIC = "/crane/controller_state"
 ROBOT_DESCRIPTION_TOPIC = "/robot_description"
 HORIZON_TOPIC = "/crane/mpc/horizon"
