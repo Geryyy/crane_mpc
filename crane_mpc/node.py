@@ -152,9 +152,9 @@ class RateQuery:
             self._refuse(why)
 
 
-def _qos(durability=DurabilityPolicy.VOLATILE) -> QoSProfile:
+def _qos(durability=DurabilityPolicy.VOLATILE, depth=1) -> QoSProfile:
     return QoSProfile(
-        depth=1, reliability=ReliabilityPolicy.RELIABLE, durability=durability
+        depth=depth, reliability=ReliabilityPolicy.RELIABLE, durability=durability
     )
 
 
@@ -333,11 +333,21 @@ class MpcNode(Node):
             )
 
     def _create_subscriptions(self) -> None:
+        # Every other stream here wants the freshest sample and nothing else, so
+        # depth 1. This one is the exception: `Timing.jtc_output` averages a whole
+        # dead time of JTC ticks, so every one of them has to be delivered, and
+        # `update`'s solve holds this node's single-threaded executor for tens of
+        # ms, and a depth-1 reader drops whatever lands while it is held: against
+        # a 100 Hz publisher it takes 6 of 6 at 10 ms of occupancy, 4 at 30 and 3
+        # at 45 -- the quorum itself. The JTC meanwhile publishes 6 of 6 (100.0
+        # Hz, no gap over two ticks, over three Gazebo runs), so the loss was all
+        # here. Two dead times, same reason `Timing._outputs` is sized for two:
+        # the cycle's own period runs to 90 ms at p90.
         self.create_subscription(
             JointTrajectoryControllerState,
             CONTROLLER_STATE_TOPIC,
             self.on_controller_state,
-            _qos(),
+            _qos(depth=2 * self._timing.ticks),
         )
         self.create_subscription(
             JointTrajectory, REFERENCE_TOPIC, self.on_reference, _latched()

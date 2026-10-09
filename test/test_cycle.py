@@ -864,6 +864,9 @@ def test_the_two_silent_fallbacks_are_said_once_per_episode():
     assert ticking.jtc_output(now + int(Ts * 1e9)) is None
     assert ticking.jtc_output(now + int(Ts * 1e9)) is None
     assert len(said) == 2 and "half a cycle's ticks" in said[1]
+    # The count rides along: the publish rate was measured flat while this
+    # fired, so it is the number that says a reader dropped them.
+    assert "(1 of 4)" in said[1]
 
     for tick in range(1, 4):
         ticking.record_output(now + tick * 10_000_000, np.full(cs.PLANNED_DOF, 2.0))
@@ -871,8 +874,14 @@ def test_the_two_silent_fallbacks_are_said_once_per_episode():
     assert mean == pytest.approx(np.full(cs.PLANNED_DOF, 1.5))
     assert len(said) == 2
 
-    # Re-armed by the healthy cycle above: the next episode is said again.
+    # Re-armed by the healthy cycle above: the next episode is said again. A
+    # window this far on holds no ticks at all, which is the follower not
+    # driving and not a delivery loss, so it is said as its own thing -- live,
+    # a quarter of all windows are empty between moves and reporting them as
+    # starvation buried the one window that really was thinned.
     assert ticking.jtc_output(now + int(5 * Ts * 1e9)) is None
+    assert len(said) == 3 and "nothing arrived" in said[2]
+    assert "half a cycle's ticks" not in said[2]
     assert ticking.measured_ns(now, now + 5_000_000) == now
     assert len(said) == 4
 

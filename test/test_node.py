@@ -299,6 +299,27 @@ def test_a_shared_controller_state_topic_keeps_only_the_actuated_one(node):
     assert follower.velocity[0] == pytest.approx(0.1)
 
 
+def test_the_controller_state_reader_queues_a_whole_dead_time_of_ticks(node):
+    """
+    Depth 1 here is what starved `Timing.jtc_output`, not the publish rate.
+
+    The solve holds this node's single-threaded executor for tens of ms, so a
+    reader that keeps one sample keeps one of the window's six ticks and the
+    dead time replays the command that was sent -- PI term and all -- with the
+    JTC publishing all six. Measured on three Gazebo runs: 100.0 Hz on the wire,
+    no gap over two ticks, and the warning in every run's log anyway.
+    """
+    readers = {
+        subscription.topic_name: subscription.qos_profile.depth
+        for subscription in node.subscriptions
+    }
+    assert readers["/crane/controller_state"] >= 2 * node._timing.ticks
+    assert node._timing.ticks == round(node.Ts / node._timing.jtc_period)
+    # The others are last-one-wins by intent: a backlog of states would be
+    # processed and overwritten, so depth there buys staleness, not samples.
+    assert readers["/joint_states"] == 1
+
+
 def gated(node, action="/trajectory_controller_a2b/follow_joint_trajectory"):
     """
     Put a configured node behind the start gate.

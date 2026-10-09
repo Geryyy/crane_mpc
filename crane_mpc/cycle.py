@@ -89,11 +89,13 @@ class Timing:
         )
         #: When knot 0 of the horizon this cycle builds takes effect.
         self.next_first_knot_ns = 0
+        #: The JTC's ticks in one dead time: what `jtc_output` averages over, and
+        #: what a subscriber has to be able to queue to deliver them all.
+        self.ticks = max(1, round(self.Ts / self.jtc_period))
         # `(stamp_ns, planned-axis output)` from the JTC, oldest first. Two cycles
         # of ticks at least, or a fast tick (a trial's `--control-rate`) would
         # push the far end of the dead-time window out before it is averaged.
-        ticks = max(1, round(self.Ts / self.jtc_period))
-        self._outputs: deque = deque(maxlen=max(OUTPUT_HISTORY, 2 * ticks))
+        self._outputs: deque = deque(maxlen=max(OUTPUT_HISTORY, 2 * self.ticks))
         self._say, self._said = say, set()
 
     # -- the cadence -------------------------------------------------------------
@@ -145,18 +147,43 @@ class Timing:
         What the plant ran over the dead time, PI included -- the command that
         was sent carries none of it. `None` below half the expected ticks: two
         samples of ten are not the interval's mean.
+
+        Empty and thinned are said apart. The follower publishes a flat 100 Hz
+        or nothing at all, so they are different events: a window with no ticks
+        is one the follower was not driving over, and a window with some is a
+        delivery loss. Reported as one, the first drowned the second -- which is
+        the one a reader or a rate can be wrong about.
         """
         start = measured_ns - int(self.Ts * NANOSECONDS)
         window = [v for t, v in self._outputs if start <= t < measured_ns]
-        if len(window) < 0.5 * self.Ts / self.jtc_period:
+        if not window:
+            # Not the same fault, and it was worth telling apart: the follower
+            # publishes a flat 100 Hz or nothing, so an empty window is one it
+            # was not driving over -- a quarter of them in a live run, between
+            # moves, before `~/activity` says so. A dead or misnamed topic reads
+            # the same here and is caught by its own check, not by this one.
+            self.say_once(
+                "no follower",
+                f"nothing arrived on {CONTROLLER_STATE_TOPIC} over a whole cycle, so "
+                "the dead time replays the command that was sent. Expected while the "
+                f"follower is not driving; if it persists, {CONTROLLER_STATE_TOPIC} is "
+                "not the topic it publishes on.",
+            )
+            return None
+        if len(window) < 0.5 * self.ticks:
+            # The count, not just the fact: the publish rate was measured flat
+            # while this fired, so the number is what separates a reader that
+            # dropped ticks from a follower that never sent them.
             self.say_once(
                 "no jtc output",
-                f"fewer than half a cycle's ticks arrived on {CONTROLLER_STATE_TOPIC}, "
-                "so the dead time replays the command that was sent instead of the "
-                "JTC's own output -- which carries the PI term and the command does not.",
+                f"fewer than half a cycle's ticks arrived on {CONTROLLER_STATE_TOPIC} "
+                f"({len(window)} of {self.ticks}), so the dead time replays the command "
+                "that was sent instead of the JTC's own output -- which carries the "
+                "PI term and the command does not.",
             )
             return None
         self.rearm("no jtc output")
+        self.rearm("no follower")
         return np.mean(window, axis=0)
 
     # -- what the controllers promise --------------------------------------------

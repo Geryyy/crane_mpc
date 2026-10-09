@@ -120,10 +120,13 @@ def rate_of(ctrl, cycle_stamps=None, nominal_hz=NOMINAL_JTC_HZ):
 
     This is the *publish* rate, a lower bound on the tick rate: the JTC publishes
     on a non-blocking `RealtimePublisher`, which drops under exactly the load
-    that starves the loop. `starved` mirrors `Timing.jtc_output`'s test against
-    the nominal tick count, so it answers "would the dead time have replayed the
-    command that was sent". Without `cycle_stamps` there is no cycle grid to
-    count against and only the rate is reported.
+    that starves the loop. `starved` applies `Timing.jtc_output`'s test to that
+    stream, so it answers "did the JTC emit the dead time's ticks" and **not**
+    "did the node get them": measured 6 of 6 on the wire over three Gazebo runs
+    that logged the starvation anyway -- the loss was the node's own depth-1
+    reader, which is not in a capture. A 0 % here does not clear the loop.
+    Without `cycle_stamps` there is no cycle grid to count against and only the
+    rate is reported.
     """
     if not ctrl:
         return None

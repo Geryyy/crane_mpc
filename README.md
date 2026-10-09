@@ -193,6 +193,20 @@ dead time replay the command that was sent instead of the JTC's own output; and
 a `/joint_states` stamp ahead of this node's clock, which is clamped back to the
 tick.
 
+The first of those fired on every live run until issue 242, and not because of
+anything on the wire: the JTC publishes all six of the dead time's ticks (100.0
+Hz, no gap over two ticks, measured over three Gazebo runs), and `update`'s solve
+then holds this node's single-threaded executor long enough that a depth-1 reader
+drops the rest of them. Measured against a 100 Hz publisher, a depth-1 reader
+takes 6 of 6 ticks at 10 ms of occupancy, 4 at 30 ms and **3 at 45 ms** -- the
+quorum itself, so it passed until any jitter took it to 2, which is why this
+fired in episodes rather than continuously. At depth 6 and above it is 6 of 6 at
+every occupancy. So the reader queues two dead times, and it is the only
+subscription here that wants a queue at all -- the rest are last-one-wins by
+intent, where depth would buy staleness rather than samples. A capture cannot see
+any of this: `looptiming.py`'s `starved` is measured on the publish stream and
+read 0 % throughout.
+
 `T_s` and the horizon length have one parameter source. The shipped grid is 60
 knots at 60 ms (59 shooting intervals, 3.54 s from first to last knot). The
 length remains a design value based on a sway period of order two seconds; the
