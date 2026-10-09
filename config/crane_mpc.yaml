@@ -56,7 +56,8 @@ crane_mpc:
     # the message (issue 230). Live sim, tick to arrival 30 ms median, solve 10
     # ms median, 44 ms max.
     solve_budget: 0.06
-    # 12.5 Hz, the largest decimation not running ahead of a 20 Hz consumer.
+    # 8.3 Hz off the 16.7 Hz cycle, the largest decimation not running ahead of
+    # a 20 Hz consumer.
     solver_health_decimation: 2
     # 300 ms of fallback horizon against a 3.54 s one.
     max_consecutive_failures: 5
@@ -209,5 +210,6 @@ crane_mpc:
     min_progress_rate: 0.1
     max_stall_time: 2.0
 
-    # One T_s, the resolution the whole path is quantised at.
+    # Two thirds of a T_s. Not tied to `Ts` in code, and nothing refuses a
+    # mismatch at startup.
     max_clock_skew: 0.04

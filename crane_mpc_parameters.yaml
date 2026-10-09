@@ -102,7 +102,8 @@ crane_mpc:
     read_only: true
     description: "Consecutive non-converged solves before escalation stops the publisher.
       Each fallback shifts the previous horizon up one knot and duplicates the last stage, so
-      at horizon_length-1 the whole horizon is one stale knot; the node warns at startup."
+      at horizon_length-1 the whole horizon is one stale knot. Nothing checks it against
+      horizon_length; the only message is the escalation itself."
     validation:
       gt_eq<>: [1]
 

@@ -1,7 +1,7 @@
 # crane_mpc
 
 The producer of `/crane/mpc/horizon`. Runs beside the controller manager and
-solves the crane OCP with acados once per 40 ms cycle. It **ships in shadow**
+solves the crane OCP with acados once per 60 ms cycle. It **ships in shadow**
 and publishes no horizon until `mode: active`.
 
 ## Where the code is
@@ -78,14 +78,19 @@ explicit step diverges in three samples.
 Stage and terminal costs use nonlinear least squares and a Gauss–Newton Hessian.
 The stage residual is
 
-    [q_a, dq_a, q_u, dq_u, lag, v_s, tau_a, u]
+    [q_a, dq_a, q_u, dq_u, lag, tool, s, v_s, tau_a, u]
 
-against `[q_a,ref(s), q_a,ref'(s) v_s, q_eq, 0, 0, 1, h_eff, 0]`. The tracking
-and `lag` rows carry their reference **inside** the residual, because it is
+against `[0, 0, q_eq, 0, 0, 0, min(1, s_ref), 0, h_eff, 0]`, with the command
+state `c` appended under C4 (which is what ships). The tracking, `dq_a`, `lag`
+and `tool` rows carry their reference **inside** the residual, because it is
 evaluated at the decision variable `s` and `yref` is subtracted as a constant;
-everything else is `yref`. `lag` and `v_s` are issue 119's two rows — the
-tracking error projected on the reference's direction of travel, on the slewing
-axis alone, and the progress rate as a regulator toward one. In particular,
+everything else is `yref`. `lag` is issue 119's row — the tracking error
+projected on the reference's direction of travel, on the slewing axis alone.
+`tool` is the same tracking error read in metres at the tool, three rows,
+position only, because a centimetre at the tool is worth 2174 to 11905 mm of
+joint error depending on the pose. **The row priced toward one is `s`, not
+`v_s`**: the cost stopped saying when to be somewhere and started saying where
+to end up, so the progress *rate*'s `yref` stays at zero. In particular,
 effort prices `tau_a`, not acceleration, so effective inertia affects how hard
 the optimizer pushes, and it prices it against `h_eff` and not zero (issue 117),
 so holding the machine's own weight is free. Sway offset and sway rate are
@@ -118,11 +123,15 @@ affine where the curve is a harmonic, and put the tilt centre **0.23 rad** out
 over a turn, past the box it centres. `weights.q_u`'s own description carries
 the weights.
 
-Five constraints are native boxes: control-safe actuated position,
-actuated velocity, sway about `q_eq`, sway rate, and input rate. Constraints 6
-and 7 are native nonlinear rows taken from the graph's cylinder-force and
-already-smoothed per-axis flow outputs. The shared pump row sums all six axis
-flows. Constraints 3, 4, 6, and 7 carry configured L1 slack; every solution
+Constraints 1 to 5 are native boxes: control-safe actuated position, actuated
+velocity, sway about `q_eq`, sway rate, and input rate. `idxbx` boxes more rows
+than that list names — the lagged command `u_f` on the lag axes, the progress
+pair `[s, v_s]`, and C4's command `c` — and `idxbu` bounds the progress
+acceleration beside the five joint rates. Constraints 6 and 7 are native
+nonlinear rows taken from the symbolic model's cylinder-force and
+already-smoothed per-axis flow outputs: five force rows and one shared pump row,
+which sums the **five planned** axis flows, the tool being held still.
+Constraints 3, 4, 6, and 7 carry configured L1 slack; every solution
 reports whether slack was used and its penalty, while command constraints 1, 2,
 and 5 remain hard.
 
@@ -389,7 +398,7 @@ fitted against two different outgoing commands, is two different splines.
 | Property | Value |
 |---|---|
 | Topic | `/crane/mpc/solver_health`, `crane_msgs/SolverHealth` |
-| Rate and QoS | 12.5 Hz; reliable, depth 1, volatile |
+| Rate and QoS | 8.3 Hz; reliable, depth 1, volatile |
 | Frame | empty; status |
 | Contents | the verdict, acados' status, the solve time and budget, the four constraint violations, the eight cost terms, `fault` |
 | Names | the six actuated URDF joints, carried in the message |
@@ -449,7 +458,7 @@ indistinguishable from a healthy one.
 | Property | Value |
 |---|---|
 | Topic | `/crane/sway_settled`, `crane_msgs/SwaySettled` |
-| Rate and QoS | 12.5 Hz; reliable, depth 1, volatile |
+| Rate and QoS | 8.3 Hz; reliable, depth 1, volatile |
 | Contents | the three-valued predicate, the two rates it was decided from, why |
 
 Has the load stopped swinging: `|dq_u| <= sway.dq_u_settled` on both passive
@@ -701,9 +710,10 @@ at all (issue 054).
 
 Everything else is structural: `Ts` and `horizon_length` decide which problem was
 built, and a problem cannot be rebuilt under a running horizon.
-`max_consecutive_failures` is read-only for a narrower reason — it is checked
-once at startup against `horizon_length`, which is itself read-only, and a value
-judged against a number that cannot move must not be movable either.
+`max_consecutive_failures` is read-only because it is only meaningful against
+`horizon_length`, which is itself read-only — at `horizon_length - 1` the whole
+horizon is one stale knot. Nothing compares the two at startup, though: the
+schema's `gt_eq 1` is the only validation it gets.
 
 ### The machine's own numbers are not parameters
 

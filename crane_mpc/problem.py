@@ -433,8 +433,9 @@ def build_ocp(description_xml: str, parameters: dict, hydraulics: dict) -> tuple
 
     # --- the cost, as a nonlinear least-squares residual -----------------------
     #
-    # Row order: tracking, sway, effort, smoothness. `yref` carries `q_a_ref`,
-    # `dq_a_ref`, `q_eq`; every other row is zero.
+    # Row order: tracking, sway, lag/tool/progress, effort, smoothness. `yref`
+    # carries `q_eq`, `min(1, s_ref)` and `h_eff`; every other row is zero,
+    # because the rows that need a reference carry it inside themselves.
     #
     # Effort rows are `tau_a`, not `u`: pricing acceleration carries the
     # effective inertia, so the optimizer is gentler extended/loaded -- why
@@ -466,8 +467,8 @@ def build_ocp(description_xml: str, parameters: dict, hydraulics: dict) -> tuple
     # unnormalised -- weight absorbs scale.
     lag = tracking[LAG_AXIS] * tangent[LAG_AXIS]
     #
-    # Progress row: quadratic regulator toward one (time-scaling); `yref`
-    # carries the one, row itself is `v_s`.
+    # Progress row: `s` against `min(1, s_ref)` -- where to end up, not when to
+    # be there. `v_s` is a separate row and its `yref` stays zero.
     residual = ca.vertcat(
         tracking,
         dq_a - tangent * progress_rate,
