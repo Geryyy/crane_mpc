@@ -12,18 +12,44 @@ crane_mpc:
     start_signal_action: ""
     jtc_name: trajectory_controller_a2b
 
-    # 59 * 0.06 = 3.54 s, 1.5 sway periods. 60 from 40 (issue 223): the knots
-    # are what damps, and once `qp_solver_iter_max` bounds the QP they are
-    # affordable -- paired with `weights.dq_u` 1024 it beats 40 on *every*
-    # column, solve time included (table in the issue's notes). An earlier note
-    # here read "80 cost 2x the solve for no measured gain"; that was measured
-    # at `qp_solver_iter_max: 50`, where the solve was dominated by cycles
-    # wandering to MINSTEP rather than by N. Ts must equal
-    # sensor_to_valve_delay and be a whole number of velocity_loop.yaml ticks,
-    # so lookahead is bought in knots, not in a coarser grid. Publishes at
-    # 16.7 Hz against a 25 Hz interface; own issue.
+    # 79 * 0.06 = 4.74 s, 1.5 periods of the *loaded* sway mode -- 0.317 Hz
+    # measured in Gazebo under 800 kg (234's 0.350 Hz is the same mode).
+    # 80 from 60 (issue 240): 60 is 3.54 s, 1.5 *empty* periods but only 1.11
+    # loaded ones, and that is what left a carried block ringing. pp defaults,
+    # two live runs per N, the 20 s hold after a loaded A2B arrival --
+    #
+    #   N   hold tip rate envelope   |u_arm| at 0.31 Hz   loaded A2B arrival
+    #   60      0.08-0.26 rad/s        0.017-0.029 rad/s     0.048-0.198 rad/s
+    #   80      0.04-0.15              0.001-0.015           0.028-0.041
+    #
+    # i.e. the MPC's own command ripple at the mode's frequency drops ~3x and
+    # the arrival with it. No weight does this -- see `weights.q_u`. 0.02 is
+    # still not reached and `trials/robustness.md` §10 says what would; what 80
+    # does buy is the first end-to-end `basic_pick_and_place` on the launch
+    # defaults (1 of 3, block placed 37 mm out horizontally).
+    # Price: `solve_budget` is end to end and the solve roughly doubles, so late
+    # cycles (previous solution applied) go 2-6 % to 21-31 %; non-convergent
+    # cycles fall the other way on `basic_pick_and_place`, 2.6 % to 0.1-1.6 %,
+    # and the `wall_assembly` profile is the one that pays (6.4 % and a 0.66
+    # rad/s gate, worse than 60). Nothing escalated in any of the nine runs.
+    # On the machine, where the solve is 10 ms median and 44 ms max against the
+    # same 30 ms of tick-to-arrival, the median fits and the tail does not --
+    # unmeasured. Buying the reach without the knots
+    # wants a non-uniform grid: Ts must equal sensor_to_valve_delay and be a
+    # whole number of velocity_loop.yaml ticks, so today lookahead is bought in
+    # knots only.
+    # **N * Ts is now 4.74 s against `concrete_block_behavior_tree`'s
+    # kHorizonMaxAge of 3700 ms**, which issue 239 derived from 3.6 s. The tree
+    # now ends an MPC-driven move ~1 s before the last horizon is spent:
+    # conservative, not wrong, but that constant wants to follow this one.
+    # 60 from 40 was issue 223's -- the knots are what damps, and once
+    # `qp_solver_iter_max` bounds the QP they are affordable. An older note read
+    # "80 cost 2x the solve for no measured gain"; that was at
+    # `qp_solver_iter_max: 50`, where the solve was dominated by cycles
+    # wandering to MINSTEP rather than by N. Publishes at 16.7 Hz against a
+    # 25 Hz interface; own issue.
     Ts: 0.06
-    horizon_length: 60
+    horizon_length: 80
 
     # Transport dead time D, common to all six axes, modelled in the predictor
     # only -- symbolic.py carries no delay, so a second one double-counts.
@@ -105,6 +131,15 @@ crane_mpc:
       # exactly 0 before the move. So the offline sweep is what picked 6400, and
       # what live says is only that it costs nothing (0/3277 cycles refused,
       # solve p50 13-14 ms). `trials/robustness.md` §7 has both halves.
+      # **Loaded and live the price is worse than neutral in both directions**
+      # (issue 240, §10, one pp run per setting at the 60-knot horizon). The
+      # MPC's own arm command at the loaded mode's 0.31 Hz tracks the price --
+      # 0.001 rad/s at q_u/dq_u 0, 0.019 shipped, 0.032 at dq_u 4096, 0.060 with
+      # dq_sway_max pulled to 0.05 so the soft bound binds (481 slacked cycles)
+      # -- while the hold's tip rate envelope is U-shaped with the shipped pair
+      # at the bottom: 0.10 rad/s against 0.33-0.43 at zero and 0.23-0.33 at the
+      # binding bound. Pricing sway harder buys command ripple at the mode's own
+      # frequency and the plant rides it. `horizon_length` is what moved it.
       q_u: [6400.0, 6400.0]
       # 16x from 4.0, which had never moved while q_a, tcp, progress and
       # terminal_scale rose around it: 4x less residual swing at the end of the

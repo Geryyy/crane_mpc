@@ -1017,3 +1017,119 @@ Two notes for whoever comes back to this:
 - **228's chamber pressure is the remaining route.** It makes `tau_a` a
   measurement instead of an estimate, and a measured force needs no trust in C3
   at all — which is the only thing here that was ever the problem.
+
+## 10. The loaded sway is the horizon's, not the weights' — issue 240
+
+238 measured the carrying A2B move arriving at 0.198 rad/s against
+`sway.dq_u_settled` 0.02 and growing. This section is where that number was
+taken apart. **Offline is blind to it**: `wire_chain --payload-mass 800`
+(COM `(-0.0098, -0.0211, 1.0334)` in K8, what the tree actually sets) scores
+`sway_rate_late` 0.008/0.013 rad/s, and so does a full payload mismatch
+(OCP 0 kg, plant 800) at 0.015/0.013. Every number below is therefore live
+Gazebo, `gazebo_basic_pick_and_place_pzs100` on its defaults, `gui:=False`,
+238's harness, one run per setting under `flock /tmp/ralph-sim.lock`.
+
+### The instrument
+
+`/crane/mpc/horizon` carries the solved passive columns, so a bag of it plus
+`/joint_states` says what the MPC *predicted* against what the plant *did*. Per
+horizon-silence onset — the instant `WaitForMoveComplete` reads its gates for
+the last time — the 19 s of MPC-driven hold before it gives: the tip rate
+envelope in its first and second half, the mode's frequency off the tip
+position's zero crossings, and the leading knot's commanded arm velocity
+(`velocities + effort`, the JTC's open-loop sum) resolved at that frequency.
+
+### The MPC predicts a damping it never delivers
+
+Every cycle of the loaded hold, the published horizon takes the tip rate from
+the measured 0.05-0.07 rad/s down to 0.012 over its 3.54 s, i.e. an envelope
+time constant of ~1.6 s, and the terminal knot reads 1e-5. The plant instead
+holds 0.04-0.11 rad/s for the whole 20 s and grows: 0.038 rad/s at the plan's
+end, 0.108 at the silence. 234's free decay for this mode is tau = 21 s, so a
+hold that merely did nothing would read 0.07 — the hold is a pump on this arm
+too, and it is the MPC driving it, not the JTC's position hold.
+
+The command is where it shows. Over one 19 s loaded hold, at the mode's
+0.322 Hz: the MPC's arm command carries 0.0130 rad/s at -45 deg against the tip
+rate, the plant's own arm velocity 0.0126 rad/s at -4 deg, and the tip envelope
+grows 1.33x across the window. 234 measured the JTC position hold sustaining
+this same mode on 0.0040 rad/s of arm command. The MPC's ripple is 3x that.
+
+### The weights make it worse in both directions
+
+| setting | hold tip rate envelope | \|u_arm\| at the mode | slacked | gate fails at |
+| --- | --- | --- | --- | --- |
+| `q_u` 0, `dq_u` 0 | 0.33 -> 0.43 rad/s | 0.0014-0.0116 | 0 | 0.045, 0.274 |
+| **shipped** 6400 / 1024 | 0.10 -> 0.11 | 0.0187-0.0194 | 0 | 0.0995, 0.0999 |
+| `dq_u` 4096 | 0.11 -> 0.21 | 0.0271-0.0422 | 5 | 0.053, 0.151 |
+| `dq_sway_max` 0.05 | 0.23 -> 0.33 | 0.0536-0.0606 | 481 | 0.046, 0.140 |
+
+`|u_arm|` at the mode is monotone in the price and the envelope is U-shaped with
+the shipped pair at its bottom. The reading is one mechanism: a sway cost the
+single-iteration SQP cannot satisfy comes out as command ripple at the sway's own
+frequency, and the plant rides it. `dq_sway_max` 0.05 is the clearest cell —
+it is the only setting that makes the soft bound bind (481 slacked cycles
+against 0 everywhere else), it triples the ripple, and the sway triples with it.
+So 6400/1024 is already a local optimum and no weight reaches 0.02.
+
+### The horizon does move it
+
+3.54 s is 1.5 periods of the *empty* mode and 1.11 of the loaded one. At 80
+knots it is 4.74 s, 1.5 loaded periods, which is the rule the 60 was picked by
+applied to the mode that is actually ringing.
+
+| N | reach | hold tip rate envelope | \|u_arm\| at the mode | late cycles | non-convergent | gate fails at |
+| --- | --- | --- | --- | --- | --- | --- |
+| 60 | 3.54 s | 0.08-0.26 rad/s | 0.017-0.029 rad/s | 24/1010, 60/1082 | 2.6 %, 3.3 % | 0.0995, 0.0999 / 0.049, 0.135 |
+| 70 | 4.14 s | 0.03-0.30 | 0.005-0.024 | 108/1143 | 2.4 % | none |
+| 80 | 4.74 s | 0.04-0.15 | 0.003-0.012 | 294/1214, 285/1208 | 0.8 %, 0.7 % | 0.021, 0.023 / none |
+
+Two runs each at 60 and 80, one at 70; machine load (`uptime` 1-minute) 1.5-14.5
+through the campaign, and the two *cheapest* runs of the set are a 60 and an 80,
+so the separation is not the box. At 80 the settle gate stops being what fails
+the pipeline: both runs then die on `theta8_rotator_joint is 0.0x from its goal`
+against `ex_goal_tolerance` 0.02, which is 239's third blocker and not this one.
+
+**What 80 costs.** `solve_budget` is end to end, the solve roughly doubles
+(offline p50 6.4 -> 10.4 ms, live ~13 -> ~25 ms) and ~30 ms of the 60 ms is
+already tick-to-arrival, so a quarter of the cycles publish the previous horizon
+shifted a knot instead of a fresh one. Non-convergent cycles fall by 4x in
+exchange. Nothing escalated in any run. Buying the reach without the knots means
+a non-uniform grid, which `horizon.py`, the published knot grid and the JTC
+encoding all currently forbid — that is the follow-up, not a tuning knob.
+
+### The shipped campaign, 80 knots, launch defaults
+
+Three `basic_pick_and_place` and one `wall_assembly`, nothing patched. Load
+(`uptime` 1-minute) 1.3 before the first and 12.5-16.8 through the rest.
+
+| run | wall | completed | loaded A2B arrival, tip | late | non-conv | where it stopped |
+| --- | --- | --- | --- | --- | --- | --- |
+| acc1 | 178 s | no | 0.028 rad/s | 253/1183 | 1.4 % | place: sway 0.0838, and a dwell that ran out |
+| acc2 | 178 s | no | 0.035 | 259/1191 | 1.6 % | place: sway 0.0737, then `theta8_rotator_joint` 0.0336 |
+| acc3 | 146 s | **yes** | 0.041 | 190/770 | 0.1 % | — `block_0` **TASK_PLACED** |
+| accw | 219 s | no | 0.085 | 496/1603 | 6.4 % | place: sway 0.6645, `theta2_boom_joint` 0.0205 |
+
+acc3 is the **first end-to-end `basic_pick_and_place` on the launch defaults**:
+`block_0` placed at (-13.026, -2.973, 0.314) against a goal of
+(-13.000, -3.000, 0.300) — 37 mm horizontally, 14 mm in z. Fifteen arrivals, all
+but two inside 0.02, and the two loaded ones at 0.041 and 0.022.
+
+`wall_assembly` is where 80 is not an improvement: longer reach, bigger
+excursions, 6.4 % non-convergent against 2.6 % at 60, and one gate at 0.66
+rad/s. That profile was already failing in `place_block` at 60 (238, 239) and
+this does not fix it.
+
+**0.02 rad/s is not met.** The three loaded arrivals are 0.028-0.041 against
+238's 0.198, i.e. 5-7x better and still 1.4-2x the bound. Reaching it needs one
+of two things, neither in this package:
+
+- **the pump itself.** On `cbs_mpc_active` the JTC's PI is in the loop under the
+  MPC's feed-forward and the OCP does not model it; 234 measured that loop
+  sustaining this mode on 0.0040 rad/s of arm command. `cycle.py:141`'s
+  `jtc_output` is the only thing that would let the predictor see it, and it
+  reports itself unavailable whenever `/crane/controller_state` thins out.
+- **a hand-off the move does not have to damp.** `subtree_lift.xml` leaves
+  0.09 rad/s even at `slow_down` 3.0 (234), and free decay for this mode is
+  tau = 21 s at that amplitude and ~51 s below it — so 20 s of hold cannot
+  reach 0.02 from 0.09 however well it is controlled.
