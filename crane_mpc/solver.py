@@ -127,19 +127,95 @@ class PathCycle:
     what earlier cycles already spent and the state carries only the rest --
     `s = origin + progress`.
 
-    `nominal_rate` is the plan's own pace in path parameter per second, which
-    depends on what the path spans and so cannot be derived here: `1/duration`
-    off `/crane/joint_path` live, an offline harness' own move span. Every cycle
-    brings one -- there is no fit-the-window fallback (issue 188).
+    `nominal_rate` is the plan's own *mean* pace in path parameter per second,
+    which depends on what the path spans and so cannot be derived here:
+    `1/duration` off `/crane/joint_path` live, an offline harness' own move
+    span. Every cycle brings one -- there is no fit-the-window fallback (188).
+
+    `s_profile` is the plan's own time law on top of it, `s(t)` sampled
+    uniformly in time over `1/nominal_rate` (`JointPath.s_profile`). `None`
+    prices progress against the mean ramp, which is every pre-253 cycle and
+    runs the middle of a move at 0.57 of the plan's own pace (issue 250).
     """
 
     control: np.ndarray
     origin: float
     nominal_rate: float
+    s_profile: np.ndarray | None = None
+
+    def __post_init__(self) -> None:
+        law = self.s_profile
+        if law is None or len(law) == 0:
+            self.s_profile = None
+            return
+        law = np.asarray(law, dtype=float)
+        backwards = law.size < 2 or np.any(np.diff(law) < 0.0) or law[-1] <= law[0]
+        if backwards or not np.all(np.isfinite(law)):
+            raise ValueError(
+                f"the path's time law carries {law.size} samples that are not a "
+                "finite, non-decreasing, advancing s(t); a law that stands still "
+                "or goes backwards is not a pace progress can be priced against"
+            )
+        self.s_profile = law
 
     def remaining(self) -> float:
         """How much path parameter is left, which is the progress state's own ceiling."""
         return max(0.0, problem.PROGRESS_RATE_REFERENCE - float(self.origin))
+
+    def _grid(self) -> np.ndarray:
+        """Give the law's own time grid: uniform over the plan's duration."""
+        return np.linspace(0.0, 1.0 / float(self.nominal_rate), self.s_profile.size)
+
+    def plan_time(self, s: float) -> float:
+        """
+        Plan seconds at which the law stands at `s`, i.e. the law inverted.
+
+        Anchoring the reference here rather than at wall time is what keeps the
+        progress row a pace and not a schedule: it is re-read off `origin` every
+        cycle, so schedule error cannot accumulate into a catch-up demand (250).
+        `np.interp` cannot invert this -- the plan rests at both ends, so `s`
+        repeats and the inverse is a set there; the earliest time of it is taken.
+        """
+        law, grid = self.s_profile, self._grid()
+        above = int(np.searchsorted(law, s, side="left"))
+        if above <= 0:
+            return 0.0
+        if above >= law.size:
+            return float(grid[-1])
+        step = law[above] - law[above - 1]
+        share = 0.0 if step <= 0.0 else (s - law[above - 1]) / step
+        return float(grid[above - 1] + share * (grid[above] - grid[above - 1]))
+
+    def progress_at(self, elapsed) -> np.ndarray:
+        """
+        Where the plan itself is `elapsed` seconds on from this cycle's `origin`.
+
+        The mean ramp without a law; with one, the law anchored at `origin`.
+        Capped at the path's end, which is where `s` stops being a parameter.
+        """
+        ahead = np.asarray(elapsed, dtype=float)
+        if self.s_profile is None:
+            reached = float(self.origin) + ahead * float(self.nominal_rate)
+        else:
+            start = self.plan_time(float(self.origin))
+            reached = np.interp(start + ahead, self._grid(), self.s_profile)
+        return np.minimum(problem.PROGRESS_RATE_REFERENCE, reached)
+
+    def peak_rate(self) -> float:
+        """
+        Give the fastest pace the plan asks for, `max ds/dt`; the mean with no law.
+
+        What `v_s`'s ceiling is built on: a ceiling at the mean caps the machine
+        at 0.85 of the plan's own peak even when the cost does ask for it (250).
+        """
+        if self.s_profile is None:
+            return float(self.nominal_rate)
+        intervals = self.s_profile.size - 1
+        return float(
+            max(np.max(np.diff(self.s_profile)), 0.0)
+            * intervals
+            * float(self.nominal_rate)
+        )
 
 
 @dataclass
@@ -943,15 +1019,16 @@ class Ocp:
         Asking every stage for the end of the path instead is asking for flat
         out everywhere: `s` runs to its ceiling in the first 0.7 s of a 2.34 s
         horizon and the tracking rows spend the rest resisting it (measured,
-        460 mm off path against 448 and 31 of 178 solves refused).
+        460 mm off path against 448 and 31 of 178 solves refused). The pace is
+        the plan's own `s(t)` when the path brought one and its mean otherwise
+        -- `PathCycle.progress_at` is the one place that decides which.
         """
-        reached = float(path.origin) + stage * self.Ts * float(path.nominal_rate)
-        return min(problem.PROGRESS_RATE_REFERENCE, reached)
+        return float(path.progress_at(stage * self.Ts))
 
     def progress_rate_max(self, path: PathCycle) -> float:
-        """`v_s`'s ceiling: declared headroom against this path's own pace."""
+        """`v_s`'s ceiling: declared headroom against this path's fastest pace."""
         headroom = float(self.parameters["limits"]["progress_rate_headroom"])
-        return headroom * float(path.nominal_rate)
+        return headroom * path.peak_rate()
 
     def progress_ceiling(self, stage: int, path: PathCycle) -> float:
         """
@@ -1040,10 +1117,7 @@ class Ocp:
         )
         reference[:, passive] = equilibrium
         # `nominal_progress` per stage: where the plan's own pace reaches by then.
-        reference[:, problem.Y_PROGRESS] = np.minimum(
-            problem.PROGRESS_RATE_REFERENCE,
-            float(path.origin) + elapsed * float(path.nominal_rate),
-        )
+        reference[:, problem.Y_PROGRESS] = path.progress_at(elapsed)
         reference[
             :intervals,
             problem.Y_ACTUATED_FORCE : problem.Y_ACTUATED_FORCE + cs.PLANNED_DOF,

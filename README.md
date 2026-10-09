@@ -664,8 +664,14 @@ velocity.
 `crane_planning` publishes both: `crane_msgs/JointPath` on `/crane/joint_path`,
 latched, the planned curve `q_a(s)` sampled uniformly in its own parameter,
 and the timed `JointTrajectory` on `/crane/reference`. The cost is written against
-the curve and chooses where on it to be, so it needs no timing; `duration` is the
-pace the progress row is priced against, not a schedule.
+the curve and chooses where on it to be, so it needs no schedule — but it does need
+the plan's pace, and `duration` alone is only its mean. `s_profile` carries the
+plan's own time law `s(t)`, and the progress row is priced against that law
+anchored at this cycle's `origin`: the pace the plan meant, point by point, with
+no schedule error carried between cycles. Priced against the mean instead, the
+machine ran the fast middle of a move at 0.72 of the plan's peak speed and was
+still moving at plan end (issues 250, 253). An empty `s_profile` is allowed and
+is that mean ramp, so a producer that sends none still drives.
 
 The two are paired by `header.stamp`, and **only a pair drives**: a curve whose
 stamp is not the running reference's belongs to another plan, so the cycle falls

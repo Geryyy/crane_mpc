@@ -236,9 +236,11 @@ crane_mpc:
       # Same keys and same numbers as crane_planner.yaml's -- two copies, by hand.
       q_sway_max: [0.2, 0.2]
       dq_sway_max: [1.0, 0.5]
-      # 50% catch-up on the plan's own average pace, and it stays 50% if the
-      # grid changes. A planner profile peaking above 1.5x its own average
-      # cannot be matched mid-move -- unmeasured.
+      # 50% catch-up on the fastest pace the plan asks for (`JointPath.s_profile`'s
+      # peak; its mean only where a plan carries no law), and it stays 50% if the
+      # grid changes. Against the mean this bound *was* the lag: the A2B profile
+      # peaks at 1.76x its own average, so 1.5x the average capped the machine at
+      # 0.85 of the plan's peak even where the cost asked for it (issues 250, 253).
       progress_rate_headroom: 1.5
       progress_accel_max: 2.0
       # `u_max / 0.585 s` = 4x `u_max / 2.34 s`. Still a control bound, like

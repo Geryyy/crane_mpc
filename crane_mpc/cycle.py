@@ -401,6 +401,8 @@ class Cycle:
         self.path_duration = 0.0
         self.path_stamp_ns = 0
         self.path_origin = 0.0
+        #: The plan's own `s(t)` over `path_duration`; `None` is the mean ramp.
+        self.path_s_profile: np.ndarray | None = None
         #: The path this cycle is written against; set by `gates`, never `None` past it.
         self.path: PathCycle | None = None
         # `watch_progress` state; only published cycles feed it.
@@ -489,9 +491,19 @@ class Cycle:
         # Stall watch is per plan: a new reference is the re-plan a stall asks for.
         self.forget_stall()
 
-    def adopt_path(self, control: np.ndarray, duration: float, stamp_ns: int) -> None:
+    def adopt_path(
+        self,
+        control: np.ndarray,
+        duration: float,
+        stamp_ns: int,
+        s_profile=None,
+    ) -> None:
         """
         Take the planner's curve, already fitted, for the plan stamped `stamp_ns`.
+
+        `s_profile` is the plan's own time law over `duration`, or empty/`None`
+        for a producer that sends none -- then the progress row is priced
+        against the mean ramp, as every cycle before issue 253 was.
 
         Stored rather than used: `resolved_path` only reaches for it once the
         reference of the same stamp is the one this cycle is running, so a curve
@@ -504,6 +516,9 @@ class Cycle:
         self.path_control = np.asarray(control, dtype=float)
         self.path_duration = float(duration)
         self.path_stamp_ns = int(stamp_ns)
+        self.path_s_profile = (
+            None if s_profile is None else np.asarray(s_profile, dtype=float)
+        )
 
     def adopt_mode(self, requested: str) -> str:
         """Move to `requested` and cold start. Returns the mode left behind."""
@@ -698,6 +713,7 @@ class Cycle:
             control=self.path_control,
             origin=min(max(self.path_origin, 0.0), 1.0),
             nominal_rate=1.0 / self.path_duration,
+            s_profile=self.path_s_profile,
         )
 
     def path_refusal(self) -> str:

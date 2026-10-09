@@ -163,11 +163,12 @@ PLANNED = ["sw", "ha", "ka", "sa", "ro"]
 ROWS = problem.PATH_POINTS
 
 
-def joint_path(rows=ROWS, names=None, duration=2.0):
+def joint_path(rows=ROWS, names=None, duration=2.0, law=()):
     """A `JointPath` whose value at row `i`, column `j` is `i + j / 10`."""
     names = PLANNED if names is None else names
     message = JointPath()
     message.joint_names = list(names)
+    message.s_profile = list(law)
     message.q_path = [
         float(row) + column / 10.0
         for row in range(rows)
@@ -182,9 +183,11 @@ def test_the_path_is_lifted_by_name_and_not_by_column():
     # Wire order reversed against this node's: read by column the rows come back
     # mirrored, and a mirrored path is a different move at the same cost.
     message = joint_path(names=list(reversed(PLANNED)))
-    samples, duration, why = path_from_message(message, PLANNED)
+    samples, duration, law, why = path_from_message(message, PLANNED)
     assert why == ""
     assert duration == pytest.approx(2.0)
+    # No law on the wire is `None` here, which is the mean pace downstream.
+    assert law is None
     expected = np.array(
         [
             [row + (len(PLANNED) - 1 - column) / 10.0 for column in range(len(PLANNED))]
@@ -211,14 +214,25 @@ def test_the_path_is_lifted_by_name_and_not_by_column():
             lambda m: setattr(m, "joint_names", ["sw", "ha", "ka", "sa", "zz"]),
             "not name ro",
         ),
+        # An empty law is how a producer says it has none; one that goes
+        # backwards or stands still is a broken plan, not an absent field.
+        (lambda m: setattr(m, "s_profile", [0.0, 0.6, 0.4, 1.0]), "time law"),
+        (lambda m: setattr(m, "s_profile", [0.5, 0.5]), "time law"),
     ],
 )
 def test_a_path_this_node_cannot_use_is_refused_whole(spoil, clause):
     message = joint_path()
     spoil(message)
-    samples, _, why = path_from_message(message, PLANNED)
+    samples, _, _, why = path_from_message(message, PLANNED)
     assert samples is None
     assert clause in why
+
+
+def test_the_plans_own_time_law_is_carried_through_as_it_stands():
+    law = [0.0, 0.1, 0.55, 0.9, 1.0]
+    samples, _, carried, why = path_from_message(joint_path(law=law), PLANNED)
+    assert why == "" and samples is not None
+    assert carried == pytest.approx(law)
 
 
 def _jtc_sample(message, at):

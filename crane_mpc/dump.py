@@ -101,6 +101,9 @@ def tick(cycle, solution, reference) -> dict:
         "path_control": path.control,
         "path_origin": path.origin,
         "path_nominal_rate": path.nominal_rate,
+        # Empty for a plan that brought no time law: the ramp is what that cycle
+        # priced progress against, so a replay must not invent one.
+        "path_s_profile": ABSENT if path.s_profile is None else path.s_profile,
         "payload_mass_kg": ocp.payload_mass_kg,
         "payload_com_m": ocp.payload_com_m,
         "p": written["p"],

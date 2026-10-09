@@ -334,9 +334,14 @@ def main(argv=None) -> int:
         "--pace",
         type=float,
         default=1.0,
-        help="divide the duration handed to adopt_path, i.e. multiply the "
-        "progress reference's slope. 1 is the plan's mean pace, which is what "
-        "nominal_rate is; the plan's own s(t) peaks above it (issue 250)",
+        help="divide the duration handed to adopt_path, i.e. compress the "
+        "progress reference in time. 1 is the plan's own pace (issue 250)",
+    )
+    parser.add_argument(
+        "--mean-pace",
+        action="store_true",
+        help="hand adopt_path no time law, so the progress row is priced "
+        "against the plan's mean pace -- every cycle before issue 253",
     )
     parser.add_argument(
         "--plant-payload", type=float, default=None, help="kg; default --payload-mass"
@@ -535,10 +540,15 @@ def fly(
         plan.dq_a,
     )
     cycle.adopt_reference(reference, epoch_ns)
-    # Duration only sets `PathCycle.nominal_rate`; the curve and the `dq_a_ref`
-    # knots are untouched, so `--pace` moves the progress reference's slope and
-    # nothing else.
-    cycle.adopt_path(harness.path_control(plan), plan.duration / options.pace, epoch_ns)
+    # Duration sets `PathCycle.nominal_rate` and the law's own time grid; the
+    # curve and the `dq_a_ref` knots are untouched, so `--pace` compresses the
+    # progress reference in time and nothing else.
+    cycle.adopt_path(
+        harness.path_control(plan),
+        plan.duration / options.pace,
+        epoch_ns,
+        None if options.mean_pace else plan.timing.s,
+    )
     if options.cadence_phase:
         anchor = timing.anchor
         phase_ns = int(round(options.cadence_phase * 1e9))
@@ -738,11 +748,10 @@ def fly(
     # still moving past plan end, so a window that stops there flatters it.
     # `plan.dq_a` is the actuated six; the planned five lead it, as in `dq_a_ref`.
     plan_peak = np.abs(plan.dq_a[:, :nq]).max(0)
-    # What the MPC is *asked* to do with the path parameter against what the plan
-    # does with it: `PathCycle.nominal_rate` is `1/duration`, the plan's mean
-    # pace, while the planner's own `s(t)` starts and ends at rest and so peaks
-    # above it. The progress row's reference is that mean, so this ratio is the
-    # ceiling on `achieved / plan` before any weight or bound is involved.
+    # How much faster than its own mean the plan's `s(t)` runs in the middle.
+    # Under `--mean-pace` the progress row is priced against the mean, so this
+    # ratio is the ceiling on `achieved / plan` before any weight or bound is
+    # involved (issue 250); with the law in hand it is priced point by point.
     plan_pace = float(np.abs(plan.timing.speed).max() * plan.duration)
     dq_peak = np.abs(log[:, 2 + nq + 2 : 2 + 2 * nq + 2]).max(0)
 

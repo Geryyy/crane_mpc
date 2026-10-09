@@ -536,7 +536,7 @@ class MpcNode(Node):
         """
         if self._path_message is None or not self.ready():
             return
-        samples, duration, why = hz.path_from_message(
+        samples, duration, law, why = hz.path_from_message(
             self._path_message, self._joints[:PLANNED_DOF]
         )
         if samples is None:
@@ -550,6 +550,7 @@ class MpcNode(Node):
             path_control(samples),
             duration,
             Time.from_msg(self._path_message.header.stamp).nanoseconds,
+            law,
         )
         self._path_message = None
 

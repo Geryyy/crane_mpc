@@ -17,6 +17,7 @@ from crane_mpc.horizon import Grid, Knots, resample
 from crane_mpc.solver import (
     Ocp,
     Outcome,
+    PathCycle,
     export_key,
     move_suppression,
     predictor_label,
@@ -94,6 +95,66 @@ def solved(ocp, x0, horizon, q_eq, guess=None, **keywords):
     """
     keywords.setdefault("path", window_path(ocp, horizon))
     return ocp.solve(x0, horizon, q_eq, guess, **keywords)
+
+
+#: A plan that rests at both ends: s(t) = (1 - cos(pi t/T))/2, whose pace peaks at
+#: pi/2 = 1.571x its own mean -- the shape the A2B profile has (1.759x, issue 250).
+LAW_PEAK_OVER_MEAN = np.pi / 2.0
+
+
+def resting_path(duration=10.0, origin=0.0, samples=201):
+    """A `PathCycle` carrying that law, and nothing else the pacing reads."""
+    grid = np.linspace(0.0, duration, samples)
+    law = 0.5 * (1.0 - np.cos(np.pi * grid / duration))
+    control = np.zeros((problem.PATH_POINTS, PLANNED))
+    return PathCycle(control, origin, 1.0 / duration, law), grid, law
+
+
+def test_the_progress_reference_is_paced_by_the_plans_own_time_law():
+    """
+    Priced against the law anchored at `origin`, and `v_s` capped off its peak.
+
+    Both against the mean they were before issue 253: the reference ran the fast
+    middle of a move at 1/1.76 of the plan's pace and the ceiling could not have
+    held it anyway. Anchored at `origin` rather than at wall time, so a cycle
+    that fell behind is not handed a catch-up demand -- the pace is the plan's,
+    the schedule stays the optimizer's.
+    """
+    path, grid, law = resting_path(origin=0.5)
+    assert path.peak_rate() == pytest.approx(
+        LAW_PEAK_OVER_MEAN * path.nominal_rate, rel=1e-3
+    )
+
+    # `origin` 0.5 is the law's half-way point, which is where it is fastest.
+    elapsed = np.array([0.0, 1.0, 2.0])
+    assert path.progress_at(elapsed) == pytest.approx(
+        np.interp(0.5 * grid[-1] + elapsed, grid, law)
+    )
+    assert path.progress_at(0.4) > 0.5 + 0.4 * path.nominal_rate
+    # Still a path parameter past the end: the cap is what keeps `tangent(1)`
+    # from asking for motion away from the goal.
+    assert path.progress_at(2.0 * grid[-1]) == pytest.approx(1.0)
+
+
+def test_a_path_with_no_time_law_is_priced_at_the_mean_pace_exactly():
+    """The pre-253 ramp, to the bit: an empty field changes nothing (issue 253)."""
+    control = np.zeros((problem.PATH_POINTS, PLANNED))
+    for law in (None, [], np.zeros(0)):
+        path = PathCycle(control, 0.25, 0.1, law)
+        assert path.s_profile is None
+        assert path.peak_rate() == path.nominal_rate
+        elapsed = np.arange(5) * 0.6
+        assert np.array_equal(
+            path.progress_at(elapsed),
+            np.minimum(1.0, 0.25 + elapsed * 0.1),
+        )
+
+
+def test_a_time_law_that_does_not_advance_is_refused():
+    control = np.zeros((problem.PATH_POINTS, PLANNED))
+    for law in ([0.0, 0.5, 0.4, 1.0], [0.3, 0.3], [0.0, np.nan, 1.0]):
+        with pytest.raises(ValueError, match="time law"):
+            PathCycle(control, 0.0, 0.1, law)
 
 
 def test_the_predictor_carries_the_command_that_is_in_flight(ocp, state):

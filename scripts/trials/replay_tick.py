@@ -92,6 +92,8 @@ def replay(ocp, record):
             control=record["path_control"],
             origin=float(record["path_origin"]),
             nominal_rate=float(record["path_nominal_rate"]),
+            # Absent in a dump written before issue 253; empty is the ramp either way.
+            s_profile=record.get("path_s_profile"),
         ),
         in_flight=None if in_flight.size == 0 else in_flight,
     )
