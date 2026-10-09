@@ -12,50 +12,71 @@ crane_mpc:
     start_signal_action: ""
     jtc_name: trajectory_controller_a2b
 
-    # 79 * 0.06 = 4.74 s, 1.5 periods of the *loaded* sway mode -- 0.317 Hz
-    # measured in Gazebo under 800 kg (234's 0.350 Hz is the same mode).
-    # 80 from 60 (issue 240): 60 is 3.54 s, 1.5 *empty* periods but only 1.11
-    # loaded ones, and that is what left a carried block ringing. pp defaults,
-    # two live runs per N, the 20 s hold after a loaded A2B arrival --
+    # 39 * 0.12 = 4.68 s of reach, 1.5 periods of the *loaded* sway mode --
+    # 0.317 Hz measured in Gazebo under 800 kg (234's 0.350 Hz is the same mode).
+    # The reach is what damps (issue 240: 3.54 s left a carried block ringing,
+    # 4.74 s did not), and it is held here while the knot doubles.
     #
-    #   N   hold tip rate envelope   |u_arm| at 0.31 Hz   loaded A2B arrival
-    #   60      0.08-0.26 rad/s        0.017-0.029 rad/s     0.048-0.198 rad/s
-    #   80      0.04-0.15              0.001-0.015           0.028-0.041
+    # 0.12/40 from 0.06/80 (issue 247), and the reason is the late cycle, not the
+    # sway. At 0.06 the node applied the previous horizon on 21-31 % of live
+    # cycles (240) and 33.9 % of 246's run, because `solve_budget` is `Ts` and is
+    # measured end to end from the state's own stamp. Doubling `Ts` doubles that
+    # budget. What it costs, offline (`wire_chain`, 30 s, three cells, du_max x4):
     #
-    # i.e. the MPC's own command ripple at the mode's frequency drops ~3x and
-    # the arrival with it. No weight does this -- see `weights.q_u`. 0.02 is
-    # still not reached and `trials/robustness.md` §10 says what would; what 80
-    # does buy is the first end-to-end `basic_pick_and_place` on the launch
-    # defaults (1 of 3, block placed 37 mm out horizontally).
-    # Price: `solve_budget` is end to end and the solve roughly doubles, so late
-    # cycles (previous solution applied) go 2-6 % to 21-31 %; non-convergent
-    # cycles fall the other way on `basic_pick_and_place`, 2.6 % to 0.1-1.6 %,
-    # and the `wall_assembly` profile is the one that pays (6.4 % and a 0.66
-    # rad/s gate, worse than 60). Nothing escalated in any of the nine runs.
-    # On the machine, where the solve is 10 ms median and 44 ms max against the
-    # same 30 ms of tick-to-arrival, the median fits and the tail does not --
-    # unmeasured. Buying the reach without the knots
-    # wants a non-uniform grid: Ts must equal sensor_to_valve_delay and be a
-    # whole number of velocity_loop.yaml ticks, so today lookahead is bought in
-    # knots only.
-    # **N * Ts is now 4.74 s against `concrete_block_behavior_tree`'s
-    # kHorizonMaxAge of 3700 ms**, which issue 239 derived from 3.6 s. The tree
-    # now ends an MPC-driven move ~1 s before the last horizon is spent:
-    # conservative, not wrong, but that constant wants to follow this one.
-    # 60 from 40 was issue 223's -- the knots are what damps, and once
-    # `qp_solver_iter_max` bounds the QP they are affordable. An older note read
-    # "80 cost 2x the solve for no measured gain"; that was at
-    # `qp_solver_iter_max: 50`, where the solve was dominated by cycles
-    # wandering to MINSTEP rather than by N. Publishes at 16.7 Hz against a
+    #   grid   solve ms 50/90/max   empty tip rate+2s   loaded     hand-off
+    #   0.06    9.1 / 11.7 / 25.0     0.0085 rad/s       0.0147     0.0047
+    #   0.12    4.3 /  5.5 /  8.3     0.0199             0.0154     0.0045
+    #
+    # i.e. the empty cell's tip rate ~2.3x -- 0.12 s is 20 samples of the empty
+    # mode's 2.34 s period, still enough to shape it, where 244 measured 0.18 s
+    # (13 samples) as the step that breaks. Loaded and hand-off are flat, peak
+    # sway is 0.007-0.012 rad worse, the hold is quieter (dq_a RMS 0.0106 ->
+    # 0.0100 loaded) and `du_max` activity rises 0.18-0.25 -> 0.25-0.34.
+    #
+    # Live, two headless `basic_pick_and_place` runs on the launch defaults, load
+    # 2.2-2.5 -> 16.4-21.8, against 240's four runs and 242's three:
+    #
+    #            late cycles   solve ms 50/90/max   worst sway 2 s after arrival
+    #   240/242   21-31 %       18.9-28.6 / - / 126  0.028-0.085 loaded
+    #   246 0.06  33.9 %        26.9 / 35.1 / 70.5   0.0074/0.0087 empty
+    #   247 run 1  0.36 %       14 / 18 / 28         0.0247 over 9 arrivals
+    #   247 run 2  0.36 %       14 / 17 / 35         0.0568 over 13 arrivals
+    #
+    # **The late share is what moved; the sway did not.** 0.0247 and 0.0568 is the
+    # run-to-run spread of this quantity, and the second is 242's own worst number
+    # (0.057) -- so "no worse than 240/242", not better, and nobody should read a
+    # damping improvement into this change. What did move besides the late share is
+    # completion: both runs placed block_0 (TASK_PLACED, 136-138 s, 49-50 mm out
+    # horizontally against 240's acc3 37 mm, the one column that got worse), where
+    # 240 finished 1 of 4 and 242 1 of 3. The horizon stream is a clean 8.3 Hz:
+    # 0.18-0.36 % of consecutive horizons repeat a measurement stamp against 31 %
+    # at 0.06 s, and the worst inter-horizon gap *while driving* is 168-176 ms,
+    # which is what `topic_timeout` is now sized on.
+    #
+    # Ts must equal `sensor_to_valve_delay` and be a whole number of
+    # velocity_loop.yaml ticks (`config.check_settings`), so 0.12 is 12 ticks and
+    # the modelled dead time moves with it. 244 measured that coupling as the
+    # *cheap* half of a coarser grid (overstating the dead time by 60 ms costs the
+    # loaded tip row less than the resolution does), so decoupling it buys nothing.
+    # `max_clock_skew` and `concrete_block_behavior_tree`'s kHorizonMaxAge are
+    # both derived from this pair; both moved with it.
+    # 60 from 40 was issue 223's and 80 from 60 was 240's -- the *reach* is what
+    # damps, and an older note read "80 cost 2x the solve for no measured gain";
+    # that was at `qp_solver_iter_max: 50`, where the solve was dominated by
+    # cycles wandering to MINSTEP rather than by N. Publishes at 8.3 Hz against a
     # 25 Hz interface; own issue.
-    Ts: 0.06
-    horizon_length: 80
+    Ts: 0.12
+    horizon_length: 40
 
     # Transport dead time D, common to all six axes, modelled in the predictor
     # only -- symbolic.py carries no delay, so a second one double-counts.
-    # Same quantity crane_model's actuator fit calls `dead_time_s`; a test pins
-    # this against it.
-    sensor_to_valve_delay: 0.06
+    # Pinned to `Ts` by `config.check_settings`, which is what picks the number:
+    # crane_model's actuator fit measures `dead_time_s` 0.06, so at the 0.12 knot
+    # the predictor deliberately **overstates** the dead time by one knot. 244
+    # measured that as the cheap direction (overstating costs the loaded tip row
+    # ~a third; the plant's dead time outrunning the model's cost 4x), and a test
+    # pins the direction and the multiple rather than equality.
+    sensor_to_valve_delay: 0.12
     max_state_age: 0.2
     # A fixed constant added to every Hessian **diagonal** -- it damps the
     # Newton step, it does not move the minimiser. It is the entirety of the
@@ -81,11 +102,29 @@ crane_mpc:
     # `command_delay` being 2 Ts is the dead time to the joint, not slack for
     # the message (issue 230). Live sim, tick to arrival 30 ms median, solve 10
     # ms median, 44 ms max.
-    solve_budget: 0.06
-    # 8.3 Hz off the 16.7 Hz cycle, the largest decimation not running ahead of
-    # a 20 Hz consumer.
-    solver_health_decimation: 2
-    # 300 ms of fallback horizon against a 3.54 s one.
+    # **It is not the solve that spends this.** 246's run: 322 health messages,
+    # end-to-end latency uncorrelated with solver time (r = 0.005) and the late
+    # cycles' solve distribution identical to the on-time ones' (p50 26.5 vs
+    # 27 ms). The latency is the *age of the state stamp* -- the node's sim clock
+    # only advances between callbacks, so what this measures is how stale
+    # /joint_states was when the timer fired: p50 10 ms with a tail at 80-98 ms.
+    # Against that same measured tail, 60 ms caught 32.9 % of cycles and 120 ms
+    # catches 0.3 %, which is what issue 247 bought and the solve's 2x was not.
+    # 247's own two runs then read latency p50/p90 10/10 ms with 1 of 281 and 2 of
+    # 551 cycles past the budget -- the tail went away as well as fitting, because
+    # a 14 ms solve in a 120 ms period never backs the executor up behind
+    # /joint_states.
+    solve_budget: 0.12
+    # 1 from 2 with `Ts` (issue 247): what the consumers are sized against is the
+    # publication *rate*, not the factor. This knob also gates /crane/sway_settled
+    # (`node.report_settled` reuses it deliberately), and that is the stream
+    # `concrete_block_behavior_tree`'s kSettledMaxAge (1000 ms) and its 2700 ms
+    # descent dwell are both counted on. At 8.3 Hz a factor of 2 would halve the
+    # verdict rate to 4.2 Hz and the dwell's sample count with it; 1 holds the
+    # 8.3 Hz the 0.06 grid shipped, which is the rate 239/240/242 measured those
+    # constants at. Still well under the 20 Hz consumer the old rule was against.
+    solver_health_decimation: 1
+    # 600 ms of fallback horizon against a 4.68 s one.
     max_consecutive_failures: 5
     # One escalation's worth: the five solves it takes to escalate, and nothing
     # from the cycles after it -- the fault repeats and each file is ~130 kB.
@@ -267,6 +306,7 @@ crane_mpc:
     min_progress_rate: 0.1
     max_stall_time: 2.0
 
-    # Two thirds of a T_s. Not tied to `Ts` in code, and nothing refuses a
+    # Two thirds of a T_s, and derived from it rather than carried: 0.08 at
+    # Ts 0.12 (issue 247). Not tied to `Ts` in code, and nothing refuses a
     # mismatch at startup.
-    max_clock_skew: 0.04
+    max_clock_skew: 0.08

@@ -68,18 +68,34 @@ SOLVER_TUNING = {
     "hpipm_mode": "SPEED_ABS",
     # None is acados' default, `N`; smaller blocks measured worse.
     "qp_solver_cond_N": None,
-    # What this bounds is the **tail**: at the shipped grid, max solve 54.1 ->
+    # What this bounds is the **tail**: at the 0.06/80 grid, max solve 54.1 ->
     # 28.4 ms over 4 moves x {empty, 800 kg}, p50/p90 and every quality column
-    # unmoved. Capped, the QP returns `ACADOS_MAXITER` and the NLP accepts it
-    # (README requirement 1), so a hard cycle publishes its own truncated step
-    # instead of the previous horizon shifted, and `qp_status` says which.
-    # **35, not the ICRA26 iiwa's 20: a cold cycle needs more.** HPIPM starts a
-    # cold cycle from the central path, which costs ~15 iterations before the
-    # step is any good -- `test_a_solve_keeps_its_plan_inside_the_boxes_it_was_
-    # given` fails below 25 and `test_c4_converges_at_the_end_of_the_path_with_
-    # progress_still_running` below 35, both on cold solves. A cold cycle that
-    # fails has nothing to shift and publishes nothing at all.
-    "qp_solver_iter_max": 35,
+    # unmoved. Hitting the cap is **not** a truncated step that goes out: the QP
+    # returns `ACADOS_MAXITER`, `solver._read_solution` turns any non-zero
+    # `qp_status` into `Outcome.FAILED`, and the ladder publishes the *previous*
+    # horizon shifted. A cold cycle has no previous horizon, so it publishes
+    # nothing at all -- which is why the cap must clear a cold solve with room.
+    # (Two earlier copies of this comment claimed the opposite; `wiki/mpc.md`
+    # already recorded that as wrong.)
+    # **60, not the ICRA26 iiwa's 20: a cold cycle needs more, and a coarser knot
+    # needs more again.** HPIPM starts a cold cycle from the central path, which
+    # costs ~15 iterations before the step is any good --
+    # `test_a_solve_keeps_its_plan_inside_the_boxes_it_was_given` failed below 25
+    # and `test_c4_converges_at_the_end_of_the_path_with_progress_still_running`
+    # below 35 at the 0.06/80 grid, both on cold solves. The 0.12/40 grid costs
+    # the first of those 42 (23 at 0.06/80), so 35 truncated it: fewer stages,
+    # worse conditioned per stage. 60 is that 42 with half again on top, and it
+    # is affordable only because `solve_budget` moved with `Ts` -- the cold solve
+    # is ~1 ms per QP iteration, so the cap is ~48 ms against 120 (issue 247).
+    # A *warm* cycle is unaffected: live and offline they run 4-12.
+    # **Not the regulariser.** acados leaves `cost_scaling` at its default `Ts`
+    # per running stage, so doubling `Ts` doubles the stage curvature a flat
+    # `levenberg_marquardt` is added to -- the same non-invariance `state_scale`
+    # warns about below. Measured on that cold cycle anyway: 1e-6 -> 42 QP
+    # iterations, 2e-6 -> 43, 4e-6 -> 39. A 4x range moves it 7 %, so the 23 -> 42
+    # is conditioning of the coarser dynamics and re-scaling `levenberg_marquardt`
+    # with `Ts` does not buy it back.
+    "qp_solver_iter_max": 60,
     # Primal **and** dual, worth 15 -> 5 median QP iterations -- but only because
     # `solver.py` keeps HPIPM's memory across a warm cycle.
     "qp_solver_warm_start": 2,

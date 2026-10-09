@@ -429,8 +429,10 @@ it, and a supervisor's action on the escalation is the same as on a standing
 `FAULT_SOLVER` with no horizon arriving.
 
 The stream is decimated to one report per `solver_health_decimation` solves,
-shipped at two—8.3 Hz against the 16.7 Hz cycle, which is the largest integer
-decimation that does not run ahead of the 20 Hz supervisor that will read it.
+shipped at one—8.3 Hz off the 8.3 Hz cycle, which is still clear of the 20 Hz
+supervisor that will read it. What the consumers are sized against is the rate,
+not the factor: the same knob gates `/crane/sway_settled`, whose rate the tree's
+descent dwell counts samples on, so the factor follows `Ts` (issue 247).
 The inner loop does not spend the real-time boundary on messages nobody reads.
 
 **A change of verdict is exempt from the decimation and a standing verdict is
@@ -740,7 +742,7 @@ planner spent a release certifying poses and speeds this node hard-refuses
 | `hydraulics.*` | `crane_model/config/hydraulics.yaml` | `crane_model.hydraulic_limits()`; **not declared** — the overrides were deleted in issue 183 because they are in `solver.export_key`, so any non-zero value made the compiled export stale |
 | constraint 1's box and `dq_a_max` | `crane_model/config/control_safe_limits.yaml` | `config.control_safe_box()`; **not declared**, so a deployment cannot carry a second copy |
 | constraint 5's `u^+` | the two tables above | `config.command_domain()`: the smaller of Psi's identified domain (`crane_model/config/velocity_loop.yaml`, `u_clamp_*`) and `dq_a_max`, per axis |
-| `sensor_to_valve_delay` | written here | pinned by a test to the fit's `dead_time_s`; it is the deployed sensor-to-valve path, which that number only happens to equal |
+| `sensor_to_valve_delay` | written here | pinned to `Ts` by `check_settings`; a test holds it at a whole multiple of the fit's `dead_time_s` and never under it, since at a coarser knot the predictor overstates the measured dead time (issue 247) |
 
 `crane_planning` intersects its description-read limits with the same box, so
 the two stacks now narrow together or not at all. Rows are keyed there by axis

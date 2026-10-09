@@ -8,6 +8,7 @@ failure from the other side, and the declaration carrying no values is what
 closes it.
 """
 
+import math
 from pathlib import Path
 
 import yaml
@@ -134,15 +135,26 @@ def test_constraint_5_is_the_smaller_of_psis_domain_and_the_speed_bound():
         )
 
 
-def test_the_transport_delay_is_the_fitted_dead_time():
+def test_the_transport_delay_is_the_knot_and_never_understates_the_fit():
     """
-    Written, not read: it is the deployed sensor-to-valve path, which the
-    fit's own dead time only happens to equal. Pinned so the two stop agreeing
-    loudly rather than quietly.
+    Written, not read: it is the deployed sensor-to-valve path. `Ts` is what
+    pins it (`config.check_settings` refuses any other pair), so the knot --
+    not the fit -- picks the number, and the two agreed only while the knot was
+    0.06 s. They stopped agreeing at the 0.12 s knot (issue 247).
+
+    What still has to hold is the *direction*: a modelled delay shorter than the
+    machine's is the mismatch 244 measured as the expensive one (loaded tip rate
+    0.0136 -> 0.0593 rad/s when the plant's dead time outran the model's);
+    overstating it is the cheap half, ~a third of the loaded tip row at 0.12 s.
+    So the delay may be a whole multiple of the fit, never less than it.
     """
     from crane_model.symbolic import ACTUATOR_FIT
 
+    fitted = float(ACTUATOR_FIT.dead_time_s)
     for name in SHIPPED:
         shipped = yaml.safe_load((PACKAGE / "config" / name).read_text())
         written = shipped["crane_mpc"]["ros__parameters"]
-        assert written["sensor_to_valve_delay"] == float(ACTUATOR_FIT.dead_time_s)
+        delay = float(written["sensor_to_valve_delay"])
+        assert delay == float(written["Ts"])
+        assert delay >= fitted
+        assert math.isclose(delay % fitted, 0.0, abs_tol=1e-9)

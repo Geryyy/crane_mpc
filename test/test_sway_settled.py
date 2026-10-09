@@ -90,8 +90,13 @@ def test_a_cycle_that_publishes_no_horizon_still_publishes_a_verdict(node):
     node.update()
     assert "no robot description" in node._last_silence
     assert node.published[0].settled == SwaySettled.SETTLED_UNKNOWN
+    # The decimation covers this path too, so whether the second cycle publishes is
+    # the shipped factor's business -- 1 since issue 247's knot, where every cycle is
+    # on cadence. The cadence rule itself is pinned at factor 2 above, which is where
+    # it stays testable whatever ships.
     node.update()
-    assert len(node.published) == 1, "the second cycle is off cadence and unchanged"
+    on_cadence = int(node._values.solver_health_decimation) == 1
+    assert len(node.published) == (2 if on_cadence else 1)
 
 
 def test_a_pose_without_a_rate_is_not_a_load_that_has_stopped_swinging(node):

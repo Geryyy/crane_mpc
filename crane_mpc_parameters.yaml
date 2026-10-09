@@ -41,10 +41,12 @@ crane_mpc:
     read_only: true
     description: "D, s -- the transport dead time x_0 is carried forward by before solving.
       Same quantity crane_model's actuator fit calls `dead_time_s` (`nomenclature` §8.1's
-      T_d); the two names survive because this one is the deployed sensor-to-valve path and
-      the fit's number only happens to equal it -- a test pins them together. **Must equal
-      T_s** -- the delay is rolled as one interval. Modelled here only: crane_model's
-      symbolic.py carries no delay, so a second one would double-count."
+      T_d); the two names survive because this one is the deployed sensor-to-valve path. It
+      equalled the fit while T_s was 0.06 and no longer does -- **must equal T_s**, the
+      delay is rolled as one interval, so the knot picks it and the predictor overstates the
+      measured 0.06 at a coarser knot. A test pins the direction (never under the fit, a
+      whole multiple of it), not equality. Modelled here only: crane_model's symbolic.py
+      carries no delay, so a second one would double-count."
     validation:
       gt<>: [0.0]
 
@@ -343,8 +345,9 @@ crane_mpc:
     read_only: true
     description: "N, knots. Sized by the sway period -- of order 2 s, **never computed** -- so
       that the optimizer cannot excite an oscillation developing after the horizon ends. N T_s
-      is also the fault-tolerance budget: that many missed solves before the receiver's
-      buffer runs dry."
+      is *not* the fault-tolerance budget, though it was long described as one: the a2b JTC's
+      `topic_timeout` converts a stale trajectory to a zero-velocity hold a few T_s into a
+      silence, so the receiver's budget is that parameter and not this product (issue 247)."
     validation:
       bounds<>: [2, 120]
 
