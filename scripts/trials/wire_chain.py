@@ -60,6 +60,7 @@ from crane_mpc import cycle as cy
 from crane_mpc import horizon as hz
 from crane_mpc import problem as ocp_problem
 from crane_mpc.equilibrium import Equilibrium
+from crane_mpc.solver import SLACK_NOTICEABLE
 from growth import growth
 from harness import ACTUATED, PASSIVE, PLANNED, cs, tune_planner
 from hunting import REVERSAL_FRACTION, reversal_fraction
@@ -72,6 +73,77 @@ TOPIC_TIMEOUT = 0.18
 EPOCH = 1.0
 #: |sway| past this is a diverged run, not a bad one.
 DIVERGED_SWAY = 1.2
+#: The sway period `limits.du_max` is derived from; an envelope is read over one.
+SWAY_PERIOD_S = 2.34
+#: Where "2 s after arrival" is read: +-0.5 s, ~a fifth of a sway period either
+#: side, so the number is the mode's local envelope and not whichever phase one
+#: cycle happened to fall on.
+AFTER_ARRIVAL_S = (1.5, 2.5)
+#: A box row counts as riding its bound within this fraction of it. Not equality:
+#: the QP stops at its own tolerance and `du_max` is reached by a ramp.
+ACTIVE_MARGIN = 0.99
+#: Every cycle would cost N+1 residual evaluations of the solve's own latency.
+COST_DECIMATION = 10
+
+
+def envelope_tau(t, rate):
+    """
+    Decay time constant of `|rate|`'s one-period rolling max, per column.
+
+    `inf` where the envelope does not decay, `nan` where it is already at zero.
+    Fitted on the envelope and not on the signal: the rate oscillates, so a fit
+    on it reads whichever phase the window ends on, and "damped within one sway
+    period" is a claim about the envelope.
+    """
+    width = max(2, int(round(SWAY_PERIOD_S / (t[1] - t[0]))))
+    taus = []
+    for column in np.abs(rate).T:
+        envelope = np.array(
+            [column[i : i + width].max() for i in range(len(column) - width + 1)]
+        )
+        keep = envelope > 1e-6
+        if keep.sum() < 4:
+            taus.append(float("nan"))
+            continue
+        slope = np.polyfit(t[: envelope.size][keep], np.log(envelope[keep]), 1)[0]
+        taus.append(-1.0 / slope if slope < 0.0 else float("inf"))
+    return taus
+
+
+def riding(solution, limits):
+    """
+    Which of the OCP's bounds this cycle's horizon rides, and what it slacked.
+
+    The hard boxes (`du_max`, constraint 5's `u^+`, the sway-rate bound) are read
+    as proximity over the horizon; the softened rows are read as slack taken,
+    which is a *violation* and so a stricter test than being active -- a soft
+    bound can bind exactly with no slack and not be counted here. Against
+    `SLACK_NOTICEABLE`, not zero: HPIPM leaves every slack a positive 1e-11 or so,
+    which read as "every softened row violated on every cycle".
+    """
+    du_max = np.asarray(limits["du_max"][: cs.PLANNED_DOF], float)
+    u_max = np.asarray(limits["u_max"][: cs.PLANNED_DOF], float)
+    rate = np.abs(solution.inputs[:, : cs.PLANNED_DOF]).max(0) / du_max
+    passive = slice(cs.X_PASSIVE_VELOCITY, cs.X_PASSIVE_VELOCITY + cs.PASSIVE_DOF)
+    sway_rate = np.abs(solution.states[:, passive]).max(0) / np.asarray(
+        limits["dq_sway_max"], float
+    )
+    command = (
+        np.abs(solution.states[:, cs.X_COMMAND : cs.X_COMMAND + cs.PLANNED_DOF]).max(0)
+        / u_max
+        if solution.states.shape[1] > cs.X_COMMAND
+        else np.zeros(cs.PLANNED_DOF)
+    )
+    violation = solution.violation
+    return {
+        "du_max": bool(rate.max() >= ACTIVE_MARGIN),
+        "u_clamp": bool(command.max() >= ACTIVE_MARGIN),
+        "dq_sway": bool(sway_rate.max() >= ACTIVE_MARGIN),
+        "q_sway_slacked": bool(violation.q_u > SLACK_NOTICEABLE),
+        "cylinder_force_slacked": bool(violation.cylinder_force > SLACK_NOTICEABLE),
+        "pump_flow_slacked": bool(violation.pump_flow > SLACK_NOTICEABLE),
+        "slack": bool(solution.used_slack),
+    }
 
 
 class Playback:
@@ -431,6 +503,9 @@ def fly(
     # Per cycle, beside the milliseconds: solve time is ~linear in this and the
     # ms are the machine's, so a regression reads off iterations first (issue 223).
     qp_iterations = []
+    # Which bound each solved cycle's horizon rides, and the cost split that says
+    # whether the goal rows outweigh the sway rows (issue 244 (d)).
+    riders, costs = [], []
     iteration_cap = int(ocp_problem.solver_tuning()["qp_solver_iter_max"])
     # Wall seconds from the cycle instant to the horizon on the wire -- the
     # margin the timer callback has left, solve included. Offline wall time is
@@ -492,6 +567,11 @@ def fly(
             if step.solution is not None:
                 solve_times.append(step.solution.solve_time_s)
                 qp_iterations.append(step.solution.qp_iterations)
+                riders.append(riding(step.solution, parameters["limits"]))
+                # Right after the solve or not at all: `cost_terms` scores against
+                # the parameter vector and path that solve was written with.
+                if len(riders) % COST_DECIMATION == 1:
+                    costs.append(ocp.cost_terms(step.solution, cycle.q_eq))
             if step.silence is not None:
                 events["silence"] += 1
             elif step.verdict is None or not step.verdict.published:
@@ -554,6 +634,23 @@ def fly(
     # published angle carries an uncalibrated offset and `dq_u_settled` is the
     # limit the tree gates on. Same window as `late`.
     rate_late = log[-int(round(3.0 / Ts)) :, 4 + 2 * nq : 6 + 2 * nq]
+    # Issue 244's window: the plan's own end is arrival, and everything after it
+    # is the hold the damping is scored in. `sway_rate_late` above is the tail of
+    # whatever `--seconds` was, which is a different question once the hold is long.
+    rate_u = log[:, 4 + 2 * nq : 6 + 2 * nq]
+    arrival = float(plan.duration)
+    after = log[:, 0] >= arrival
+    window = (log[:, 0] >= arrival + AFTER_ARRIVAL_S[0]) & (
+        log[:, 0] <= arrival + AFTER_ARRIVAL_S[1]
+    )
+    rate_2s = np.abs(rate_u[window]).max(axis=0) if window.any() else np.full(2, np.nan)
+    tau_u = (
+        envelope_tau(log[after, 0], rate_u[after])
+        if after.sum() > int(round(SWAY_PERIOD_S / Ts)) + 4
+        else [float("nan")] * 2
+    )
+    # 214's hunting metric: what the actuated axes are still doing in the hold.
+    dq_a_hold = float(np.sqrt(np.mean(log[after, 2 + nq + 2 : 2 + 2 * nq + 2] ** 2)))
     u0 = log[:, -nq:]
     u0 = u0[np.all(np.isfinite(u0), axis=1)]
     # Ticks of the coast loop land in `u_tick` too, but only after this scoring.
@@ -564,6 +661,15 @@ def fly(
         f"  final error      {np.abs(log[-1, 2 : 2 + nq] - plan.q[-1, PLANNED]).max():.4f}\n"
         f"  sway peak        {np.round(np.abs(sway).max(axis=0), 3)} rad\n"
         f"  sway last 3 s    {np.round(np.abs(late).max(axis=0), 3)} rad\n"
+        f"  rate at +2 s     {np.round(rate_2s, 4)} rad/s (arrival {arrival:.2f} s)\n"
+        f"  hold rate tau    {np.round(tau_u, 1)} s\n"
+        f"  hold dq_a RMS    {dq_a_hold:.4f} rad/s\n"
+        f"  bounds ridden    "
+        + " ".join(
+            f"{name} {np.mean([r[name] for r in riders]):.2f}"
+            for name in (riders[0] if riders else {})
+        )
+        + "\n"
         f"  max|u_rot|       {np.abs(u[:, ROTATOR]).max():.3f} rad/s "
         f"(u_clamp {chain.low[ROTATOR]:+.2f}/{chain.high[ROTATOR]:+.2f})\n"
         f"  max|dq_rot|      {np.abs(log[:, 4 + nq + ROTATOR]).max():.3f} rad/s\n"
@@ -608,6 +714,10 @@ def fly(
             "sway_peak": np.abs(sway).max(axis=0).tolist(),
             "sway_late": np.abs(late).max(axis=0).tolist(),
             "sway_rate_late": np.abs(rate_late).max(axis=0).tolist(),
+            "arrival_s": arrival,
+            "sway_rate_after_2s": rate_2s.tolist(),
+            "sway_rate_tau_s": tau_u,
+            "dq_a_rms_hold": dq_a_hold,
             # The gate: |u| over u_clamp on its side, per axis. > 1 is outside
             # Psi's fitted domain, i.e. `past_clamp`.
             "u_clamp_ratio": np.maximum(
@@ -653,6 +763,16 @@ def fly(
                 if tick_to_publish
                 else []
             ),
+            # Issue 244 (d): the share of solved cycles each bound was ridden on,
+            # and the cost split averaged over `COST_DECIMATION`-th cycles.
+            "active": {
+                name: float(np.mean([r[name] for r in riders]))
+                for name in (riders[0] if riders else {})
+            },
+            "cost": {
+                name: float(np.mean([getattr(c, name) for c in costs]))
+                for name in (dataclasses.asdict(costs[0]) if costs else {})
+            },
         }
     # The viewer's coast: same chain, past the plan, unscored.
     while not diverged and coast() and np.all(np.isfinite(plant.q)):

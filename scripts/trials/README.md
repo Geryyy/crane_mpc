@@ -238,3 +238,13 @@ stability rather than tracking:
 - **The tool axis is not driven**, and the JTC's tolerance checks, goal handling
   and angle wraparound are skipped — tracking, except where a tolerance abort
   would have stopped the move.
+- **The plant's own pendulum is 2–8x too damped, so damping authority cannot be
+  measured here at all.** Seeded at `dq_u = 0.09` rad/s and held at `u = 0`
+  through C3, MuJoCo decays with an envelope tau of 2.6/6.0 s empty and
+  10.3/7.1 s at 800 kg, and the loaded pair is already at 0.022/0.015 rad/s two
+  seconds in — inside `sway.dq_u_settled`. Issue 234 measured tau = 21 s on the
+  machine. So the uncontrolled plant passes the gate the controller is being
+  scored against, every damping ablation reads as a null result, and offline
+  numbers for this quantity are a *lower* bound on the real swing, not an
+  estimate of it (issue 244). This is why 240 found the harness blind to a
+  defect Gazebo shows on every run.
