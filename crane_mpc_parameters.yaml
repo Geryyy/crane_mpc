@@ -224,7 +224,7 @@ crane_mpc:
     progress_rate:
       type: double
       read_only: true
-      description: "w_sDot -- the path parameter's rate, priced toward rest. Damping and not a
+      description: "w_v_s -- the path parameter's rate, priced toward rest. Damping and not a
         regulator; may be zero, the limits still bound the rate."
       validation:
         gt_eq<>: [0.0]

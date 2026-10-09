@@ -578,12 +578,12 @@ def test_c4_converges_at_the_end_of_the_path_with_progress_still_running(c4_ocp)
     """
     Live, every goal ended in QP status 3: `v_s` carried onto a spent path.
 
-    `s` was zero to 1e-9 here until `du_max` became a control bound (issue 214):
-    with a tenth of the joint command rate the optimizer buys a little path
-    instead, and `s` creeps to ~8e-3 over the horizon. That moves nothing --
-    `bspline.casadi_value`/`casadi_slope` clamp `theta` to 1, so the reference is
-    the goal either way, the `theta` residual prices the creep at its own weight,
-    and `_origined_x0` re-clamps `s` next cycle so it cannot accumulate. The
+    Progress was zero to 1e-9 here until `du_max` became a control bound (issue
+    214): with a tenth of the joint command rate the optimizer buys a little path
+    instead, and it creeps to ~8e-3 over the horizon. That moves nothing --
+    `bspline.casadi_value`/`casadi_slope` clamp `s` to 1, so the reference is
+    the goal either way, the `s` residual prices the creep at its own weight,
+    and `_origined_x0` re-clamps progress next cycle so it cannot accumulate. The
     status is what this test was diagnosed by and it is still zero; the bound
     keeps a *runaway* `v_s` -- the actual fault -- failing.
     """

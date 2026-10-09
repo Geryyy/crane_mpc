@@ -1029,7 +1029,7 @@ class Cycle:
         those pin stage 0 to the measurement, which leaves the JTC's `p e_pos` --
         the integral action on a velocity interface -- no error to integrate, and
         the machine parks on the solver's offset (11 mrad, measured, not
-        decaying). The plan is `c(origin + s)` per knot on the planner's curve,
+        decaying). The plan is `c(s)` per knot on the planner's curve,
         which is the quantity the cost was written against -- not `gates`'
         resampled reference, whose planned columns are all overwritten here.
         `dq_a_ref` stays the solver's so that `effort = u - dq_a_ref` keeps the
@@ -1039,9 +1039,9 @@ class Cycle:
         self.horizon.dq_a_ref[:, :PLANNED_DOF] = states[
             :, cs.X_PLANNED_VELOCITY : cs.X_PLANNED_VELOCITY + PLANNED_DOF
         ]
-        sigma = self.path.origin + states[:, cs.X_PROGRESS]
+        s = self.path.origin + states[:, cs.X_PROGRESS]
         self.horizon.q_a_ref[:, :PLANNED_DOF] = bspline.value(
-            sigma, self.path.control, problem.PATH_KNOTS
+            s, self.path.control, problem.PATH_KNOTS
         )
         # The tool is pinned, not planned: it holds where it was measured.
         self.horizon.q_a_ref[:, TOOL_AXIS] = self.tool_position

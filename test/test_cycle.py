@@ -633,7 +633,7 @@ def test_the_last_sliver_of_path_is_taken_whole_so_the_plan_can_end():
 
 def test_the_curve_is_what_the_follower_is_given_to_chase():
     """
-    `sigma = origin + s`, and the origin is not zero on any cycle past the first.
+    `s = origin + progress`, and the origin is not zero on any cycle past the first.
 
     Pinned part-way along the curve on purpose: with the window fit gone (188)
     every driving cycle runs at `origin > 0`, so a dropped or sign-flipped origin
@@ -648,7 +648,7 @@ def test_the_curve_is_what_the_follower_is_given_to_chase():
     progress = np.linspace(0.0, 0.5, KNOTS)
     answer.states[:, cs.X_PROGRESS] = progress
     one.adopt_solution(answer)
-    # A joint-space line, so the point at `sigma` is `sigma` on every planned axis:
+    # A joint-space line, so the point at `s` is `s` on every planned axis:
     # the position reference is the path at the progress the solve chose, not the
     # solved state (which counts up into the thousands here) and not the resample.
     for knot, place in enumerate(progress):

@@ -46,13 +46,9 @@ def test_the_expression_is_the_curve_and_its_slope():
     )
     control = bspline.fit(curved, 10)
     knots = bspline.knot_vector(10)
-    theta = ca.SX.sym("theta")
-    value = ca.Function(
-        "v", [theta], [bspline.casadi_value(theta, ca.SX(control), knots)]
-    )
-    slope = ca.Function(
-        "s", [theta], [bspline.casadi_slope(theta, ca.SX(control), knots)]
-    )
+    s = ca.SX.sym("s")
+    value = ca.Function("v", [s], [bspline.casadi_value(s, ca.SX(control), knots)])
+    slope = ca.Function("slope", [s], [bspline.casadi_slope(s, ca.SX(control), knots)])
 
     probe = np.linspace(0.02, 0.98, 53)
     symbolic = np.array([np.asarray(value(place)).ravel() for place in probe])
@@ -76,18 +72,18 @@ def test_de_boor_agrees_with_the_basis_sum():
     control = bspline.fit(np.cumsum(rng.normal(size=(120, 5)), axis=0) / 120, 30)
     knots = bspline.knot_vector(30)
     # The ends and outside the domain included: `value` clips, and `_basis` closes
-    # its last span, so the two have to agree about `theta = 1` as well.
-    theta = np.concatenate([[0.0, 1.0, -0.2, 1.4], rng.random(40)])
+    # its last span, so the two have to agree about `s = 1` as well.
+    s = np.concatenate([[0.0, 1.0, -0.2, 1.4], rng.random(40)])
     summed = np.array(
         [
             sum(
                 control[index] * bspline._basis(place, bspline.ORDER, index, knots)
                 for index in range(control.shape[0])
             )
-            for place in np.clip(theta, 0.0, 1.0)
+            for place in np.clip(s, 0.0, 1.0)
         ]
     )
-    assert bspline.value(theta, control, knots) == pytest.approx(summed, abs=1e-14)
+    assert bspline.value(s, control, knots) == pytest.approx(summed, abs=1e-14)
 
 
 def test_a_fit_that_cannot_be_determined_is_refused_not_approximated():

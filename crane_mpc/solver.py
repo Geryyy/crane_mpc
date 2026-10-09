@@ -123,8 +123,9 @@ class PathCycle:
     """
     The path a cycle is written against, and where on it the cycle starts.
 
-    `s` is pinned to zero at stage zero, so `origin` carries what earlier cycles
-    already spent and `s` carries only the rest -- `theta = origin + s`.
+    The progress state is pinned to zero at stage zero, so `origin` (`s_o`) carries
+    what earlier cycles already spent and the state carries only the rest --
+    `s = origin + progress`.
 
     `nominal_rate` is the plan's own pace in path parameter per second, which
     depends on what the path spans and so cannot be derived here: `1/duration`
@@ -137,7 +138,7 @@ class PathCycle:
     nominal_rate: float
 
     def remaining(self) -> float:
-        """How much path parameter is left, which is `s`'s own ceiling."""
+        """How much path parameter is left, which is the progress state's own ceiling."""
         return max(0.0, problem.K_PROGRESS_RATE_REFERENCE - float(self.origin))
 
 
@@ -937,7 +938,7 @@ class Ocp:
 
     def nominal_progress(self, stage: int, path: PathCycle) -> float:
         """
-        Where on the path the plan's own pace puts this stage, as `theta`.
+        Where on the path the plan's own pace puts this stage, as `s`.
 
         Asking every stage for the end of the path instead is asking for flat
         out everywhere: `s` runs to its ceiling in the first 0.7 s of a 2.34 s
@@ -960,7 +961,7 @@ class Ocp:
         value past one but its *slope* stays the end tangent, so an uncapped `s`
         leaves the velocity row asking for `tangent(1) * v_s` at every stage
         beyond the path -- motion away from the goal, priced at the tracking
-        weight. Both robocrane variants box `theta` in [0, 1] for this reason.
+        weight. Both robocrane variants box `s` in [0, 1] for this reason.
         """
         reach = stage * self.Ts * self.progress_rate_max(path)
         return min(reach, path.remaining())

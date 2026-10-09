@@ -220,7 +220,7 @@ def path_from_message(message, joints):
 
     Returns `(samples, duration, why)` -- `samples` is `None` and `why` says why
     on a message this node cannot use. The rows are uniform in the planner's own
-    `sigma`, which is exactly what `solver.path_control` fits, so nothing here
+    `s`, which is exactly what `solver.path_control` fits, so nothing here
     interpolates: refusing a malformed message is the whole job.
     """
     names = list(message.joint_names)

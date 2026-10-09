@@ -637,7 +637,7 @@ velocity.
 ### The path is geometry, and the reference is the same plan in time
 
 `crane_planning` publishes both: `crane_msgs/JointPath` on `/crane/joint_path`,
-latched, the planned curve `q_a(sigma)` sampled uniformly in its own parameter,
+latched, the planned curve `q_a(s)` sampled uniformly in its own parameter,
 and the timed `JointTrajectory` on `/crane/reference`. The cost is written against
 the curve and chooses where on it to be, so it needs no timing; `duration` is the
 pace the progress row is priced against, not a schedule.

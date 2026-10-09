@@ -269,6 +269,6 @@ def next_start(plant, planner):
 
 
 def path_control(plan) -> np.ndarray:
-    """Take the planner's curve in its own `sigma`, not its timed resample."""
+    """Take the planner's curve in its own `s`, not its timed resample."""
     places = np.linspace(0.0, 1.0, 4 * PATH_POINTS)
     return ocp_runtime.path_control(evaluate(plan.timing.coefficients, places))

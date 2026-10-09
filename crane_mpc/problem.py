@@ -181,11 +181,11 @@ SOLVER_PREFIX = "crane_mpc"
 # following does and what replaced the second-order expansion that used to sit
 # here. The expansion was only the path near one point; this is the path.
 #
-# `c(theta)`, the planner's curve in its own parameter, fitted once per plan.
-# The progress state *is* `theta`, so no timing law lives in here: where on the
+# `c(s)`, the planner's curve in its own parameter, fitted once per plan.
+# The progress state *is* `s`, so no timing law lives in here: where on the
 # path to be is the optimizer's choice, and how fast to get there is what the
-# limits and the cost decide. `ORIGIN` is where this cycle starts, since `s` is
-# pinned to zero at stage zero and carries only the rest.
+# limits and the cost decide. `ORIGIN` is `s_o`, where this cycle starts, since
+# the progress state is pinned to zero at stage zero and carries only the rest.
 #
 # The planner's usual answer is a straight line in joint space, exact at any
 # count; its curved candidate needs 30 points for 1.3 mm at the tool.
@@ -249,7 +249,7 @@ def boxed_state_rows(parameters: dict) -> np.ndarray:
 # and is the axis the progress variable buys time for.
 K_LAG_AXIS = 0
 
-# `theta = 1`: the end of the path, which is what the progress row is priced
+# `s = 1`: the end of the path, which is what the progress row is priced
 # against now that the progress state is the path parameter. It was the rate's
 # reference -- one second of plan per wall-clock second -- until the cost
 # stopped saying when to be somewhere and started saying where to end up.
@@ -404,22 +404,23 @@ def build_ocp(description_xml: str, parameters: dict, hydraulics: dict) -> tuple
     def block(offset):
         return parameter_vector[offset : offset + cs.K_PLANNED_DOF]
 
-    # Where on the path this stage is. `s` is pinned to zero at stage zero, so
-    # the parameter carries where the cycle starts and `s` carries the rest.
+    # Where on the path this stage is: `s = s_o + progress`. The progress state is
+    # pinned to zero at stage zero, so the parameter carries where the cycle
+    # starts (`s_o`) and the state carries the rest.
     control = ca.reshape(
         parameter_vector[P_PATH_CONTROL : P_PATH_CONTROL + PATH_POINTS * cs.NU],
         cs.K_PLANNED_DOF,
         PATH_POINTS,
     ).T
-    theta = parameter_vector[P_PATH_ORIGIN] + progress
-    reference_position = bspline.casadi_value(theta, control, PATH_KNOTS).T
+    s = parameter_vector[P_PATH_ORIGIN] + progress
+    reference_position = bspline.casadi_value(s, control, PATH_KNOTS).T
     # The path's tangent, which is the velocity a machine travelling the path at
-    # `v_theta` would have. robocrane prices `dq_a` toward rest instead and lets
-    # the pull on `theta` buy the motion; on a KUKA under acceleration control
+    # `v_s` would have. robocrane prices `dq_a` toward rest instead and lets
+    # the pull on `s` buy the motion; on a KUKA under acceleration control
     # that works, here it fights C3's force state and the dead time -- measured,
     # 460 mm off path and 29 of 178 solves refused. So the row stays a tangent
-    # and the formulation's freedom lives in `theta`, which is where it matters.
-    tangent = bspline.casadi_slope(theta, control, PATH_KNOTS).T
+    # and the formulation's freedom lives in `s`, which is where it matters.
+    tangent = bspline.casadi_slope(s, control, PATH_KNOTS).T
 
     acados_model = AcadosModel()
     acados_model.name = f"{SOLVER_PREFIX}_{TOOL}"
@@ -474,7 +475,7 @@ def build_ocp(description_xml: str, parameters: dict, hydraulics: dict) -> tuple
         dq_u,
         lag,
         tool,
-        theta,
+        s,
         progress_rate,
         tau_a[: cs.K_PLANNED_DOF],
         u,
