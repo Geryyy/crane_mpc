@@ -25,8 +25,10 @@ crane_mpc:
     Ts: 0.06
     horizon_length: 60
 
-    # Transport dead time, common to all six axes, modelled in the predictor
+    # Transport dead time D, common to all six axes, modelled in the predictor
     # only -- symbolic.py carries no delay, so a second one double-counts.
+    # Same quantity crane_model's actuator fit calls `dead_time_s`; a test pins
+    # this against it.
     sensor_to_valve_delay: 0.06
     max_state_age: 0.2
     # A fixed constant added to every Hessian **diagonal** -- it damps the
@@ -103,7 +105,7 @@ crane_mpc:
       # what live says is only that it costs nothing (0/3277 cycles refused,
       # solve p50 13-14 ms). `trials/robustness.md` §7 has both halves.
       q_u: [6400.0, 6400.0]
-      # 16x from 4.0, which had never moved while q_a, tool, progress and
+      # 16x from 4.0, which had never moved while q_a, tcp, progress and
       # terminal_scale rose around it: 4x less residual swing at the end of the
       # move and the path improves with it.
       # 256 from 64: the residual swing at the goal is what the descent places with.
@@ -141,10 +143,10 @@ crane_mpc:
       # Marc's ratio against q_a's 4.0, deliberately left where it was when q_a
       # rose -- that is what was measured.
       lag: 40.0
-      # With the tool row priced at 1000 the pull to the end of the path has to
+      # With the TCP row priced at 1000 the pull to the end of the path has to
       # rise with it: arrival keeps improving to 20480 at flat path error, and
       # the cost is ~1% refused cycles.
-      tool: 1000.0
+      tcp: 1000.0
       progress: 20480.0
       progress_rate: 0.1
       progress_accel: 0.01
@@ -156,8 +158,9 @@ crane_mpc:
     limits:
       # No q_a_lower/q_a_upper/q_a_margin/dq_a_max/u_max here: crane_model owns
       # the control-safe box and `config.command_domain` derives u^+ from it.
-      q_u_max: [0.2, 0.2]
-      dq_u_max: [1.0, 0.5]
+      # Same keys and same numbers as crane_planner.yaml's -- two copies, by hand.
+      q_sway_max: [0.2, 0.2]
+      dq_sway_max: [1.0, 0.5]
       # 50% catch-up on the plan's own average pace, and it stays 50% if the
       # grid changes. A planner profile peaking above 1.5x its own average
       # cannot be matched mid-move -- unmeasured.

@@ -43,8 +43,8 @@ WIDTHS = {
         "q_a_margin": cs.K_ACTUATED_DOF,
         "dq_a_max": cs.K_ACTUATED_DOF,
         "u_max": cs.K_ACTUATED_DOF,
-        "q_u_max": cs.K_PASSIVE_DOF,
-        "dq_u_max": cs.K_PASSIVE_DOF,
+        "q_sway_max": cs.K_PASSIVE_DOF,
+        "dq_sway_max": cs.K_PASSIVE_DOF,
         "du_max": cs.K_PLANNED_DOF,
     },
     "slack": {
@@ -74,7 +74,7 @@ WEIGHTS = (
     "u",
     "du",
     "lag",
-    "tool",
+    "tcp",
     "progress",
     "progress_rate",
     "progress_accel",
@@ -93,8 +93,8 @@ DERIVED = ("u_max",)
 
 #: Declared limits, i.e. the ones a deployment still writes.
 LIMITS = (
-    "q_u_max",
-    "dq_u_max",
+    "q_sway_max",
+    "dq_sway_max",
     "progress_rate_headroom",
     "progress_accel_max",
     "du_max",
@@ -295,7 +295,9 @@ def check_settings(parameters: dict, hydraulics: dict) -> None:
             )
     _refuse(
         _offender(
-            limits, ("dq_a_max", "q_u_max", "dq_u_max", "u_max", "du_max"), _positive
+            limits,
+            ("dq_a_max", "q_sway_max", "dq_sway_max", "u_max", "du_max"),
+            _positive,
         ),
         "constraints 2 to 5 of `mpc` §3 each need a finite positive bound; an invented "
         "or absent one is a silent stub",

@@ -187,7 +187,7 @@ def weight_matrices(parameters: dict) -> tuple[np.ndarray, np.ndarray]:
             [
                 float(weights["lag"]),
             ],
-            np.full(3, float(weights["tool"])),
+            np.full(3, float(weights["tcp"])),
             [
                 float(weights["progress"]),
                 float(weights["progress_rate"]),
@@ -287,9 +287,9 @@ def state_bounds(
     lower = np.concatenate(
         [
             q_lower,
-            equilibrium - np.asarray(limits["q_u_max"], dtype=float),
+            equilibrium - np.asarray(limits["q_sway_max"], dtype=float),
             -np.asarray(limits["dq_a_max"][: cs.K_PLANNED_DOF], dtype=float),
-            -np.asarray(limits["dq_u_max"], dtype=float),
+            -np.asarray(limits["dq_sway_max"], dtype=float),
             -lag,
             [0.0, 0.0],
             -np.asarray(command),
@@ -298,9 +298,9 @@ def state_bounds(
     upper = np.concatenate(
         [
             q_upper,
-            equilibrium + np.asarray(limits["q_u_max"], dtype=float),
+            equilibrium + np.asarray(limits["q_sway_max"], dtype=float),
             np.asarray(limits["dq_a_max"][: cs.K_PLANNED_DOF], dtype=float),
-            np.asarray(limits["dq_u_max"], dtype=float),
+            np.asarray(limits["dq_sway_max"], dtype=float),
             lag,
             [0.0, rate_max],
             command,
@@ -1025,9 +1025,11 @@ class Ocp:
             sway = slice(
                 cs.X_PASSIVE_POSITION, cs.X_PASSIVE_POSITION + cs.K_PASSIVE_DOF
             )
-            q_u_max = np.asarray(self.parameters["limits"]["q_u_max"], dtype=float)
-            lower[:, sway] = equilibrium - q_u_max
-            upper[:, sway] = equilibrium + q_u_max
+            q_sway_max = np.asarray(
+                self.parameters["limits"]["q_sway_max"], dtype=float
+            )
+            lower[:, sway] = equilibrium - q_sway_max
+            upper[:, sway] = equilibrium + q_sway_max
         # `progress_ceiling` per stage: as far as the rate reaches, or the path's end.
         upper[:, cs.X_PROGRESS] = np.minimum(elapsed * rate_max, path.remaining())
 
@@ -1250,8 +1252,8 @@ class Ocp:
         loop cost 3 ms of the command's own latency (issue 187).
         """
         limits = self.parameters["limits"]
-        q_u_max = np.asarray(limits["q_u_max"], dtype=float)
-        dq_u_max = np.asarray(limits["dq_u_max"], dtype=float)
+        q_sway_max = np.asarray(limits["q_sway_max"], dtype=float)
+        dq_sway_max = np.asarray(limits["dq_sway_max"], dtype=float)
         lower = np.maximum(self.solver.get_flat("sl"), 0.0)
         upper = np.maximum(self.solver.get_flat("su"), 0.0)
         taken = np.maximum(lower, upper)
@@ -1268,8 +1270,8 @@ class Ocp:
 
         passive, planned = cs.K_PASSIVE_DOF, cs.K_PLANNED_DOF
         violation = Violation(
-            q_u=float(np.max(soft_state[:, :passive] / q_u_max)),
-            dq_u=float(np.max(soft_state[:, passive:] / dq_u_max)),
+            q_u=float(np.max(soft_state[:, :passive] / q_sway_max)),
+            dq_u=float(np.max(soft_state[:, passive:] / dq_sway_max)),
             cylinder_force=float(np.max(soft_nonlinear[:, :planned])),
             pump_flow=float(np.max(soft_nonlinear[:, planned])),
         )

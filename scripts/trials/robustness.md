@@ -521,7 +521,7 @@ merely unset.
         --lever "weights.dq_a=[0.2,...,0.05,0.05],[0.8,...,0.2,0.2]" \
         --lever weights.dq_u=128.0,512.0 --lever weights.u=0.5,2.0 \
         --lever weights.du=0.5,2.0 --lever weights.lag=20.0,80.0 \
-        --lever weights.tool=500.0,2000.0 --lever horizon_length=20,60
+        --lever weights.tcp=500.0,2000.0 --lever horizon_length=20,60
 
 190's §2 grid — the plant takes payload x{800, 80} kg, C3 `k` x{1, 2}, Psi gain
 x{1, 1.3}, three moves, 27 runs per setting. `q_a` and `dq_a` ship non-uniform
@@ -543,7 +543,7 @@ which is a different perturbation.
 |  | x2 | 1.254 | **6/27** | 1.240 | **4/27** | 0.034 / 0.033 |
 | `lag` | x0.5 | 1.377 | 8/27 | 1.358 | 12/27 | 0.034 / 0.034 |
 |  | x2 | 1.214 | 9/27 | 1.321 | 9/27 | 0.034 / 0.034 |
-| `tool` | x0.5 | 1.229 | 10/27 | 1.402 | 9/27 | 0.043 / 0.041 |
+| `tcp` | x0.5 | 1.229 | 10/27 | 1.402 | 9/27 | 0.043 / 0.041 |
 |  | x2 | 1.305 | 10/27 | 1.295 | 11/27 | 0.030 / 0.029 |
 | `horizon_length` | 20 | 1.257 | **6/27** | 1.251 | **4/27** | 0.025 / 0.025 |
 |  | 60 | 0.803 | 12/27 | 1.274 | 11/27 | 0.023 / 0.022 |

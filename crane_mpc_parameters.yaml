@@ -39,8 +39,11 @@ crane_mpc:
   sensor_to_valve_delay:
     type: double
     read_only: true
-    description: "Transport dead time x_0 is carried forward by before solving, s. **Must
-      equal T_s** -- the delay is rolled as one interval. Modelled here only: crane_model's
+    description: "D, s -- the transport dead time x_0 is carried forward by before solving.
+      Same quantity crane_model's actuator fit calls `dead_time_s` (`nomenclature` §8.1's
+      T_d); the two names survive because this one is the deployed sensor-to-valve path and
+      the fit's number only happens to equal it -- a test pins them together. **Must equal
+      T_s** -- the delay is rolled as one interval. Modelled here only: crane_model's
       symbolic.py carries no delay, so a second one would double-count."
     validation:
       gt<>: [0.0]
@@ -206,11 +209,12 @@ crane_mpc:
         scale. Marc's `weights.weight_lag` reproduced, not generalised to mixed units."
       validation:
         gt_eq<>: [0.0]
-    tool:
+    tcp:
       type: double
       read_only: true
-      description: "Q -- the tool's own distance from the path, in metres. Position only.
-        Zero is the purely joint-space cost that shipped before this row existed."
+      description: "Q -- the TCP's own distance from the path, in metres. Position only.
+        Zero is the purely joint-space cost that shipped before this row existed. Named
+        `tcp`, not `tool`: `tool` is q_8, the gripper axis."
       validation:
         gt_eq<>: [0.0]
     progress:
@@ -252,20 +256,21 @@ crane_mpc:
     # keeps narrowing when either factor narrows. A declaration here would be the second
     # copy issue 128 had to repair. Same for `hydraulics.*`: `crane_model.hydraulic_limits()`
     # is the only reader (issue 183 deleted the overrides, which made the export stale).
-    q_u_max:
+    q_sway_max:
       type: double_array
       read_only: true
       description: "Constraint 3, |q_u - q_eq| <= q_u^+ -- tool swing clearance, drawn around
         the **equilibrium** and never around zero: the hanging pose moves with the arm. Same
-        number the planner clears the path for."
+        number, same key as the planner's `q_sway_max`, which clears the path for it."
       validation:
         fixed_size<>: [2]
         lower_element_bounds<>: [0.0]
-    dq_u_max:
+    dq_sway_max:
       type: double_array
       read_only: true
       description: "Constraint 4, |dq_u| <= dq_u^+. **Hand-set controller bounds, not physical
-        limits** -- the joints are unactuated and these express how much sway is tolerated."
+        limits** -- the joints are unactuated and these express how much sway is tolerated.
+        Same key as the planner's `dq_sway_max`."
       validation:
         fixed_size<>: [2]
         lower_element_bounds<>: [0.0]
