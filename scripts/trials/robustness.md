@@ -1133,3 +1133,39 @@ of two things, neither in this package:
   0.09 rad/s even at `slow_down` 3.0 (234), and free decay for this mode is
   tau = 21 s at that amplitude and ~51 s below it — so 20 s of hold cannot
   reach 0.02 from 0.09 however well it is controlled.
+
+## 11. Dropping the inert cost and constraint rows — issue 248
+
+The OCP's 13 cost row groups and 4 soft constraint families, ablated one at a
+time offline (the table is in `issues/done/248-*.notes.md`). Five groups are
+inert — `lag`, `progress_rate`+`progress_accel`, constraint 6 (cylinder force),
+constraint 7 (pump flow), and the `q_u`/`dq_u` soft state box — and the
+envelope gate of §6/§7 was re-run on the five removed together:
+
+    ./scripts/trials/sweep_robust.py --latency 0.026 --payload-mass 800 \
+        --samples 0 --jobs 7 --by-plant --band <family>=<values> \
+        --set weights.lag=0.0 --set weights.progress_rate=0.0 \
+        --set weights.progress_accel=0.0 --set limits.q_sway_max=1000.0 \
+        --set limits.dq_sway_max=1000.0 --relax-h both
+
+**Shipped 0/102, minimal 0/102** — same seven families, same 34 cells, so the
+envelope is unchanged and every verdict in §3, §5 and §7 stands. Worst `late`
+0.098 against 0.085 rad. 14 of 111 runs move at all and they move both ways;
+the largest is COM +0.5 m (`late` 0.098 -> 0.049 but final error 0.084 -> 0.146
+rad), which is §7's sensitive family again.
+
+**What the two nonlinear rows are actually worth, which no sweep here had
+measured.** `--relax-h <rows> --h-factor <f>` scales their allowance; tightening
+until slack appears reads the headroom off the move:
+
+| row | empty | loaded | hand-off |
+| --- | --- | --- | --- |
+| constraint 6, cylinder force | binds at 0.30 | **0.65** | **0.65** |
+| constraint 7, pump flow | **0.50** | 0.30 | 0.30 |
+
+So a loaded A2B move runs at ~0.7 of the force allowance and an empty one at
+~0.6 of the pump allowance — **1.4x and 1.7x of margin, not the "never active"
+the per-cycle log suggests.** At 0.60 the loaded force row slacks on *every*
+cycle, i.e. the hold force alone is most of it; what removal gives away is the
+dynamic remainder. Any move heavier, more extended or faster than these three
+reaches those rows, so they are inert on this sample and not in general.

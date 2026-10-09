@@ -84,6 +84,14 @@ AFTER_ARRIVAL_S = (1.5, 2.5)
 ACTIVE_MARGIN = 0.99
 #: Every cycle would cost N+1 residual evaluations of the solve's own latency.
 COST_DECIMATION = 10
+#: What `--relax-h` widens a row to. `h` is a fraction of its own allowance, so
+#: ten is already ~11x the worst draw anything here reaches (`wiki/mpc.md` puts a
+#: resting boom+arm at 0.91 of `F_max`, and the planner's peak pump draw is 0.76).
+#: Not 1e6, which is out of reach the same way and costs HPIPM its conditioning:
+#: at 1e6 the same runs read QP iterations p90 8 -> 12-14 and max 12 -> 60 with
+#: every quality column unmoved, i.e. an artifact of the number and not of the
+#: constraint (issue 248).
+RELAXED = 10.0
 
 
 def envelope_tau(t, rate):
@@ -108,6 +116,37 @@ def envelope_tau(t, rate):
         slope = np.polyfit(t[: envelope.size][keep], np.log(envelope[keep]), 1)[0]
         taus.append(-1.0 / slope if slope < 0.0 else float("inf"))
     return taus
+
+
+def scale_h(ocp, rows, factor):
+    """
+    Multiply constraint 6 (cylinder force) and/or 7 (pump flow)'s allowance.
+
+    `factor` past one removes the row -- `h` is a fraction of its own allowance,
+    so nothing a move does reaches ten. Under one it *tightens*, which is how the
+    headroom gets measured: lower it until slack appears and the row's distance
+    from binding is the factor it binds at.
+
+    Not a `--set`: `problem.constraint_scale` divides each row by its own
+    allowance, so `lh`/`uh` come out in `[-1, 1]` and `[0, 1]` whatever the
+    hydraulics yaml says, and no number in either yaml can move them. Written
+    straight onto the solver, which holds because `configure_fixed_data` writes
+    the pair once at construction and no cycle rewrites it.
+
+    `nh` and the two rows' slack columns stay in the QP either way, so this
+    measures what the constraint *does*, not what dropping it would save.
+    """
+    force = slice(0, cs.PLANNED_DOF)
+    for stage in range(ocp.intervals):
+        lower = np.asarray(ocp.solver.constraints_get(stage, "lh"), float)
+        upper = np.asarray(ocp.solver.constraints_get(stage, "uh"), float)
+        if rows in ("force", "both"):
+            lower[force] *= factor
+            upper[force] *= factor
+        if rows in ("pump", "both"):
+            upper[cs.NU] *= factor
+        ocp.solver.constraints_set(stage, "lh", lower)
+        ocp.solver.constraints_set(stage, "uh", upper)
 
 
 def riding(solution, limits):
@@ -320,6 +359,20 @@ def main(argv=None) -> int:
         "arm, which is fitted at 0 and no multiplier can move",
     )
     parser.add_argument(
+        "--relax-h",
+        choices=("force", "pump", "both"),
+        default=None,
+        help="scale constraint 6 / 7's allowance; the one row group no --set can "
+        "move, since h is scaled by its own allowance",
+    )
+    parser.add_argument(
+        "--h-factor",
+        type=float,
+        default=RELAXED,
+        help=f"--relax-h's multiplier; default {RELAXED:g} removes the row, "
+        "under 1 tightens it to read the headroom",
+    )
+    parser.add_argument(
         "--json", type=Path, default=None, help="scores; a list per move if chained"
     )
     parser.add_argument("--viewer", action="store_true", help="MuJoCo passive viewer")
@@ -360,6 +413,8 @@ def main(argv=None) -> int:
     )
     # Offline wall time is not the machine's; `--latency` stands for it.
     ocp.solve_budget_s = 10.0
+    if options.relax_h:
+        scale_h(ocp, options.relax_h, options.h_factor)
     ocp.set_payload(options.payload_mass, options.payload_com)
     plant = MujocoPlant(description, timestep=options.timestep)
     carried = (
