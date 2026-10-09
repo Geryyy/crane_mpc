@@ -331,6 +331,14 @@ def main(argv=None) -> int:
         "once-anchored grid did",
     )
     parser.add_argument(
+        "--pace",
+        type=float,
+        default=1.0,
+        help="divide the duration handed to adopt_path, i.e. multiply the "
+        "progress reference's slope. 1 is the plan's mean pace, which is what "
+        "nominal_rate is; the plan's own s(t) peaks above it (issue 250)",
+    )
+    parser.add_argument(
         "--plant-payload", type=float, default=None, help="kg; default --payload-mass"
     )
     parser.add_argument(
@@ -527,7 +535,10 @@ def fly(
         plan.dq_a,
     )
     cycle.adopt_reference(reference, epoch_ns)
-    cycle.adopt_path(harness.path_control(plan), plan.duration, epoch_ns)
+    # Duration only sets `PathCycle.nominal_rate`; the curve and the `dq_a_ref`
+    # knots are untouched, so `--pace` moves the progress reference's slope and
+    # nothing else.
+    cycle.adopt_path(harness.path_control(plan), plan.duration / options.pace, epoch_ns)
     if options.cadence_phase:
         anchor = timing.anchor
         phase_ns = int(round(options.cadence_phase * 1e9))
@@ -566,6 +577,14 @@ def fly(
     # margin the timer callback has left, solve included. Offline wall time is
     # not the machine's, but what is Python here is Python there (issue 187).
     tick_to_publish = []
+    # What the MPC *asks* for, per published horizon, against the plan's peak
+    # further down. Live the two separate -- the horizon peaked at 0.74 of plan
+    # on both lagging axes with nothing bound (issue 250) -- so the ask has to
+    # be read beside the achieved speed. Two readings, because they answer
+    # different questions: knot 0 is what the JTC plays next and is therefore
+    # the pace the MPC drives at, the whole-horizon max says whether the ask is
+    # capped anywhere.
+    asked_now, asked_any = [], []
     seconds = options.seconds or float(plan.duration) + 5.0
     diverged = False
     scored = int(round(seconds / Ts))
@@ -600,6 +619,9 @@ def fly(
                 )
             flight.append((clock + options.latency, message))
             u0 = cycle.horizon.u[0, : cs.PLANNED_DOF].copy()
+            asked = np.abs(cycle.horizon.dq_a_ref)
+            asked_now.append(asked[0])
+            asked_any.append(asked.max(0))
             tick_to_publish.append(time.perf_counter() - started)
 
         started = 0.0
@@ -710,6 +732,34 @@ def fly(
     u0 = u0[np.all(np.isfinite(u0), axis=1)]
     # Ticks of the coast loop land in `u_tick` too, but only after this scoring.
     u = np.array(u_tick)
+    # Issue 250: did the chain run the plan at the pace it was planned at? Peak
+    # speed per axis, the plan's own against what the MPC asked and what the
+    # joint did. Over the whole log and not up to arrival: a lagging move is
+    # still moving past plan end, so a window that stops there flatters it.
+    # `plan.dq_a` is the actuated six; the planned five lead it, as in `dq_a_ref`.
+    plan_peak = np.abs(plan.dq_a[:, :nq]).max(0)
+    # What the MPC is *asked* to do with the path parameter against what the plan
+    # does with it: `PathCycle.nominal_rate` is `1/duration`, the plan's mean
+    # pace, while the planner's own `s(t)` starts and ends at rest and so peaks
+    # above it. The progress row's reference is that mean, so this ratio is the
+    # ceiling on `achieved / plan` before any weight or bound is involved.
+    plan_pace = float(np.abs(plan.timing.speed).max() * plan.duration)
+    dq_peak = np.abs(log[:, 2 + nq + 2 : 2 + 2 * nq + 2]).max(0)
+
+    def peak(rows):
+        return np.asarray(rows)[:, :nq].max(0) if rows else np.zeros(nq)
+
+    now_peak, any_peak = peak(asked_now), peak(asked_any)
+    moving = plan_peak > 1e-6
+
+    def over_plan(values):
+        return np.divide(values, plan_peak, out=np.full(nq, np.nan), where=moving)
+
+    ratio, now_ratio, any_ratio = (
+        over_plan(dq_peak),
+        over_plan(now_peak),
+        over_plan(any_peak),
+    )
     print(
         f"wire {options.wire}, latency {1e3 * options.latency:.0f} ms, "
         f"cadence phase {1e3 * options.cadence_phase:.0f} ms, {len(log)} cycles\n"
@@ -719,6 +769,11 @@ def fly(
         f"  rate at +2 s     {np.round(rate_2s, 4)} rad/s (arrival {arrival:.2f} s)\n"
         f"  hold rate tau    {np.round(tau_u, 1)} s\n"
         f"  hold dq_a RMS    {dq_a_hold:.4f} rad/s\n"
+        f"  plan peak |dq_a| {np.round(plan_peak, 3)} rad/s\n"
+        f"  plan v_s pk/mean {plan_pace:.3f} ({plan.duration:.2f} s)\n"
+        f"  asked now / plan {np.round(now_ratio, 3)}\n"
+        f"  asked any / plan {np.round(any_ratio, 3)}\n"
+        f"  achieved / plan  {np.round(ratio, 3)}\n"
         f"  bounds ridden    "
         + " ".join(
             f"{name} {np.mean([r[name] for r in riders]):.2f}"
@@ -773,6 +828,17 @@ def fly(
             "sway_rate_after_2s": rate_2s.tolist(),
             "sway_rate_tau_s": tau_u,
             "dq_a_rms_hold": dq_a_hold,
+            # Issue 250's oracle: peak speed per planned axis, plan against
+            # horizon ask against joint. The two ratios are nan on an axis the
+            # plan holds still.
+            "plan_dq_peak": plan_peak.tolist(),
+            "plan_pace_peak_over_mean": plan_pace,
+            "asked_now_dq_peak": now_peak.tolist(),
+            "asked_any_dq_peak": any_peak.tolist(),
+            "dq_peak": dq_peak.tolist(),
+            "asked_now_plan_ratio": now_ratio.tolist(),
+            "asked_any_plan_ratio": any_ratio.tolist(),
+            "dq_plan_ratio": ratio.tolist(),
             # The gate: |u| over u_clamp on its side, per axis. > 1 is outside
             # Psi's fitted domain, i.e. `past_clamp`.
             "u_clamp_ratio": np.maximum(
