@@ -174,7 +174,7 @@ def check_fit(model: cs.CraneSymbolicModel, fit: dict) -> None:
       that moved one and not the other is a damping-ratio error, not rounding.
     """
     actuator = model.actuator
-    for axis, key in enumerate(cs.K_AXIS_KEYS):
+    for axis, key in enumerate(cs.AXIS_KEYS):
         for name, value in (("k", actuator.k[axis]), ("tau_v", actuator.tau_v[axis])):
             if not np.isfinite(value):
                 raise ValueError(
@@ -190,7 +190,7 @@ def check_fit(model: cs.CraneSymbolicModel, fit: dict) -> None:
                 f"{FIT_LABEL}: axis {key!r} has d={fitted}, which is not a number "
                 "a solver can be built on"
             )
-        damped = float(model.description.damping[cs.K_PLANNED_ROWS[axis]])
+        damped = float(model.description.damping[cs.PLANNED_INDICES[axis]])
         if abs(damped - fitted) > FIT_DAMPING_TOLERANCE * abs(fitted):
             raise ValueError(
                 f"axis {key!r}: the description damps it at {damped} and this "

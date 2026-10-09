@@ -44,7 +44,7 @@ from crane_model.mujoco_plant import (  # noqa: E402
     PLANNED_INDICES,
     TOOL_INDEX,
 )
-from crane_model.symbolic import K_ACTUATOR_FIT  # noqa: E402
+from crane_model.symbolic import ACTUATOR_FIT  # noqa: E402
 from crane_model.velocity_loop import VelocityLoop, load_velocity_loop  # noqa: E402
 from crane_mpc import solver as ocp_runtime  # noqa: E402
 from crane_mpc.problem import PATH_POINTS  # noqa: E402
@@ -175,7 +175,7 @@ class Chain:
 
     def __init__(self, plant, q_tool: float, options, fit=None) -> None:
         self.plant, self.q_tool = plant, float(q_tool)
-        fit = K_ACTUATOR_FIT if fit is None else fit
+        fit = ACTUATOR_FIT if fit is None else fit
         gains_by_joint, rate_hz = load_velocity_loop()
         gains = [gains_by_joint[canonical_joints()[i]] for i in PLANNED]
         self.step_s = 1.0 / (options.control_rate or rate_hz)
@@ -203,7 +203,7 @@ class Chain:
     def seed(self, state: np.ndarray) -> None:
         """Place the plant; C3 starts holding it up, not from tau = 0."""
         self.plant.set_rigid_state(state[:NX_RIGID], self.q_tool)
-        self.actuator.reset(tau=self.plant.holding_force)
+        self.actuator.reset(tau=self.plant.h_eff)
 
 
 def random_goal(planner, start, rng):

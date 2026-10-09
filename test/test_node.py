@@ -27,8 +27,8 @@ from std_msgs.msg import String
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 
 NAMES = canonical_joints()
-ACTUATED = [NAMES[row] for row in cs.K_ACTUATED_ROWS]
-PASSIVE = [NAMES[row] for row in cs.K_PASSIVE_ROWS]
+ACTUATED = [NAMES[row] for row in cs.ACTUATED_INDICES]
+PASSIVE = [NAMES[row] for row in cs.PASSIVE_INDICES]
 POSE = [0.0, 0.5, 1.0, 0.2, 0.0, 0.3]
 # Tool hangs at `POSE`, not a pair of zeros: tilt's URDF range is [0.785,
 # 2.356] and it hangs at pi/2, so zeros pinned it 0.785 rad outside its own
@@ -204,7 +204,7 @@ def test_in_shadow_the_horizon_goes_to_the_private_topic(node):
     # The plan starts where the machine is, not where the last cycle left off.
     assert horizon.points[0].positions[1] == pytest.approx(POSE[1], abs=0.05)
     # The two passive rows carry the solved sway, not a pair of zeros.
-    assert [horizon.points[0].positions[row] for row in cs.K_PASSIVE_ROWS] == (
+    assert [horizon.points[0].positions[row] for row in cs.PASSIVE_INDICES] == (
         pytest.approx(PASSIVE_POSE, abs=0.05)
     )
     health = node.published["_health_publisher"][0]
@@ -415,8 +415,8 @@ def joint_path(stamp, target=POSE):
     """The planner's curve for `reference`'s move: a joint-space line to `target`."""
     message = JointPath()
     message.header.stamp = stamp
-    message.joint_names = list(ACTUATED)[: cs.K_PLANNED_DOF]
-    rows = np.linspace(POSE[: cs.K_PLANNED_DOF], target[: cs.K_PLANNED_DOF], 40)
+    message.joint_names = list(ACTUATED)[: cs.PLANNED_DOF]
+    rows = np.linspace(POSE[: cs.PLANNED_DOF], target[: cs.PLANNED_DOF], 40)
     message.q_path = [float(value) for value in rows.reshape(-1)]
     message.duration = Duration(sec=4)
     return message
@@ -459,7 +459,7 @@ def test_the_planners_curve_is_fitted_once_on_arrival(node):
     assert path is not None
     # Fitted once on arrival, not once per cycle inside the OCP, and it is the fit
     # that travels into the parameter vector.
-    assert path.control.shape == (problem.PATH_POINTS, cs.K_PLANNED_DOF)
+    assert path.control.shape == (problem.PATH_POINTS, cs.PLANNED_DOF)
     # 1/duration: the pace the plan was written at, which is what the progress row
     # is priced against.
     assert path.nominal_rate == pytest.approx(0.25)

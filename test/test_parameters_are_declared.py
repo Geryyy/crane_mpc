@@ -140,9 +140,9 @@ def test_the_transport_delay_is_the_fitted_dead_time():
     fit's own dead time only happens to equal. Pinned so the two stop agreeing
     loudly rather than quietly.
     """
-    from crane_model.symbolic import K_ACTUATOR_FIT
+    from crane_model.symbolic import ACTUATOR_FIT
 
     for name in SHIPPED:
         shipped = yaml.safe_load((PACKAGE / "config" / name).read_text())
         written = shipped["crane_mpc"]["ros__parameters"]
-        assert written["sensor_to_valve_delay"] == float(K_ACTUATOR_FIT.dead_time_s)
+        assert written["sensor_to_valve_delay"] == float(ACTUATOR_FIT.dead_time_s)

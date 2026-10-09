@@ -163,9 +163,10 @@ def build(
     samples = int(seconds / TICK)
     dq, cmd = traces(samples, step)
     joints = [
-        modelfit.CANON[i] for i in modelfit.PLANNED_ROWS + modelfit.PASSIVE_ROWS + [7]
+        modelfit.CANON[i]
+        for i in modelfit.PLANNED_INDICES + modelfit.PASSIVE_INDICES + [7]
     ]
-    planned = [modelfit.CANON[i] for i in modelfit.PLANNED_ROWS]
+    planned = [modelfit.CANON[i] for i in modelfit.PLANNED_INDICES]
     with open(path, "wb") as handle:
         writer = Writer(handle)
         schemas = {

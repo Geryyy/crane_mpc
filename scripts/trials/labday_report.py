@@ -310,8 +310,10 @@ def model_skill(bag, ocp=None):
     # rising stamp; the reader yields log-time order, which is not the same thing.
     js, ctrl = sorted(js, key=lambda r: r["sim"]), sorted(ctrl, key=lambda r: r["sim"])
     canon = modelfit.CANON
-    wanted = [canon[i] for i in modelfit.PLANNED_ROWS + modelfit.PASSIVE_ROWS + [7]]
-    planned = [canon[i] for i in modelfit.PLANNED_ROWS]
+    wanted = [
+        canon[i] for i in modelfit.PLANNED_INDICES + modelfit.PASSIVE_INDICES + [7]
+    ]
+    planned = [canon[i] for i in modelfit.PLANNED_INDICES]
     present = set(js[0]["msg"].name)
     if not set(wanted) <= present:
         return [

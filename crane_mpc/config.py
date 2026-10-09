@@ -29,28 +29,28 @@ from crane_model.velocity_loop import load_velocity_loop
 #: silently covers fewer axes than the problem has rows.
 WIDTHS = {
     "weights": {
-        "q_a": cs.K_ACTUATED_DOF,
-        "dq_a": cs.K_ACTUATED_DOF,
-        "tau_a": cs.K_ACTUATED_DOF,
-        "u": cs.K_ACTUATED_DOF,
-        "du": cs.K_ACTUATED_DOF,
-        "q_u": cs.K_PASSIVE_DOF,
-        "dq_u": cs.K_PASSIVE_DOF,
+        "q_a": cs.ACTUATED_DOF,
+        "dq_a": cs.ACTUATED_DOF,
+        "tau_a": cs.ACTUATED_DOF,
+        "u": cs.ACTUATED_DOF,
+        "du": cs.ACTUATED_DOF,
+        "q_u": cs.PASSIVE_DOF,
+        "dq_u": cs.PASSIVE_DOF,
     },
     "limits": {
-        "q_a_lower": cs.K_ACTUATED_DOF,
-        "q_a_upper": cs.K_ACTUATED_DOF,
-        "q_a_margin": cs.K_ACTUATED_DOF,
-        "dq_a_max": cs.K_ACTUATED_DOF,
-        "u_max": cs.K_ACTUATED_DOF,
-        "q_sway_max": cs.K_PASSIVE_DOF,
-        "dq_sway_max": cs.K_PASSIVE_DOF,
-        "du_max": cs.K_PLANNED_DOF,
+        "q_a_lower": cs.ACTUATED_DOF,
+        "q_a_upper": cs.ACTUATED_DOF,
+        "q_a_margin": cs.ACTUATED_DOF,
+        "dq_a_max": cs.ACTUATED_DOF,
+        "u_max": cs.ACTUATED_DOF,
+        "q_sway_max": cs.PASSIVE_DOF,
+        "dq_sway_max": cs.PASSIVE_DOF,
+        "du_max": cs.PLANNED_DOF,
     },
     "slack": {
-        "q_u": cs.K_PASSIVE_DOF,
-        "dq_u": cs.K_PASSIVE_DOF,
-        "cylinder_force": cs.K_ACTUATED_DOF,
+        "q_u": cs.PASSIVE_DOF,
+        "dq_u": cs.PASSIVE_DOF,
+        "cylinder_force": cs.ACTUATED_DOF,
     },
 }
 
@@ -280,7 +280,7 @@ def check_settings(parameters: dict, hydraulics: dict) -> None:
         "constraint 1's safety margin must be finite and >= 0 on every row; zero means "
         "the bound is the control-safe limit itself",
     )
-    for row in range(cs.K_ACTUATED_DOF):
+    for row in range(cs.ACTUATED_DOF):
         if not lower[row] < upper[row]:
             raise MpcConfigError(
                 f"q_a_lower[{row}] = {lower[row]:g} is not below q_a_upper[{row}] = "

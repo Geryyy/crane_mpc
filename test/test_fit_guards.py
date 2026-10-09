@@ -53,9 +53,9 @@ def fit() -> dict:
 @pytest.fixture
 def model(fit) -> Model:
     """What the shipped fit builds: `k`, `tau_v`, and a description matching `d`."""
-    axes = [fit["axes"][key] for key in cs.K_AXIS_KEYS]
-    damping = np.zeros(max(cs.K_PLANNED_ROWS) + 1)
-    for axis, row in enumerate(cs.K_PLANNED_ROWS):
+    axes = [fit["axes"][key] for key in cs.AXIS_KEYS]
+    damping = np.zeros(max(cs.PLANNED_INDICES) + 1)
+    for axis, row in enumerate(cs.PLANNED_INDICES):
         damping[row] = float(axes[axis]["d"])
     return Model(
         actuator=cs.ActuatorFit(
@@ -70,7 +70,7 @@ def model(fit) -> Model:
 @pytest.mark.parametrize("name", ["k", "tau_v"])
 def test_non_finite_is_refused_by_axis_name(model, fit, name):
     """`load_actuator_fit` lets an infinity through: `inf > 0` is true."""
-    axis = cs.K_AXIS_KEYS.index("sa")
+    axis = cs.AXIS_KEYS.index("sa")
     values = list(getattr(model.actuator, name))
     values[axis] = np.inf
     model.actuator = dataclasses.replace(model.actuator, **{name: tuple(values)})
@@ -80,7 +80,7 @@ def test_non_finite_is_refused_by_axis_name(model, fit, name):
 
 def test_damping_from_another_fit_is_refused(model, fit):
     """`d` and `k` are one identification; `d` arrives via the description."""
-    model.description.damping[cs.K_PLANNED_ROWS[cs.K_AXIS_KEYS.index("ro")]] *= 2.0
+    model.description.damping[cs.PLANNED_INDICES[cs.AXIS_KEYS.index("ro")]] *= 2.0
     with pytest.raises(ValueError, match=r"axis 'ro': the description damps it at"):
         eo.check_fit(model, fit)
 

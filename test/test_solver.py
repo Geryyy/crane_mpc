@@ -24,7 +24,7 @@ from crane_mpc.solver import (
     weight_matrices,
 )
 
-PLANNED = cs.K_PLANNED_DOF
+PLANNED = cs.PLANNED_DOF
 
 
 def read_parameters(name):
@@ -137,7 +137,7 @@ def test_the_prediction_replays_the_one_command_that_covers_the_window(ocp, stat
 def test_a_solve_keeps_its_plan_inside_the_boxes_it_was_given(ocp, state):
     position = state[cs.X_PLANNED_POSITION : cs.X_PLANNED_POSITION + PLANNED]
     horizon = horizon_holding(ocp, position)
-    q_eq = state[cs.X_PASSIVE_POSITION : cs.X_PASSIVE_POSITION + cs.K_PASSIVE_DOF]
+    q_eq = state[cs.X_PASSIVE_POSITION : cs.X_PASSIVE_POSITION + cs.PASSIVE_DOF]
 
     solution = solved(ocp, state, horizon, q_eq)
     assert solution.outcome is not Outcome.FAILED
@@ -166,7 +166,7 @@ def test_the_solution_reads_flat_the_way_it_reads_per_stage(ocp, state):
     pins the direction of the conversion.
     """
     position = state[cs.X_PLANNED_POSITION : cs.X_PLANNED_POSITION + PLANNED]
-    q_eq = state[cs.X_PASSIVE_POSITION : cs.X_PASSIVE_POSITION + cs.K_PASSIVE_DOF]
+    q_eq = state[cs.X_PASSIVE_POSITION : cs.X_PASSIVE_POSITION + cs.PASSIVE_DOF]
     solution = solved(ocp, state, horizon_holding(ocp, position), q_eq)
 
     stages = range(ocp.intervals + 1)
@@ -189,7 +189,7 @@ def test_the_cost_split_names_where_the_plan_spent(ocp, state):
     horizon = horizon_holding(ocp, position)
     # Ask for a pose the machine is not in: the tracking row has to carry it.
     horizon.q_a_ref[:, 0] += 0.4
-    q_eq = state[cs.X_PASSIVE_POSITION : cs.X_PASSIVE_POSITION + cs.K_PASSIVE_DOF]
+    q_eq = state[cs.X_PASSIVE_POSITION : cs.X_PASSIVE_POSITION + cs.PASSIVE_DOF]
 
     solution = solved(ocp, state, horizon, q_eq)
     terms = ocp.cost_terms(solution, q_eq)
@@ -213,7 +213,7 @@ def test_the_cost_split_leaves_no_residual_row_out(ocp, state):
     horizon = horizon_holding(ocp, position)
     # Off pose, so every tracking row carries something -- the tool's included.
     horizon.q_a_ref[:, 0] += 0.4
-    q_eq = state[cs.X_PASSIVE_POSITION : cs.X_PASSIVE_POSITION + cs.K_PASSIVE_DOF]
+    q_eq = state[cs.X_PASSIVE_POSITION : cs.X_PASSIVE_POSITION + cs.PASSIVE_DOF]
 
     solution = solved(ocp, state, horizon, q_eq)
     terms = ocp.cost_terms(solution, q_eq)
@@ -241,7 +241,7 @@ def test_the_warm_start_is_the_last_solution_unshifted(ocp, state):
     """`Ocp.carried`: knot 0 is kept, not dropped -- a shift spends the one step."""
     position = state[cs.X_PLANNED_POSITION : cs.X_PLANNED_POSITION + PLANNED]
     horizon = horizon_holding(ocp, position)
-    q_eq = state[cs.X_PASSIVE_POSITION : cs.X_PASSIVE_POSITION + cs.K_PASSIVE_DOF]
+    q_eq = state[cs.X_PASSIVE_POSITION : cs.X_PASSIVE_POSITION + cs.PASSIVE_DOF]
 
     solution = solved(ocp, state, horizon, q_eq)
     guess = ocp.carried(solution)
@@ -258,7 +258,7 @@ def test_a_payload_step_drops_the_warm_start_whatever_the_caller_passes(ocp, sta
     """
     position = state[cs.X_PLANNED_POSITION : cs.X_PLANNED_POSITION + PLANNED]
     horizon = horizon_holding(ocp, position)
-    q_eq = state[cs.X_PASSIVE_POSITION : cs.X_PASSIVE_POSITION + cs.K_PASSIVE_DOF]
+    q_eq = state[cs.X_PASSIVE_POSITION : cs.X_PASSIVE_POSITION + cs.PASSIVE_DOF]
 
     guess = ocp.carried(solved(ocp, state, horizon, q_eq))
     assert solved(ocp, state, horizon, q_eq, guess).warm_started
@@ -350,7 +350,7 @@ def test_a_non_finite_input_never_reaches_a_solve(ocp, state):
     position = state[cs.X_PLANNED_POSITION : cs.X_PLANNED_POSITION + PLANNED]
     horizon = horizon_holding(ocp, position)
     horizon.dq_a_ref[3, 1] = np.nan
-    q_eq = state[cs.X_PASSIVE_POSITION : cs.X_PASSIVE_POSITION + cs.K_PASSIVE_DOF]
+    q_eq = state[cs.X_PASSIVE_POSITION : cs.X_PASSIVE_POSITION + cs.PASSIVE_DOF]
     with pytest.raises(ValueError, match="the reference"):
         solved(ocp, state, horizon, q_eq)
 
@@ -388,7 +388,7 @@ def test_hpipms_memory_survives_a_warm_cycle_and_not_a_cold_one(ocp, state):
     """
     position = state[cs.X_PLANNED_POSITION : cs.X_PLANNED_POSITION + PLANNED]
     horizon = horizon_holding(ocp, position)
-    q_eq = state[cs.X_PASSIVE_POSITION : cs.X_PASSIVE_POSITION + cs.K_PASSIVE_DOF]
+    q_eq = state[cs.X_PASSIVE_POSITION : cs.X_PASSIVE_POSITION + cs.PASSIVE_DOF]
 
     dropped = []
     original = ocp.solver.reset
@@ -426,7 +426,7 @@ def resting_state(ocp, parameters):
     q_eq = np.asarray(CraneModel(description, Tool.PZS100).passive_equilibrium(q_a))
     x = np.zeros(cs.NX)
     x[cs.X_PLANNED_POSITION : cs.X_PLANNED_POSITION + PLANNED] = q_a[:PLANNED]
-    x[cs.X_PASSIVE_POSITION : cs.X_PASSIVE_POSITION + cs.K_PASSIVE_DOF] = q_eq
+    x[cs.X_PASSIVE_POSITION : cs.X_PASSIVE_POSITION + cs.PASSIVE_DOF] = q_eq
     x[cs.X_PROGRESS_RATE] = float(
         parameters["limits"]["progress_rate_headroom"]
     ) * problem.nominal_progress_rate(parameters)
@@ -489,13 +489,13 @@ def test_stage_zero_prices_the_command_in_flight_only_when_asked(
 ):
     """w_du = 0 writes stage 0 exactly as before; w_du > 0 moves only the u rows."""
     values = dict(parameters)
-    values["weights"] = dict(parameters["weights"], du=[du] * cs.K_ACTUATED_DOF)
+    values["weights"] = dict(parameters["weights"], du=[du] * cs.ACTUATED_DOF)
     description = problem.default_description().read_text()
     export_for(export_base, values, values["hydraulics"], description)
     ocp = Ocp(description, values, values["hydraulics"])
     state = hold_state(ocp)
     position = state[cs.X_PLANNED_POSITION : cs.X_PLANNED_POSITION + PLANNED]
-    q_eq = state[cs.X_PASSIVE_POSITION : cs.X_PASSIVE_POSITION + cs.K_PASSIVE_DOF]
+    q_eq = state[cs.X_PASSIVE_POSITION : cs.X_PASSIVE_POSITION + cs.PASSIVE_DOF]
     horizon = horizon_holding(ocp, position)
     in_flight = np.full(cs.NU_PROGRESS, 0.3)
 
@@ -562,7 +562,7 @@ def test_c4_replays_a_command_ramp_from_its_start(c4_ocp):
 def test_c4_solves_at_rest_inside_its_boxes(c4_ocp):
     x = c4_state(c4_ocp, np.zeros(PLANNED))
     position = x[cs.X_PLANNED_POSITION : cs.X_PLANNED_POSITION + PLANNED]
-    q_eq = x[cs.X_PASSIVE_POSITION : cs.X_PASSIVE_POSITION + cs.K_PASSIVE_DOF]
+    q_eq = x[cs.X_PASSIVE_POSITION : cs.X_PASSIVE_POSITION + cs.PASSIVE_DOF]
     solution = solved(c4_ocp, x, horizon_holding(c4_ocp, position), q_eq)
     assert solution.status == 0
     limits = c4_ocp.parameters["limits"]
@@ -589,7 +589,7 @@ def test_c4_converges_at_the_end_of_the_path_with_progress_still_running(c4_ocp)
     """
     x = c4_state(c4_ocp, np.zeros(PLANNED))
     position = x[cs.X_PLANNED_POSITION : cs.X_PLANNED_POSITION + PLANNED]
-    q_eq = x[cs.X_PASSIVE_POSITION : cs.X_PASSIVE_POSITION + cs.K_PASSIVE_DOF]
+    q_eq = x[cs.X_PASSIVE_POSITION : cs.X_PASSIVE_POSITION + cs.PASSIVE_DOF]
     horizon = horizon_holding(c4_ocp, position)
     end = window_path(c4_ocp, horizon, origin=1.0)
     solution = solved(c4_ocp, x, horizon, q_eq, path=end)

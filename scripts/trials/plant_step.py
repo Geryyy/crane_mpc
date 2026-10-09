@@ -26,10 +26,10 @@ from crane_mpc.solver import Ocp
 
 TIMES = (0.06, 0.12, 0.20, 0.30, 0.50, 0.80)
 CANON = list(canonical_joints())
-PL = cs.K_PLANNED_DOF
+PL = cs.PLANNED_DOF
 POS = slice(cs.X_PLANNED_POSITION, cs.X_PLANNED_POSITION + PL)
 VEL = slice(cs.X_PLANNED_VELOCITY, cs.X_PLANNED_VELOCITY + PL)
-PAS = slice(cs.X_PASSIVE_POSITION, cs.X_PASSIVE_POSITION + cs.K_PASSIVE_DOF)
+PAS = slice(cs.X_PASSIVE_POSITION, cs.X_PASSIVE_POSITION + cs.PASSIVE_DOF)
 
 
 def gazebo(path, joint):
@@ -50,7 +50,7 @@ def mujoco(hold, amplitude, joint):
     plant.set_state(np.array([hold[j][0] for j in CANON]), np.zeros(len(CANON)))
     plant.forward()
     actuator = C3Actuator(timestep=plant.model.opt.timestep)
-    actuator.reset(tau=plant.holding_force)
+    actuator.reset(tau=plant.h_eff)
     row = CANON.index(joint)
     u = np.zeros(len(PLANNED_INDICES))
     u[list(PLANNED_INDICES).index(row)] = amplitude

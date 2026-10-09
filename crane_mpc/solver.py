@@ -139,7 +139,7 @@ class PathCycle:
 
     def remaining(self) -> float:
         """How much path parameter is left, which is the progress state's own ceiling."""
-        return max(0.0, problem.K_PROGRESS_RATE_REFERENCE - float(self.origin))
+        return max(0.0, problem.PROGRESS_RATE_REFERENCE - float(self.origin))
 
 
 @dataclass
@@ -173,8 +173,8 @@ def weight_matrices(parameters: dict) -> tuple[np.ndarray, np.ndarray]:
     C4: the input rows are `dc`, priced by `du` every stage; `u` prices `c`.
     """
     weights = parameters["weights"]
-    planned = cs.K_PLANNED_DOF
-    passive = cs.K_PASSIVE_DOF
+    planned = cs.PLANNED_DOF
+    passive = cs.PASSIVE_DOF
     command = np.asarray(weights["u"][:planned], dtype=float)
     rate = np.asarray(weights["du"][:planned], dtype=float)
     c4 = problem.command_state(parameters)
@@ -238,10 +238,10 @@ def constraint_data(
     extend, retract = chamber
     extend = np.abs(extend)
     retract = np.abs(retract)
-    lower_h = np.concatenate([-retract[: cs.K_PLANNED_DOF] / scale[: cs.NU], [0.0]])
+    lower_h = np.concatenate([-retract[: cs.PLANNED_DOF] / scale[: cs.NU], [0.0]])
     upper_h = np.concatenate(
         [
-            extend[: cs.K_PLANNED_DOF] / scale[: cs.NU],
+            extend[: cs.PLANNED_DOF] / scale[: cs.NU],
             [
                 float(hydraulics["pump_flow_planning_factor"])
                 * float(hydraulics["pump_flow_max"])
@@ -249,7 +249,7 @@ def constraint_data(
             ],
         ]
     )
-    return lower_h, upper_h, extend[: cs.K_PLANNED_DOF], retract[: cs.K_PLANNED_DOF]
+    return lower_h, upper_h, extend[: cs.PLANNED_DOF], retract[: cs.PLANNED_DOF]
 
 
 def position_box(
@@ -257,9 +257,9 @@ def position_box(
 ) -> tuple[np.ndarray, np.ndarray]:
     """Position box with `q_a_margin`, never excluding `measured` (else stage 1 chases nothing)."""
     limits = parameters["limits"]
-    margin = np.asarray(limits["q_a_margin"][: cs.K_PLANNED_DOF], dtype=float)
-    lower = np.asarray(limits["q_a_lower"][: cs.K_PLANNED_DOF], dtype=float) + margin
-    upper = np.asarray(limits["q_a_upper"][: cs.K_PLANNED_DOF], dtype=float) - margin
+    margin = np.asarray(limits["q_a_margin"][: cs.PLANNED_DOF], dtype=float)
+    lower = np.asarray(limits["q_a_lower"][: cs.PLANNED_DOF], dtype=float) + margin
+    upper = np.asarray(limits["q_a_upper"][: cs.PLANNED_DOF], dtype=float) - margin
     return np.minimum(lower, measured), np.maximum(upper, measured)
 
 
@@ -279,16 +279,16 @@ def state_bounds(
     path spans, which this function cannot see.
     """
     limits = parameters["limits"]
-    u_max = np.asarray(limits["u_max"][: cs.K_PLANNED_DOF], dtype=float)
+    u_max = np.asarray(limits["u_max"][: cs.PLANNED_DOF], dtype=float)
     q_lower, q_upper = position_box(parameters, measured)
-    lag = u_max[list(cs.K_LAG_AXES)]
+    lag = u_max[list(cs.LAG_AXES)]
     # C4's `c` rows, hard in Psi's domain.
     command = u_max if problem.command_state(parameters) else []
     lower = np.concatenate(
         [
             q_lower,
             equilibrium - np.asarray(limits["q_sway_max"], dtype=float),
-            -np.asarray(limits["dq_a_max"][: cs.K_PLANNED_DOF], dtype=float),
+            -np.asarray(limits["dq_a_max"][: cs.PLANNED_DOF], dtype=float),
             -np.asarray(limits["dq_sway_max"], dtype=float),
             -lag,
             [0.0, 0.0],
@@ -299,7 +299,7 @@ def state_bounds(
         [
             q_upper,
             equilibrium + np.asarray(limits["q_sway_max"], dtype=float),
-            np.asarray(limits["dq_a_max"][: cs.K_PLANNED_DOF], dtype=float),
+            np.asarray(limits["dq_a_max"][: cs.PLANNED_DOF], dtype=float),
             np.asarray(limits["dq_sway_max"], dtype=float),
             lag,
             [0.0, rate_max],
@@ -345,14 +345,14 @@ def stage_reference(
     """
     reference = np.zeros(problem.NY_TERMINAL if terminal else rows)
     reference[
-        problem.Y_PASSIVE_POSITION : problem.Y_PASSIVE_POSITION + cs.K_PASSIVE_DOF
+        problem.Y_PASSIVE_POSITION : problem.Y_PASSIVE_POSITION + cs.PASSIVE_DOF
     ] = q_eq
     reference[problem.Y_PROGRESS] = min(
-        float(problem.K_PROGRESS_RATE_REFERENCE), float(progress)
+        float(problem.PROGRESS_RATE_REFERENCE), float(progress)
     )
     if not terminal:
         reference[
-            problem.Y_ACTUATED_FORCE : problem.Y_ACTUATED_FORCE + cs.K_PLANNED_DOF
+            problem.Y_ACTUATED_FORCE : problem.Y_ACTUATED_FORCE + cs.PLANNED_DOF
         ] = tau_ref
     return reference
 
@@ -390,7 +390,7 @@ def slack_prices(parameters: dict) -> dict:
     )
     nonlinear = np.concatenate(
         [
-            np.asarray(slack["cylinder_force"][: cs.K_PLANNED_DOF], dtype=float),
+            np.asarray(slack["cylinder_force"][: cs.PLANNED_DOF], dtype=float),
             [float(slack["pump_flow"])],
         ]
     )
@@ -421,7 +421,7 @@ def configure_fixed_data(
     joint = "du_max" if problem.command_state(parameters) else "u_max"
     u_max = np.concatenate(
         [
-            np.asarray(parameters["limits"][joint][: cs.K_PLANNED_DOF], dtype=float),
+            np.asarray(parameters["limits"][joint][: cs.PLANNED_DOF], dtype=float),
             [float(parameters["limits"]["progress_accel_max"])],
         ]
     )
@@ -590,7 +590,7 @@ class Ocp:
         self._boxed = problem.boxed_state_rows(parameters)
         self._ny = problem.residual_rows(parameters)
         self._command_max = np.asarray(
-            parameters["limits"]["u_max"][: cs.K_PLANNED_DOF], dtype=float
+            parameters["limits"]["u_max"][: cs.PLANNED_DOF], dtype=float
         )
         # Opened, never built: `scripts/export_ocp.py` compiled this and wrote
         # the key beside it, and `ox.open_solver` refuses anything that is not
@@ -615,12 +615,12 @@ class Ocp:
         self._static_force = ca.Function(
             "h_eff",
             [self.model.x, self.model.p],
-            [self.model.actuated_force_static],
+            [self.model.h_eff],
         )
 
         self._weight, self._terminal_weight = weight_matrices(parameters)
         self._du = np.asarray(
-            parameters["weights"]["du"][: cs.K_PLANNED_DOF], dtype=float
+            parameters["weights"]["du"][: cs.PLANNED_DOF], dtype=float
         )
         #: Whether stage 0 carries a move cost, i.e. depends on the command in flight.
         #: Never under C4, where `du` prices the rate on every stage instead.
@@ -641,7 +641,7 @@ class Ocp:
         #: Widths of the two soft blocks: sway pair + sway-rate pair, and the
         #: cylinder-force rows + the pump row. Stage 0 carries the second alone,
         #: the terminal stage the first alone, every stage between both.
-        self._soft_state = 2 * cs.K_PASSIVE_DOF
+        self._soft_state = 2 * cs.PASSIVE_DOF
         self._soft_nonlinear = cs.NU + 1
 
         def predictor(seconds: float):
@@ -683,7 +683,7 @@ class Ocp:
             "ny_e": problem.NY_TERMINAL,
             "nh": cs.NU + 1,
             "nh_e": 0,
-            "nsbx": 2 * cs.K_PASSIVE_DOF,
+            "nsbx": 2 * cs.PASSIVE_DOF,
             "nsh": cs.NU + 1,
             "nbu": cs.NU_PROGRESS,
             "N": self.intervals,
@@ -759,7 +759,7 @@ class Ocp:
         Seeds C3's force state and effort term's reference; zeroed there, buys droop (issue 117).
         """
         value = self._static_force(x, self._base_parameter[: cs.NP])
-        return np.asarray(value).reshape(-1)[: cs.K_PLANNED_DOF]
+        return np.asarray(value).reshape(-1)[: cs.PLANNED_DOF]
 
     def _integrate(self, predictor, x: np.ndarray, u: np.ndarray) -> np.ndarray:
         predictor.set("p", self._model_parameter())
@@ -820,7 +820,7 @@ class Ocp:
         state, command = _finite(x, command)
         if start is not None:
             state = state.copy()
-            state[cs.X_COMMAND : cs.X_COMMAND + cs.K_PLANNED_DOF] = _finite(start)[0]
+            state[cs.X_COMMAND : cs.X_COMMAND + cs.PLANNED_DOF] = _finite(start)[0]
         return self.propagate(state, command)
 
     # -- one cycle ---------------------------------------------------------------
@@ -877,7 +877,7 @@ class Ocp:
             raise ValueError("x0 is not a finite state of this problem")
         if self.command_state:
             # `c`'s box is hard from stage 1 and `du` finite: start inside it.
-            command = slice(cs.X_COMMAND, cs.X_COMMAND + cs.K_PLANNED_DOF)
+            command = slice(cs.X_COMMAND, cs.X_COMMAND + cs.PLANNED_DOF)
             x0[command] = np.clip(x0[command], -self._command_max, self._command_max)
         x0[cs.X_PROGRESS] = 0.0
         # Nor faster than stops inside what is left: `s` never falls and is capped
@@ -946,7 +946,7 @@ class Ocp:
         460 mm off path against 448 and 31 of 178 solves refused).
         """
         reached = float(path.origin) + stage * self.Ts * float(path.nominal_rate)
-        return min(problem.K_PROGRESS_RATE_REFERENCE, reached)
+        return min(problem.PROGRESS_RATE_REFERENCE, reached)
 
     def progress_rate_max(self, path: PathCycle) -> float:
         """`v_s`'s ceiling: declared headroom against this path's own pace."""
@@ -1010,7 +1010,7 @@ class Ocp:
         self.solver.reset(reset_qp_solver_mem=0 if warm else 1)
 
         force_reference = self.static_hold_force(x0)
-        measured = x0[cs.X_PLANNED_POSITION : cs.X_PLANNED_POSITION + cs.K_PLANNED_DOF]
+        measured = x0[cs.X_PLANNED_POSITION : cs.X_PLANNED_POSITION + cs.PLANNED_DOF]
         rate_max = self.progress_rate_max(path)
         equilibrium = np.asarray(q_eq, dtype=float)
         elapsed = np.arange(intervals + 1) * self.Ts
@@ -1022,9 +1022,7 @@ class Ocp:
         lower = np.repeat(lower[None], intervals + 1, axis=0)
         upper = np.repeat(upper[None], intervals + 1, axis=0)
         if equilibrium.ndim > 1:
-            sway = slice(
-                cs.X_PASSIVE_POSITION, cs.X_PASSIVE_POSITION + cs.K_PASSIVE_DOF
-            )
+            sway = slice(cs.X_PASSIVE_POSITION, cs.X_PASSIVE_POSITION + cs.PASSIVE_DOF)
             q_sway_max = np.asarray(
                 self.parameters["limits"]["q_sway_max"], dtype=float
             )
@@ -1038,17 +1036,17 @@ class Ocp:
         reference = np.zeros((intervals + 1, self._ny))
         passive = slice(
             problem.Y_PASSIVE_POSITION,
-            problem.Y_PASSIVE_POSITION + cs.K_PASSIVE_DOF,
+            problem.Y_PASSIVE_POSITION + cs.PASSIVE_DOF,
         )
         reference[:, passive] = equilibrium
         # `nominal_progress` per stage: where the plan's own pace reaches by then.
         reference[:, problem.Y_PROGRESS] = np.minimum(
-            problem.K_PROGRESS_RATE_REFERENCE,
+            problem.PROGRESS_RATE_REFERENCE,
             float(path.origin) + elapsed * float(path.nominal_rate),
         )
         reference[
             :intervals,
-            problem.Y_ACTUATED_FORCE : problem.Y_ACTUATED_FORCE + cs.K_PLANNED_DOF,
+            problem.Y_ACTUATED_FORCE : problem.Y_ACTUATED_FORCE + cs.PLANNED_DOF,
         ] = force_reference
 
         # Kept because `cost_terms` has to score against the path this cycle was
@@ -1268,7 +1266,7 @@ class Ocp:
         )
         soft_nonlinear = np.concatenate([taken[None, :nonlinear], path[:, state:]])
 
-        passive, planned = cs.K_PASSIVE_DOF, cs.K_PLANNED_DOF
+        passive, planned = cs.PASSIVE_DOF, cs.PLANNED_DOF
         violation = Violation(
             q_u=float(np.max(soft_state[:, :passive] / q_sway_max)),
             dq_u=float(np.max(soft_state[:, passive:] / dq_sway_max)),
@@ -1287,8 +1285,8 @@ class Ocp:
         force_reference = self.static_hold_force(solution.states[0])
         diagonal = np.diag(self._weight)
         terminal_diagonal = np.diag(self._terminal_weight)
-        planned = cs.K_PLANNED_DOF
-        passive = cs.K_PASSIVE_DOF
+        planned = cs.PLANNED_DOF
+        passive = cs.PASSIVE_DOF
         parameter = self._last_parameter
         for stage in range(self.intervals + 1):
             terminal = stage == self.intervals

@@ -18,8 +18,8 @@ from crane_mpc.node import MpcNode
 from crane_msgs.msg import SwaySettled
 from sensor_msgs.msg import JointState
 
-ACTUATED = [canonical_joints()[row] for row in cs.K_ACTUATED_ROWS]
-PASSIVE = [canonical_joints()[row] for row in cs.K_PASSIVE_ROWS]
+ACTUATED = [canonical_joints()[row] for row in cs.ACTUATED_INDICES]
+PASSIVE = [canonical_joints()[row] for row in cs.PASSIVE_INDICES]
 MAX_STATE_AGE = 0.2
 SETTLED = [0.04, 0.04]
 STAMP = Time(sec=7)

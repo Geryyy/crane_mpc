@@ -335,7 +335,7 @@ def tcp_path(cycle: Cycle, model):
     path.header.frame_id = TCP_HORIZON_FRAME
     path.header.stamp = first_knot.to_msg()
     for index, state in enumerate(cycle.tcp_states):
-        q = np.zeros(cs.K_GENERALIZED_DOF)
+        q = np.zeros(cs.GENERALIZED_DOF)
         q[list(ACTUATED_INDICES[:PLANNED_DOF])] = state[
             cs.X_PLANNED_POSITION : cs.X_PLANNED_POSITION + PLANNED_DOF
         ]

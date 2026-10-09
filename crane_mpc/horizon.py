@@ -19,8 +19,8 @@ from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 
 from . import problem
 
-ACTUATED_DOF = cs.K_ACTUATED_DOF
-PASSIVE_DOF = cs.K_PASSIVE_DOF
+ACTUATED_DOF = cs.ACTUATED_DOF
+PASSIVE_DOF = cs.PASSIVE_DOF
 
 
 class Rejection(Enum):
@@ -306,14 +306,14 @@ def horizon_to_message(
         return _command_message(
             horizon, joints, stamp, period, in_flight, in_flight_u, linear
         )
-    position = np.zeros((len(horizon), cs.K_GENERALIZED_DOF))
+    position = np.zeros((len(horizon), cs.GENERALIZED_DOF))
     velocity = np.zeros_like(position)
-    position[:, cs.K_ACTUATED_ROWS] = horizon.q_a_ref
-    velocity[:, cs.K_ACTUATED_ROWS] = horizon.dq_a_ref
-    position[:, cs.K_PASSIVE_ROWS] = horizon.q_u_ref
-    velocity[:, cs.K_PASSIVE_ROWS] = horizon.dq_u_ref
+    position[:, cs.ACTUATED_INDICES] = horizon.q_a_ref
+    velocity[:, cs.ACTUATED_INDICES] = horizon.dq_a_ref
+    position[:, cs.PASSIVE_INDICES] = horizon.q_u_ref
+    velocity[:, cs.PASSIVE_INDICES] = horizon.dq_u_ref
     effort = np.zeros_like(position)
-    effort[:, cs.K_ACTUATED_ROWS] = horizon.u - horizon.dq_a_ref
+    effort[:, cs.ACTUATED_INDICES] = horizon.u - horizon.dq_a_ref
 
     message = JointTrajectory()
     message.header.stamp = stamp
@@ -374,11 +374,11 @@ def _command_message(
         q_u = np.vstack([first.q_u_ref[:1], q_u])
         dq_u = np.vstack([first.dq_u_ref[:1], dq_u])
         now = np.zeros((1, u.shape[1]))
-        now[0, : cs.K_PLANNED_DOF] = np.asarray(in_flight_u)[: cs.K_PLANNED_DOF]
+        now[0, : cs.PLANNED_DOF] = np.asarray(in_flight_u)[: cs.PLANNED_DOF]
         u = np.vstack([now, u])
-    position = np.zeros((len(t), cs.K_GENERALIZED_DOF))
+    position = np.zeros((len(t), cs.GENERALIZED_DOF))
     velocity = np.zeros_like(position)
-    actuated, passive = list(cs.K_ACTUATED_ROWS), list(cs.K_PASSIVE_ROWS)
+    actuated, passive = list(cs.ACTUATED_INDICES), list(cs.PASSIVE_INDICES)
     position[:, actuated] = q_a
     position[:, passive] = q_u
     velocity[:, actuated] = np.gradient(q_a, t, axis=0, edge_order=2)

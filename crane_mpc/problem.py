@@ -193,7 +193,7 @@ PATH_POINTS = 30
 
 P_PATH_ORIGIN = cs.NP
 P_PATH_CONTROL = P_PATH_ORIGIN + 1
-NP = P_PATH_CONTROL + PATH_POINTS * cs.K_PLANNED_DOF
+NP = P_PATH_CONTROL + PATH_POINTS * cs.PLANNED_DOF
 
 PATH_KNOTS = bspline.knot_vector(PATH_POINTS)
 
@@ -203,10 +203,10 @@ PATH_KNOTS = bspline.knot_vector(PATH_POINTS)
 # Lag/progress rows sit inside that prefix; effort/smoothness (need an input)
 # come after.
 Y_PLANNED_POSITION = 0
-Y_PLANNED_VELOCITY = cs.K_PLANNED_DOF
-Y_PASSIVE_POSITION = 2 * cs.K_PLANNED_DOF
-Y_PASSIVE_VELOCITY = Y_PASSIVE_POSITION + cs.K_PASSIVE_DOF
-Y_LAG = Y_PASSIVE_VELOCITY + cs.K_PASSIVE_DOF
+Y_PLANNED_VELOCITY = cs.PLANNED_DOF
+Y_PASSIVE_POSITION = 2 * cs.PLANNED_DOF
+Y_PASSIVE_VELOCITY = Y_PASSIVE_POSITION + cs.PASSIVE_DOF
+Y_LAG = Y_PASSIVE_VELOCITY + cs.PASSIVE_DOF
 #: Where the tool is against where the path says it should be, in metres. The
 #: target is a centimetre at the tool and every other tracking row is in joint
 #: space, where the same error is worth 2174 to 11905 mm depending on the pose
@@ -217,11 +217,11 @@ Y_PROGRESS = Y_TOOL + 3
 Y_PROGRESS_RATE = Y_PROGRESS + 1
 NY_TERMINAL = Y_PROGRESS_RATE + 1
 Y_ACTUATED_FORCE = NY_TERMINAL
-Y_INPUT = Y_ACTUATED_FORCE + cs.K_PLANNED_DOF
+Y_INPUT = Y_ACTUATED_FORCE + cs.PLANNED_DOF
 NY = Y_INPUT + cs.NU_PROGRESS
 # C4 only: the command state `c`, after the input rows (which then carry `dc`).
 Y_COMMAND = NY
-NY_COMMAND = Y_COMMAND + cs.K_PLANNED_DOF
+NY_COMMAND = Y_COMMAND + cs.PLANNED_DOF
 
 
 def command_state(parameters: dict) -> bool:
@@ -247,13 +247,13 @@ def boxed_state_rows(parameters: dict) -> np.ndarray:
 # the five planned coords mix four radians and one metre, so a unit tangent
 # has no fixed conversion. Slewing is slowest, drives the pendulum laterally,
 # and is the axis the progress variable buys time for.
-K_LAG_AXIS = 0
+LAG_AXIS = 0
 
 # `s = 1`: the end of the path, which is what the progress row is priced
 # against now that the progress state is the path parameter. It was the rate's
 # reference -- one second of plan per wall-clock second -- until the cost
 # stopped saying when to be somewhere and started saying where to end up.
-K_PROGRESS_RATE_REFERENCE = 1.0
+PROGRESS_RATE_REFERENCE = 1.0
 
 
 # ------------------------------------------------------------------ the numbers
@@ -304,8 +304,8 @@ def state_scale(parameters: dict, scale: np.ndarray) -> np.ndarray:
     reported in them.
     """
     factor = np.ones(cs.NX_COMMAND if command_state(parameters) else cs.NX)
-    factor[cs.X_ACTUATED_FORCE : cs.X_ACTUATED_FORCE + cs.K_PLANNED_DOF] = scale[
-        : cs.K_PLANNED_DOF
+    factor[cs.X_ACTUATED_FORCE : cs.X_ACTUATED_FORCE + cs.PLANNED_DOF] = scale[
+        : cs.PLANNED_DOF
     ]
     boxed = boxed_state_rows(parameters)
     if not np.all(factor[boxed] == 1.0):
@@ -333,11 +333,11 @@ def constraint_scale(model: cs.CraneSymbolicModel, hydraulics: dict) -> tuple:
     correction margin.
     """
     extend, retract = chamber_forces(
-        model, hydraulics["system_pressure_pa"], cs.K_ACTUATED_DOF
+        model, hydraulics["system_pressure_pa"], cs.ACTUATED_DOF
     )
 
     scale = np.zeros(cs.NU + 1)
-    for axis in cs.K_PLANNED_AXES:
+    for axis in cs.PLANNED_AXES:
         scale[axis] = max(abs(extend[axis]), abs(retract[axis]))
     scale[cs.NU] = float(hydraulics["pump_flow_planning_factor"]) * float(
         hydraulics["pump_flow_max"]
@@ -390,10 +390,10 @@ def build_ocp(description_xml: str, parameters: dict, hydraulics: dict) -> tuple
     x = model.x
     u = model.u
 
-    q_a = x[cs.X_PLANNED_POSITION : cs.X_PLANNED_POSITION + cs.K_PLANNED_DOF]
-    q_u = x[cs.X_PASSIVE_POSITION : cs.X_PASSIVE_POSITION + cs.K_PASSIVE_DOF]
-    dq_a = x[cs.X_PLANNED_VELOCITY : cs.X_PLANNED_VELOCITY + cs.K_PLANNED_DOF]
-    dq_u = x[cs.X_PASSIVE_VELOCITY : cs.X_PASSIVE_VELOCITY + cs.K_PASSIVE_DOF]
+    q_a = x[cs.X_PLANNED_POSITION : cs.X_PLANNED_POSITION + cs.PLANNED_DOF]
+    q_u = x[cs.X_PASSIVE_POSITION : cs.X_PASSIVE_POSITION + cs.PASSIVE_DOF]
+    dq_a = x[cs.X_PLANNED_VELOCITY : cs.X_PLANNED_VELOCITY + cs.PLANNED_DOF]
+    dq_u = x[cs.X_PASSIVE_VELOCITY : cs.X_PASSIVE_VELOCITY + cs.PASSIVE_DOF]
 
     # Progress pair: `s` the path parameter this cycle spends, `v_s` its rate.
     progress = x[cs.X_PROGRESS]
@@ -402,14 +402,14 @@ def build_ocp(description_xml: str, parameters: dict, hydraulics: dict) -> tuple
     parameter_vector = ca.vertcat(model.p, reference_parameters)
 
     def block(offset):
-        return parameter_vector[offset : offset + cs.K_PLANNED_DOF]
+        return parameter_vector[offset : offset + cs.PLANNED_DOF]
 
     # Where on the path this stage is: `s = s_o + progress`. The progress state is
     # pinned to zero at stage zero, so the parameter carries where the cycle
     # starts (`s_o`) and the state carries the rest.
     control = ca.reshape(
         parameter_vector[P_PATH_CONTROL : P_PATH_CONTROL + PATH_POINTS * cs.NU],
-        cs.K_PLANNED_DOF,
+        cs.PLANNED_DOF,
         PATH_POINTS,
     ).T
     s = parameter_vector[P_PATH_ORIGIN] + progress
@@ -452,19 +452,19 @@ def build_ocp(description_xml: str, parameters: dict, hydraulics: dict) -> tuple
     # the two rows below already price. The reference is the path point, not the
     # goal: this is the task-space reading of the tracking row above it, not a
     # second terminal condition.
-    canonical = ca.SX.zeros(cs.K_GENERALIZED_DOF)
-    canonical[list(cs.K_PLANNED_ROWS)] = q_a
-    canonical[list(cs.K_PASSIVE_ROWS)] = q_u
-    canonical[cs.K_ACTUATED_ROWS[cs.K_TOOL_AXIS]] = model.p[cs.P_TOOL_POSITION]
+    canonical = ca.SX.zeros(cs.GENERALIZED_DOF)
+    canonical[list(cs.PLANNED_INDICES)] = q_a
+    canonical[list(cs.PASSIVE_INDICES)] = q_u
+    canonical[cs.ACTUATED_INDICES[cs.TOOL_AXIS]] = model.p[cs.P_TOOL_POSITION]
     at_machine = model.tool_position(canonical)
-    canonical[list(cs.K_PLANNED_ROWS)] = reference_position
+    canonical[list(cs.PLANNED_INDICES)] = reference_position
     at_path = model.tool_position(canonical)
     tool = at_machine - at_path
     #
     # Lag row (`timber_crane_cost_js_pfc_pt2.cpp:62-74`): tracking error
     # projected on reference direction of travel, slewing axis only,
     # unnormalised -- weight absorbs scale.
-    lag = tracking[K_LAG_AXIS] * tangent[K_LAG_AXIS]
+    lag = tracking[LAG_AXIS] * tangent[LAG_AXIS]
     #
     # Progress row: quadratic regulator toward one (time-scaling); `yref`
     # carries the one, row itself is `v_s`.
@@ -477,7 +477,7 @@ def build_ocp(description_xml: str, parameters: dict, hydraulics: dict) -> tuple
         tool,
         s,
         progress_rate,
-        tau_a[: cs.K_PLANNED_DOF],
+        tau_a[: cs.PLANNED_DOF],
         u,
     )
     if c4:
@@ -497,14 +497,10 @@ def build_ocp(description_xml: str, parameters: dict, hydraulics: dict) -> tuple
     #
     # Planned axes only: the tool is held still, so no plan here moves that
     # cylinder or draws supply through it.
-    cylinder_force = output[
-        cs.K_CYLINDER_FORCE_OFFSET : cs.K_CYLINDER_FORCE_OFFSET + cs.K_ACTUATED_DOF
-    ]
-    axis_flow = output[
-        cs.K_AXIS_FLOW_OFFSET : cs.K_AXIS_FLOW_OFFSET + cs.K_ACTUATED_DOF
-    ]
-    rows = [cylinder_force[axis] / scale[axis] for axis in cs.K_PLANNED_AXES]
-    rows.append(ca.sum1(axis_flow[: cs.K_PLANNED_DOF]) / scale[cs.NU])
+    cylinder_force = output[cs.Z_CYLINDER_FORCE : cs.Z_CYLINDER_FORCE + cs.ACTUATED_DOF]
+    axis_flow = output[cs.Z_AXIS_FLOW : cs.Z_AXIS_FLOW + cs.ACTUATED_DOF]
+    rows = [cylinder_force[axis] / scale[axis] for axis in cs.PLANNED_AXES]
+    rows.append(ca.sum1(axis_flow[: cs.PLANNED_DOF]) / scale[cs.NU])
     constraint = ca.vertcat(*rows)
     acados_model.con_h_expr_0 = constraint
     acados_model.con_h_expr = constraint

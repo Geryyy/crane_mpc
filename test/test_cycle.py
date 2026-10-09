@@ -39,7 +39,7 @@ BOUNDS = Bounds(1.0, 0.5, 0.2, 3, 0.1, 2.0)
 
 def line(places=40):
     """A joint-space straight line, 0 -> 1 on every planned axis, as control points."""
-    samples = np.linspace(np.zeros(cs.K_PLANNED_DOF), np.ones(cs.K_PLANNED_DOF), places)
+    samples = np.linspace(np.zeros(cs.PLANNED_DOF), np.ones(cs.PLANNED_DOF), places)
     return ocp_path_control(samples)
 
 
@@ -268,7 +268,7 @@ def test_the_shadow_mode_names_its_own_topic_in_the_verdict():
 
 # -- where x_0's actuated velocity comes from, per axis -------------------------
 
-DOF = cs.K_PLANNED_DOF
+DOF = cs.PLANNED_DOF
 VELOCITY = cs.X_PLANNED_VELOCITY
 
 
@@ -300,7 +300,7 @@ def test_an_opted_out_axis_takes_the_model_velocity_and_nothing_else_moves():
     assert report.carried[1]
     assert report.divergence[1] == pytest.approx(0.25 - measured_state()[VELOCITY + 1])
     # The tool row is six wide for symmetry and is never carried.
-    assert not report.carried[cs.K_TOOL_AXIS]
+    assert not report.carried[cs.TOOL_AXIS]
 
 
 def test_divergence_past_the_bound_is_reported_and_at_it_is_not():
@@ -337,7 +337,7 @@ def test_a_carried_axis_reports_its_divergence_on_the_comparison():
         x, carried, from_measurement, [0.1] * DOF
     )
 
-    joints = [f"axis{axis}" for axis in range(cs.K_ACTUATED_DOF)]
+    joints = [f"axis{axis}" for axis in range(cs.ACTUATED_DOF)]
     message = reports.shadow_comparison(
         one, "a verdict", None, joints, 0.02, Time().to_msg()
     )
@@ -449,7 +449,7 @@ def test_one_progressing_cycle_inside_the_window_clears_the_count():
 def test_a_stalled_plan_reports_fault_solver_on_a_converged_solve():
     one = stall(cycle())
     assert one.progress_stalled
-    joints = [f"axis{axis}" for axis in range(cs.K_ACTUATED_DOF)]
+    joints = [f"axis{axis}" for axis in range(cs.ACTUATED_DOF)]
     health = reports.solver_health(
         one,
         solution(Outcome.CONVERGED, 0.0),
@@ -652,8 +652,8 @@ def test_the_curve_is_what_the_follower_is_given_to_chase():
     # the position reference is the path at the progress the solve chose, not the
     # solved state (which counts up into the thousands here) and not the resample.
     for knot, place in enumerate(progress):
-        assert one.horizon.q_a_ref[knot, : cs.K_PLANNED_DOF] == pytest.approx(
-            np.full(cs.K_PLANNED_DOF, 0.4 + place), abs=1e-9
+        assert one.horizon.q_a_ref[knot, : cs.PLANNED_DOF] == pytest.approx(
+            np.full(cs.PLANNED_DOF, 0.4 + place), abs=1e-9
         )
 
 
@@ -756,7 +756,7 @@ def test_after_a_silence_the_command_in_flight_is_the_machines_own_velocity():
     assert one.propagate() is None
     replayed = one.ocp.replayed[-1][0]
     assert replayed[0] == pytest.approx(0.2)
-    assert np.allclose(replayed[1 : cs.K_PLANNED_DOF], 0.0)
+    assert np.allclose(replayed[1 : cs.PLANNED_DOF], 0.0)
 
 
 def test_the_horizon_is_anchored_on_the_measurement_and_not_the_tick():
@@ -775,11 +775,11 @@ def test_the_dead_time_replays_what_the_jtc_output_and_not_what_was_sent():
     one.applied_inputs = [np.full(cs.NU_PROGRESS, 0.7)]
     one.last_input = np.full(cs.NU_PROGRESS, 0.3)
     one.measured = np.zeros(cs.NX)
-    one.jtc_output = np.full(cs.K_PLANNED_DOF, 0.5)
+    one.jtc_output = np.full(cs.PLANNED_DOF, 0.5)
     assert one.propagate() is None
     dead_time, published = one.ocp.replayed
-    assert np.allclose(dead_time[0][: cs.K_PLANNED_DOF], 0.5)
-    assert np.allclose(dead_time[0][cs.K_PLANNED_DOF :], 0.0)
+    assert np.allclose(dead_time[0][: cs.PLANNED_DOF], 0.5)
+    assert np.allclose(dead_time[0][cs.PLANNED_DOF :], 0.0)
     assert np.allclose(published[0], 0.3)
 
 
@@ -860,15 +860,15 @@ def test_the_two_silent_fallbacks_are_said_once_per_episode():
     assert len(said) == 1 and "ahead of this" in said[0]
 
     # One of the four ticks a 0.04 s cycle expects: not the interval's mean.
-    ticking.record_output(now, np.zeros(cs.K_PLANNED_DOF))
+    ticking.record_output(now, np.zeros(cs.PLANNED_DOF))
     assert ticking.jtc_output(now + int(Ts * 1e9)) is None
     assert ticking.jtc_output(now + int(Ts * 1e9)) is None
     assert len(said) == 2 and "half a cycle's ticks" in said[1]
 
     for tick in range(1, 4):
-        ticking.record_output(now + tick * 10_000_000, np.full(cs.K_PLANNED_DOF, 2.0))
+        ticking.record_output(now + tick * 10_000_000, np.full(cs.PLANNED_DOF, 2.0))
     mean = ticking.jtc_output(now + int(Ts * 1e9))
-    assert mean == pytest.approx(np.full(cs.K_PLANNED_DOF, 1.5))
+    assert mean == pytest.approx(np.full(cs.PLANNED_DOF, 1.5))
     assert len(said) == 2
 
     # Re-armed by the healthy cycle above: the next episode is said again.
@@ -879,7 +879,7 @@ def test_the_two_silent_fallbacks_are_said_once_per_episode():
 
 # -- C4: the command a state, `u` its rate ----------------------------------------
 
-U_MAX = [1.0] * cs.K_ACTUATED_DOF
+U_MAX = [1.0] * cs.ACTUATED_DOF
 
 
 class C4ReplayOcp(ReplayOcp):
@@ -987,7 +987,7 @@ def test_the_centre_follows_an_off_axis_payload_around_the_rotator():
     """
     model = CraneModel(problem.default_description().read_text(), Tool(problem.TOOL))
     payload = Payload(800.0, np.array([0.5, 0.0, 0.0]), valid=True)
-    q_a = np.zeros(cs.K_ACTUATED_DOF)
+    q_a = np.zeros(cs.ACTUATED_DOF)
     stages = np.zeros((KNOTS, PLANNED_DOF))
     stages[:, RO] = np.linspace(0.0, 2.0, KNOTS)
     table = Equilibrium(model, payload).table(q_a, stages)

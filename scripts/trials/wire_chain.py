@@ -94,7 +94,7 @@ class Playback:
     def hold(now, q):
         """`set_hold_position`: where the machine stands, at rest."""
         message = JointTrajectory()
-        zero = np.zeros(cs.K_GENERALIZED_DOF)
+        zero = np.zeros(cs.GENERALIZED_DOF)
         full = zero.copy()
         full[PLANNED] = q
         message.points = [
@@ -177,7 +177,7 @@ def offset_tau_v(fit, offset):
     Floored, not refused, below zero: `C3Actuator` reads `tau_v < 0` as
     alpha = 1, i.e. no lag at all, so a negative would silently clip. Zero is
     what "no lag" means and the axes already there cannot get faster.
-    `K_LAG_AXES` moves with the floor, but only on the plant's fit -- the export
+    `LAG_AXES` moves with the floor, but only on the plant's fit -- the export
     key digests `c3_full_model.json`, not this.
     """
     offset = np.asarray(offset, float)
@@ -409,13 +409,13 @@ def fly(
     q0 = plan.q[0].copy()
     q0[PASSIVE] = equilibrium(q0[ACTUATED]) if swing is None else swing[0]
     x_init = np.zeros(cs.NX)
-    x_init[: cs.K_PLANNED_DOF] = q0[PLANNED]
+    x_init[: cs.PLANNED_DOF] = q0[PLANNED]
     x_init[cs.X_PASSIVE_POSITION : cs.X_PASSIVE_POSITION + 2] = q0[PASSIVE]
     if swing is not None:
         x_init[cs.X_PASSIVE_VELOCITY : cs.X_PASSIVE_VELOCITY + 2] = swing[1]
     chain.seed(x_init)
 
-    joints = [f"j{i}" for i in range(cs.K_GENERALIZED_DOF)]
+    joints = [f"j{i}" for i in range(cs.GENERALIZED_DOF)]
     h, ff = chain.step_s, chain.ff_scale
     ticks = int(round(Ts / h))
     events = {"silence": 0, "handback": 0}
@@ -447,7 +447,7 @@ def fly(
         last_receipt = clock
         flight = []  # (arrival, message)
         h_ns = int(round(h * 1e9))
-        u0 = np.full(cs.K_PLANNED_DOF, np.nan)
+        u0 = np.full(cs.PLANNED_DOF, np.nan)
 
         def send():
             """`Cycle.step`'s publisher: encode the horizon and put it on the wire."""
@@ -469,7 +469,7 @@ def fly(
                     linear=cycle.command_state,
                 )
             flight.append((clock + options.latency, message))
-            u0 = cycle.horizon.u[0, : cs.K_PLANNED_DOF].copy()
+            u0 = cycle.horizon.u[0, : cs.PLANNED_DOF].copy()
             tick_to_publish.append(time.perf_counter() - started)
 
         started = 0.0
@@ -477,7 +477,7 @@ def fly(
             now_ns = epoch_ns + k * int(round(Ts * 1e9))
             cycle.begin()
             q, dq = plant.q, plant.dq
-            u0 = np.full(cs.K_PLANNED_DOF, np.nan)
+            u0 = np.full(cs.PLANNED_DOF, np.nan)
             started = time.perf_counter()
             # Measurement is exact at the cycle instant here, so it is its own stamp.
             step = cycle.step(
@@ -547,7 +547,7 @@ def fly(
             break
 
     log = np.array(log)
-    nq = cs.K_PLANNED_DOF
+    nq = cs.PLANNED_DOF
     sway = log[:, 2 + nq : 4 + nq]
     late = sway[-int(round(3.0 / Ts)) :]
     # The damping half of issue 223 is scored on the *rate*, not the angle: the

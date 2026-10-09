@@ -40,7 +40,7 @@ def window_path(ocp, horizon, origin: float = 0.0) -> PathCycle:
     window per `intervals * Ts`.
     """
     return PathCycle(
-        control=ocp_runtime.path_control(horizon.q_a_ref[:, : cs.K_PLANNED_DOF]),
+        control=ocp_runtime.path_control(horizon.q_a_ref[:, : cs.PLANNED_DOF]),
         origin=origin,
         nominal_rate=problem.nominal_progress_rate(ocp.parameters),
     )

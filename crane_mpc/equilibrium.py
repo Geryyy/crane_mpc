@@ -28,9 +28,9 @@ from crane_model import symbolic as cs
 TURN = 16
 
 #: The luffing pair, 1:1 on the tip row, and the rotator, which carries the
-#: payload CoM's own swing. `K_AXIS_KEYS` is the planned order.
-LUFF = (cs.K_AXIS_KEYS.index("ha"), cs.K_AXIS_KEYS.index("ka"))
-RO = cs.K_AXIS_KEYS.index("ro")
+#: payload CoM's own swing. `AXIS_KEYS` is the planned order.
+LUFF = (cs.AXIS_KEYS.index("ha"), cs.AXIS_KEYS.index("ka"))
+RO = cs.AXIS_KEYS.index("ro")
 
 
 class Equilibrium:
@@ -58,7 +58,7 @@ class Equilibrium:
 
     def _sample(self, q_a: np.ndarray) -> np.ndarray:
         """`h` over `TURN` rotator angles: the hanging pose with the luff added back."""
-        curve = np.empty((TURN, cs.K_PASSIVE_DOF))
+        curve = np.empty((TURN, cs.PASSIVE_DOF))
         for row, angle in enumerate(self._angles):
             probe = q_a.copy()
             probe[RO] = angle
@@ -85,7 +85,7 @@ class Equilibrium:
                 np.interp(
                     stages[:, RO], self._angles, self._curve[:, row], period=2 * np.pi
                 )
-                for row in range(cs.K_PASSIVE_DOF)
+                for row in range(cs.PASSIVE_DOF)
             ],
             axis=1,
         )

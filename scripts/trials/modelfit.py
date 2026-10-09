@@ -87,15 +87,16 @@ from crane_model.pressure import BAR_TO_PA, actuated_force_from_pressure
 from crane_mpc import problem
 from crane_mpc.solver import Ocp
 
-PL = cs.K_PLANNED_DOF
+PL = cs.PLANNED_DOF
 POS = slice(cs.X_PLANNED_POSITION, cs.X_PLANNED_POSITION + PL)
 VEL = slice(cs.X_PLANNED_VELOCITY, cs.X_PLANNED_VELOCITY + PL)
-PAS = slice(cs.X_PASSIVE_POSITION, cs.X_PASSIVE_POSITION + cs.K_PASSIVE_DOF)
-PAV = slice(cs.X_PASSIVE_VELOCITY, cs.X_PASSIVE_VELOCITY + cs.K_PASSIVE_DOF)
-AX = ["sw", "ha", "ka", "sa", "ro"]
+PAS = slice(cs.X_PASSIVE_POSITION, cs.X_PASSIVE_POSITION + cs.PASSIVE_DOF)
+PAV = slice(cs.X_PASSIVE_VELOCITY, cs.X_PASSIVE_VELOCITY + cs.PASSIVE_DOF)
+AX = list(cs.AXIS_KEYS)
 CANON = list(canonical_joints())
-PLANNED_ROWS = [0, 1, 2, 3, 6]
-PASSIVE_ROWS = [4, 5]
+# `list`, not the `conventions` tuples: these get concatenated and `.index`ed.
+PLANNED_INDICES = list(cs.PLANNED_INDICES)
+PASSIVE_INDICES = list(cs.PASSIVE_INDICES)
 MOVING = 5.0e-3
 CONSTANTS = cs.load_constants()
 
@@ -212,10 +213,10 @@ def measured_force(q, data):
     `k -> tau_a` from `/cranedata`'s chamber pressures; None if the bag has none.
 
     The boom and arm columns are looked up, not written as 1 and 2: `q` is
-    `PLANNED_ROWS + PASSIVE_ROWS + [7]`, and reordering `PLANNED_ROWS` would
+    `PLANNED_INDICES + PASSIVE_INDICES + [7]`, and reordering `PLANNED_INDICES` would
     otherwise evaluate the transmission at the wrong joints in silence.
     """
-    boom, arm = PLANNED_ROWS.index(1), PLANNED_ROWS.index(2)
+    boom, arm = PLANNED_INDICES.index(1), PLANNED_INDICES.index(2)
     p_a = np.asarray(data["pressures_a"], float) * BAR_TO_PA
     p_b = np.asarray(data["pressures_b"], float) * BAR_TO_PA
     if not (np.isfinite(p_a).all() and np.isfinite(p_b).all()):
@@ -237,8 +238,10 @@ def from_bags(ocp, pattern, count, pressure=False):
             print(f"{path.split('/')[-1]:>10} skipped: {str(error)[:50]}")
             continue
         t = np.asarray(data["timestamps_js"])
-        q = np.asarray(data["positions_js"])[:, PLANNED_ROWS + PASSIVE_ROWS + [7]]
-        dq = np.asarray(data["velocities_js"])[:, PLANNED_ROWS + PASSIVE_ROWS + [7]]
+        q = np.asarray(data["positions_js"])[:, PLANNED_INDICES + PASSIVE_INDICES + [7]]
+        dq = np.asarray(data["velocities_js"])[
+            :, PLANNED_INDICES + PASSIVE_INDICES + [7]
+        ]
         u = np.asarray(data["velocities_sp"])
         force = measured_force(q, data) if pressure else None
         if pressure and force is None:
@@ -253,7 +256,7 @@ def from_bags(ocp, pattern, count, pressure=False):
 def from_capture(ocp, path):
     capture = json.load(open(path))
     js = capture["js"]
-    names = PLANNED_ROWS + PASSIVE_ROWS + [7]
+    names = PLANNED_INDICES + PASSIVE_INDICES + [7]
     wanted = [CANON[i] for i in names]
 
     def pick(rows, field):
@@ -277,7 +280,7 @@ def from_capture(ocp, path):
         [
             [
                 r["out"][r["names"].index(n)] if n in r["names"] else np.nan
-                for n in [CANON[i] for i in PLANNED_ROWS]
+                for n in [CANON[i] for i in PLANNED_INDICES]
             ]
             for r in ctrl
         ]

@@ -31,7 +31,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts" / "trials
 
 import replay_tick  # noqa: E402
 
-PLANNED = cs.K_PLANNED_DOF
+PLANNED = cs.PLANNED_DOF
 POSE = [0.0, 0.5, 1.0, 0.2, 0.0, 0.3]
 #: Tool hangs at `POSE`; zeros pin tilt outside its own stop (see `test_node`).
 PASSIVE_POSE = [0.5 * math.pi - POSE[1] - POSE[2], 0.5 * math.pi]
@@ -56,7 +56,7 @@ def holding_cycle(ocp):
     cycle.ocp = ocp
     x = np.zeros(ocp.nx)
     x[cs.X_PLANNED_POSITION : cs.X_PLANNED_POSITION + PLANNED] = POSE[:PLANNED]
-    x[cs.X_PASSIVE_POSITION : cs.X_PASSIVE_POSITION + cs.K_PASSIVE_DOF] = PASSIVE_POSE
+    x[cs.X_PASSIVE_POSITION : cs.X_PASSIVE_POSITION + cs.PASSIVE_DOF] = PASSIVE_POSE
     cycle.tool_position = POSE[-1]
     ocp.pin_tool(cycle.tool_position)
     x[cs.X_ACTUATED_FORCE : cs.X_ACTUATED_FORCE + PLANNED] = ocp.static_hold_force(x)
