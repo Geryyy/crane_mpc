@@ -202,20 +202,31 @@ crane_mpc:
       # cannot be matched mid-move -- unmeasured.
       progress_rate_headroom: 1.5
       progress_accel_max: 2.0
-      # `u_max / 2.34 s`: the command may not traverse its own clamp faster than
-      # the ~2 s sway period. 2.34 s was the horizon when this was fitted and
-      # the horizon is now 3.54 s; the number is the sway period's, not N's, so
-      # it did not move with it. A control bound, like
-      # `u_clamp_*`, not a physical one -- the valve's own slew limit
-      # (0.058/10 ms normalised x end-to-end gain, which is where
-      # [5.2, 1.7, 1.8, 3.5, 14.0] came from) lets `u` cross its whole range
-      # inside one 60 ms knot, and the single-iteration SQP spent that freedom
-      # reversing the command every other cycle. The hunt shook the empty
-      # pendulum for the whole hold: hold sway rate 0.26 -> 0.007 rad/s, hold
-      # dq_a 0.027 -> 0.003 rad/s RMS, final error 0.042 -> 0.001 rad
-      # (wire_chain, this A2B move empty, 20 s hold; loaded 800 kg the same way).
-      # 0.05 flat is past the knee -- the peak sway doubles (issue 214).
-      du_max: [0.326, 0.102, 0.131, 0.171, 0.907]
+      # `u_max / 0.585 s` = 4x `u_max / 2.34 s`. Still a control bound, like
+      # `u_clamp_*`, and still nowhere near a physical one: the valve's own slew
+      # ceiling (0.058/10 ms normalised x end-to-end gain, which is where
+      # [5.2, 1.7, 1.8, 3.5, 14.0] came from) is another 4x up and lets `u`
+      # cross its whole range inside one 60 ms knot, which is what the
+      # single-iteration SQP spent reversing the command every other cycle --
+      # 214's hunt, empty hold sway rate 0.26 -> 0.007 rad/s with the bound on.
+      # The 2.34 s was the sway period, measured at `horizon_length` 40 and
+      # before 226's state scaling. Both have moved and **the hunt no longer
+      # reproduces offline at any setting**: at the valve ceiling, and at 214's
+      # own N=40 / q_u=0 / dq_u=256 / tau_a=1e-8, `u0` reversals stay <= 0.004
+      # and the telescope's settled-hold ptp <= 1.2 mm (wire_chain, 17 runs,
+      # issue 246). The scaling is compiled in, so the harness has no hunt
+      # oracle left -- 4x rests on the gains instead, monotone and saturating
+      # by ~10x: loaded peak sway 0.098 -> 0.096 rad, hand-off 0.080 -> 0.076,
+      # hold dq_a 0.0117 -> 0.0106 rad/s RMS, final error never worse, refusals
+      # and QP iterations flat. 4x is also the largest factor at which the bound
+      # is still ridden on every cell (0.18-0.25 of solved cycles); at 10x it is
+      # 0.00 empty, i.e. off, and off is what 214 shipped away from.
+      # Live at 4x, one empty Gazebo A2B (246, load 1.6-10.8): telescope hold
+      # ptp 0.47 mm against 214's pre-fix 15 mm and post-fix <= 1.5, hold dq_a
+      # max 0.0100 rad/s against 0.078-0.131 / 0.002-0.017, sway rate 2 s after
+      # arrival 0.0074/0.0087 against 214's 0.011-0.019 / 0.042-0.112. One run,
+      # so it clears the hunt and does not resolve the 0.02 rad/s gate.
+      du_max: [1.304, 0.408, 0.524, 0.684, 3.628]
 
     slack:
       # The stage cost runs to order 1e2 at these weights, so 1e3 is the decade

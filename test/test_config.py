@@ -17,6 +17,10 @@ from crane_mpc.config import (
 #: The sway period `du_max` is sized against, s. A design value of order two
 #: seconds; `wiki/mpc.md` §4 says the slowest case has never been computed.
 SWAY_PERIOD_S = 2.34
+#: How far inside one sway period the command may traverse its clamp. 4 from 1
+#: (issue 246): the hunt 1 was picked to stop does not reproduce at any setting
+#: in today's harness, and 4x buys peak sway and hold quiet for nothing.
+DU_RELAXATION = 4.0
 
 
 def read_parameters(name):
@@ -67,11 +71,20 @@ def test_the_command_may_not_slew_faster_than_the_sway_it_shapes(shipped):
     to the longer horizon was measured and is a small loss everywhere -- max
     solve 25.6 -> 40.8 ms, non-zero status 1.7 -> 2.2 %, late sway rate and
     final error marginally worse, peak sway marginally better.
+
+    `DU_RELAXATION` is the quarter-period the command is now allowed instead of
+    the whole one (issue 246). What still holds is the *form*: the five numbers
+    are one rule about the sway mode, not five independent trims, and nothing
+    in `check_settings` ties them to anything.
     """
     command = np.asarray(shipped["limits"]["u_max"][: len(shipped["limits"]["du_max"])])
     assert np.allclose(
-        shipped["limits"]["du_max"], command / SWAY_PERIOD_S, rtol=5.0e-3
+        shipped["limits"]["du_max"],
+        command * DU_RELAXATION / SWAY_PERIOD_S,
+        rtol=5.0e-3,
     )
+    # Still clear of the valve's own ceiling, which is what the rule is against.
+    assert np.all(np.asarray(shipped["limits"]["du_max"]) < [5.2, 1.7, 1.8, 3.5, 14.0])
 
 
 def test_a_scalar_that_is_not_a_number_is_refused(shipped):
