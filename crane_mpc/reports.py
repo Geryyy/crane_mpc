@@ -18,7 +18,7 @@ from nav_msgs.msg import Path
 from rclpy.duration import Duration
 from rclpy.time import Time
 
-from . import problem
+from . import bspline, problem
 from .cycle import (
     ACTUATED_DOF,
     ACTUATED_INDICES,
@@ -327,30 +327,49 @@ def _tcp_q(state, planned, tool):
     return q
 
 
+# Half-width of the path window searched around the solve's progress, and its samples.
+TCP_ERROR_WINDOW = 0.15
+TCP_ERROR_SAMPLES = 31
+
+
 def tcp_path_error(cycle: Cycle, model):
     """
-    |TCP(measured) - TCP(reference at progress)| in metres, `(None, why)` on refusal.
+    Distance of the measured TCP to the planned TCP path, metres; `(None, why)` on refusal.
 
-    Both sides share the measured passive angles (stage 0 of the solve): the
-    reference carries no planned sway, so this is the actuated chain's deviation.
+    Geometric, not timed: the nearest point of the polyline `FK(c(s))` over a window
+    around the solve's progress, so neither progress lag nor dead-time propagation
+    enters. Both sides use the measured passive angles: `/crane/reference` carries no
+    planned sway, so this is the actuated chain's deviation.
     """
-    if model is None or cycle.horizon is None or cycle.tcp_states is None:
+    if model is None or cycle.path is None or cycle.measured is None:
         return None, None
-    state = cycle.tcp_states[0]
-    planned = state[cs.X_PLANNED_POSITION :][:PLANNED_DOF]
-    reference = cycle.horizon.q_a_ref[0]
+    x = cycle.measured
+    origin = cycle.path.origin
+    s = np.linspace(
+        max(origin - TCP_ERROR_WINDOW, 0.0),
+        min(origin + TCP_ERROR_WINDOW, 1.0),
+        TCP_ERROR_SAMPLES,
+    )
+    knots = bspline.value(s, cycle.path.control, problem.PATH_KNOTS)
     try:
-        measured = model.forward_kinematics(
-            _tcp_q(state, planned, cycle.tool_position), Frame.MOUNTING_BASE, Frame.TCP
-        )
-        planned_pose = model.forward_kinematics(
-            _tcp_q(state, reference[:PLANNED_DOF], reference[TOOL_AXIS]),
+        p = model.forward_kinematics(
+            _tcp_q(x, x[cs.X_PLANNED_POSITION :][:PLANNED_DOF], cycle.tool_position),
             Frame.MOUNTING_BASE,
             Frame.TCP,
+        ).position_m
+        line = np.array(
+            [
+                model.forward_kinematics(
+                    _tcp_q(x, knot, cycle.tool_position), Frame.MOUNTING_BASE, Frame.TCP
+                ).position_m
+                for knot in knots
+            ]
         )
     except Exception as error:
         return None, str(error)
-    return float(np.linalg.norm(measured.position_m - planned_pose.position_m)), None
+    a, d = line[:-1], np.diff(line, axis=0)
+    t = np.clip(np.einsum("ij,ij->i", p - a, d) / np.maximum((d * d).sum(1), 1e-12), 0, 1)
+    return float(np.min(np.linalg.norm(a + t[:, None] * d - p, axis=1))), None
 
 
 def tcp_path(cycle: Cycle, model):
