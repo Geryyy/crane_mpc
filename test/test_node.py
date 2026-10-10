@@ -556,3 +556,62 @@ def test_a_jtc_off_the_assumed_tick_is_refused(node):
     node.update()
     assert node.published == {}
     assert "20 Hz" in node._last_silence
+
+
+#: Any non-None stands in: `cost_terms` is stubbed and never reads it.
+SOLVED = object()
+
+
+class Stalled:
+    """Just enough node to drive `say_stalled`: the stall text needs no cycle."""
+
+    def __init__(self, terms=None, raises=""):
+        self._cycle = SimpleNamespace(progress_stalled=True, q_eq=np.zeros(2))
+        self._values = SimpleNamespace(min_progress_rate=0.1, max_stall_time=2.0)
+        self._ocp = SimpleNamespace(cost_terms=lambda *_: self.split())
+        self.errors = []
+        self._terms = terms
+        self._raises = raises
+        self.outpriced = lambda solution: MpcNode.outpriced(self, solution)
+
+    def split(self):
+        if self._raises:
+            raise RuntimeError(self._raises)
+        return self._terms
+
+    def get_logger(self):
+        return SimpleNamespace(error=self.errors.append)
+
+
+def test_a_stall_names_the_cost_rows_solver_health_cannot_carry():
+    """
+    Issue 269: a stall with no constraint bound is a cost trade, and the three
+    terms that say which way it went are the ones `cost_term`'s eight omit.
+    """
+    terms = SimpleNamespace(
+        progress=0.66,
+        tool=1.2,
+        lag=0.3,
+        q_u=15.6,
+        dq_u=46.4,
+        tau_a=139.2,
+        q_a=0.54,
+        terminal=2.79,
+    )
+    one = Stalled(terms)
+    text = MpcNode.say_stalled(one, "converged", False, SOLVED)
+    assert "the plan is stalled" in text
+    for named in ("progress 0.66", "tool 1.2", "lag 0.3", "effort 139.2"):
+        assert named in text, named
+    assert one.errors and one.errors[0].startswith(text)
+
+    # A standing stall keeps the short sentence: the split rides the edge only.
+    standing = MpcNode.say_stalled(Stalled(terms), "converged", True, SOLVED)
+    assert "the plan is stalled" in standing
+    assert "outpriced" not in standing
+
+    # A split that raises is a diagnostic failing, not a tick failing.
+    broken = Stalled(None, raises="no problem has been written")
+    assert "no problem has been written" in MpcNode.say_stalled(
+        broken, "c", False, SOLVED
+    )

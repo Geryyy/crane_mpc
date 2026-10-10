@@ -642,7 +642,10 @@ class MpcNode(Node):
             self.complain(verdict)
             return
         self.complain(verdict)
-        self.report(step.solution, self.say_stalled(verdict.text, step.was_stalled))
+        self.report(
+            step.solution,
+            self.say_stalled(verdict.text, step.was_stalled, step.solution),
+        )
 
     def bounds(self) -> Bounds:
         """Read this cycle's gate parameters, once."""
@@ -659,7 +662,7 @@ class MpcNode(Node):
             float(values.max_stall_time),
         )
 
-    def say_stalled(self, text: str, was_stalled: bool) -> str:
+    def say_stalled(self, text: str, was_stalled: bool, solution=None) -> str:
         """Add the stall to the verdict, and say it once on the transition."""
         if not self._cycle.progress_stalled:
             return text
@@ -669,12 +672,38 @@ class MpcNode(Node):
             f"{self._values.max_stall_time} s of wall clock"
         )
         if not was_stalled:
+            text += self.outpriced(solution)
             self.get_logger().error(
                 f"{text}. The horizon still goes out, but {SOLVER_HEALTH_TOPIC} now "
                 "carries FAULT_SOLVER; this node reports the stall, it does not "
                 "recover from it."
             )
         return text
+
+    def outpriced(self, solution) -> str:
+        """
+        Name what `s` lost the trade to, in rows `cost_term` has no field for.
+
+        A stall with every soft constraint slack-free is a cost trade and not a
+        bound: issue 269's loaded lift reproduced with all four violation rows
+        at 0.0, the pump at 0.14 of its limit and the command box at 0.12, so
+        the only thing left to read is the split -- and `progress`, `tool` and
+        `lag` are exactly the three terms `float64[8]` leaves out. That array is
+        frozen, `message` is the field that exists for saying what happened,
+        and the stall edge is the one cycle worth a second split on (1.5 ms).
+        """
+        if solution is None or self._ocp is None:
+            return ""
+        try:
+            terms = self._ocp.cost_terms(solution, self._cycle.q_eq)
+        except Exception as error:  # noqa: BLE001 - a diagnostic may not kill a tick
+            return f"; the cost could not be split by term: {error}"
+        return (
+            f"; what outpriced it: progress {terms.progress:.4g}, tool "
+            f"{terms.tool:.4g}, lag {terms.lag:.4g}, sway {terms.q_u:.4g}, sway "
+            f"rate {terms.dq_u:.4g}, effort {terms.tau_a:.4g}, tracking "
+            f"{terms.q_a:.4g}, terminal {terms.terminal:.4g}"
+        )
 
     def complain(self, verdict) -> None:
         if verdict.severity == "error":
