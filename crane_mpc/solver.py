@@ -1086,6 +1086,13 @@ class Ocp:
         # a factorisation of a problem this one is not.
         self.solver.reset(reset_qp_solver_mem=0 if warm else 1)
 
+        # Frozen at `x0` for the whole horizon, and that *is* 85-99 % of what the
+        # effort term charges (265). `h_eff` per stage at the warm start's own
+        # state was measured in its place (267, `--reference guess`): it removes
+        # the artefact -- the term's median falls 12-55x, its share of the cost
+        # from .18-.71 to .03-.12 -- and costs TCP path error p95 2-118 % in 5 of
+        # 6 arms and the endpoint up to 21x, so it did not ship. Whatever
+        # replaces this has to keep the path tail, not just the term.
         force_reference = self.static_hold_force(x0)
         measured = x0[cs.X_PLANNED_POSITION : cs.X_PLANNED_POSITION + cs.PLANNED_DOF]
         rate_max = self.progress_rate_max(path)
@@ -1177,7 +1184,9 @@ class Ocp:
             "guess": Guess(states, inputs),
             # Not derivable from `x0`: the force rows are `h_eff` at `x0`, a
             # casadi evaluation through the cylinder kinematics, so a finite
-            # state can still write a non-finite reference.
+            # state can still write a non-finite reference. `cost_terms` reads
+            # its effort reference back off here rather than rebuilding it, so
+            # an arm that writes another one is still scored on what it paid.
             "yref": reference,
             "in_flight": self._in_flight,
             "warm": warm,
@@ -1356,7 +1365,13 @@ class Ocp:
                 "no problem has been written, so there is no cost to split"
             )
         terms = CostTerms(slack=solution.slack_penalty)
-        force_reference = self.static_hold_force(solution.states[0])
+        # Read back, not rebuilt. The shipped reference is frozen at `x0` and
+        # stage 0 is pinned there, so this is the same number; an arm that
+        # writes a per-stage one (267, `effort_split.py`) used to be reported a
+        # cost no cycle paid, i.e. the panel's effort row lied (265).
+        force_reference = self._written["yref"][
+            :, problem.Y_ACTUATED_FORCE : problem.Y_ACTUATED_FORCE + cs.PLANNED_DOF
+        ]
         diagonal = np.diag(self._weight)
         terminal_diagonal = np.diag(self._terminal_weight)
         planned = cs.PLANNED_DOF
@@ -1366,7 +1381,7 @@ class Ocp:
             terminal = stage == self.intervals
             reference = stage_reference(
                 stage_equilibrium(q_eq, stage),
-                force_reference,
+                force_reference[stage],
                 terminal,
                 self.nominal_progress(stage, self._last_path),
                 self._ny,

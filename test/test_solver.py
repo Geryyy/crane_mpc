@@ -298,6 +298,41 @@ def test_the_cost_split_leaves_no_residual_row_out(ocp, state):
     assert total == pytest.approx(ocp.solver.get_cost(), rel=1e-9)
 
 
+def test_the_effort_term_is_scored_against_the_reference_that_was_written(ocp, state):
+    """
+    `cost_terms` reads `yref`'s force rows back; it does not rebuild them.
+
+    Rebuilt off `solution.states[0]`, a per-stage effort reference -- every arm
+    of `scripts/trials/effort_split.py` writes one -- is reported as a cost no
+    cycle paid, and the effort row on the health panel then lies (issue 267).
+    """
+    position = state[cs.X_PLANNED_POSITION : cs.X_PLANNED_POSITION + PLANNED]
+    horizon = horizon_holding(ocp, position)
+    q_eq = state[cs.X_PASSIVE_POSITION : cs.X_PASSIVE_POSITION + cs.PASSIVE_DOF]
+    solution = solved(ocp, state, horizon, q_eq)
+
+    force = slice(problem.Y_ACTUATED_FORCE, problem.Y_ACTUATED_FORCE + PLANNED)
+    written = ocp.last_problem()["yref"]
+    # Per stage, which no rebuild off one state can produce; stage 0 untouched,
+    # so the shipped frozen reference is still a special case of this. Written
+    # down to acados too, the way an arm does it -- the oracle is what the
+    # solver was charged, not what the record happens to say.
+    written[: ocp.intervals, force] += np.linspace(0.0, 2000.0, ocp.intervals)[:, None]
+    for stage in range(ocp.intervals):
+        ocp.solver.cost_set(stage, "yref", written[stage])
+    charged = np.array(
+        [ocp.solver.cost_get(stage, "yref")[force] for stage in range(ocp.intervals)]
+    )
+
+    tau = solution.states[
+        : ocp.intervals, cs.X_ACTUATED_FORCE : cs.X_ACTUATED_FORCE + PLANNED
+    ]
+    weight = np.diag(weight_matrices(ocp.parameters)[0])[force]
+    paid = float(np.sum(0.5 * weight * (tau - charged) ** 2))
+    assert paid > 0.0
+    assert ocp.cost_terms(solution, q_eq).tau_a == pytest.approx(paid, rel=1e-9)
+
+
 def test_the_warm_start_is_the_last_solution_unshifted(ocp, state):
     """`Ocp.carried`: knot 0 is kept, not dropped -- a shift spends the one step."""
     position = state[cs.X_PLANNED_POSITION : cs.X_PLANNED_POSITION + PLANNED]
