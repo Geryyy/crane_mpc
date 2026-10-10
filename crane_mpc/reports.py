@@ -317,6 +317,42 @@ def shadow_comparison(cycle: Cycle, verdict: str, solution, joints, budget, stam
     return message
 
 
+def _tcp_q(state, planned, tool):
+    q = np.zeros(cs.GENERALIZED_DOF)
+    q[list(ACTUATED_INDICES[:PLANNED_DOF])] = planned
+    q[list(PASSIVE_INDICES)] = state[
+        cs.X_PASSIVE_POSITION : cs.X_PASSIVE_POSITION + PASSIVE_DOF
+    ]
+    q[ACTUATED_INDICES[TOOL_AXIS]] = tool
+    return q
+
+
+def tcp_path_error(cycle: Cycle, model):
+    """
+    |TCP(measured) - TCP(reference at progress)| in metres, `(None, why)` on refusal.
+
+    Both sides share the measured passive angles (stage 0 of the solve): the
+    reference carries no planned sway, so this is the actuated chain's deviation.
+    """
+    if model is None or cycle.horizon is None or cycle.tcp_states is None:
+        return None, None
+    state = cycle.tcp_states[0]
+    planned = state[cs.X_PLANNED_POSITION :][:PLANNED_DOF]
+    reference = cycle.horizon.q_a_ref[0]
+    try:
+        measured = model.forward_kinematics(
+            _tcp_q(state, planned, cycle.tool_position), Frame.MOUNTING_BASE, Frame.TCP
+        )
+        planned_pose = model.forward_kinematics(
+            _tcp_q(state, reference[:PLANNED_DOF], reference[TOOL_AXIS]),
+            Frame.MOUNTING_BASE,
+            Frame.TCP,
+        )
+    except Exception as error:
+        return None, str(error)
+    return float(np.linalg.norm(measured.position_m - planned_pose.position_m)), None
+
+
 def tcp_path(cycle: Cycle, model):
     """
     Draw the horizon through forward kinematics as `nav_msgs/Path`.
@@ -335,14 +371,8 @@ def tcp_path(cycle: Cycle, model):
     path.header.frame_id = TCP_HORIZON_FRAME
     path.header.stamp = first_knot.to_msg()
     for index, state in enumerate(cycle.tcp_states):
-        q = np.zeros(cs.GENERALIZED_DOF)
-        q[list(ACTUATED_INDICES[:PLANNED_DOF])] = state[
-            cs.X_PLANNED_POSITION : cs.X_PLANNED_POSITION + PLANNED_DOF
-        ]
-        q[list(PASSIVE_INDICES)] = state[
-            cs.X_PASSIVE_POSITION : cs.X_PASSIVE_POSITION + PASSIVE_DOF
-        ]
-        q[ACTUATED_INDICES[TOOL_AXIS]] = cycle.tool_position
+        planned = state[cs.X_PLANNED_POSITION :][:PLANNED_DOF]
+        q = _tcp_q(state, planned, cycle.tool_position)
         try:
             pose = model.forward_kinematics(q, Frame.MOUNTING_BASE, Frame.TCP)
         except Exception as error:

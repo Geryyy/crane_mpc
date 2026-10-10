@@ -25,7 +25,7 @@ from rclpy.parameter_client import AsyncParameterClient
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from rclpy.time import Time
 from sensor_msgs.msg import JointState
-from std_msgs.msg import String
+from std_msgs.msg import Float64, String
 from trajectory_msgs.msg import JointTrajectory
 
 from . import config, dump, problem, reports
@@ -48,6 +48,7 @@ from .cycle import (
     SHADOW_HORIZON_TOPIC,
     SOLVER_HEALTH_TOPIC,
     SWAY_SETTLED_TOPIC,
+    TCP_ERROR_TOPIC,
     TCP_HORIZON_TOPIC,
     Bounds,
     Cycle,
@@ -314,6 +315,9 @@ class MpcNode(Node):
             JointTrajectory, SHADOW_HORIZON_TOPIC, _qos()
         )
         self._tcp_publisher = self.create_publisher(Path, TCP_HORIZON_TOPIC, _qos())
+        self._tcp_error_publisher = self.create_publisher(
+            Float64, TCP_ERROR_TOPIC, _qos()
+        )
         self._health_publisher = self.create_publisher(
             SolverHealth, SOLVER_HEALTH_TOPIC, _qos()
         )
@@ -775,6 +779,9 @@ class MpcNode(Node):
             self.warn(f"The TCP horizon could not be drawn: {why}.")
         elif path is not None:
             self._tcp_publisher.publish(path)
+        error, _ = reports.tcp_path_error(self._cycle, self._model)
+        if error is not None:
+            self._tcp_error_publisher.publish(Float64(data=error))
 
     def report_sway_settled(self, now_ns: int) -> None:
         """Say whether the load has stopped swinging, on this cycle's stamp."""
