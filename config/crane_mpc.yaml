@@ -210,7 +210,7 @@ crane_mpc:
       # 0.032 -> 0.027, QP iterations unmoved; leaving it at 1e-8 instead costs
       # 0.0200 rad of final error and 0.125 rad/s of late tip sway. Not swept
       # under load against droop, and `yref`'s force reference is `h_eff(x0)`
-      # frozen for the whole 3.54 s horizon -- see the issue notes.
+      # frozen for the whole 4.68 s horizon -- see the issue notes.
       tau_a: [1.0e-6, 1.0e-6, 1.0e-6, 1.0e-6, 1.0e-6, 1.0e-6]
       u: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
       # C4's rate cost: 0.1 kicks, 3 is no better.
