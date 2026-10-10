@@ -27,7 +27,7 @@ from crane_mpc.cycle import (
     watch_progress,
 )
 from crane_mpc.equilibrium import RO, Equilibrium
-from crane_mpc.solver import Outcome, PathCycle, Solution, Violation
+from crane_mpc.solver import CostTerms, Outcome, PathCycle, Solution, Violation
 from crane_mpc.solver import path_control as ocp_path_control
 from crane_msgs.msg import SolverHealth, SupervisorStatus
 from rclpy.time import Time
@@ -346,6 +346,24 @@ def test_a_carried_axis_reports_its_divergence_on_the_comparison():
     assert float(keys["axis1.dq_a_divergence"]) == pytest.approx(0.5)
     assert keys["axis1.dq_a_diverged"] == "true"
     assert not [key for key in keys if key.startswith("axis0.dq_a")]
+
+
+def test_the_cost_rows_solver_health_cannot_carry_go_out_under_plottable_names():
+    """
+    PlotJuggler names a DiagnosticArray series `<topic>/<status.name>/<key>` only
+    while `hardware_id` is empty -- a non-empty one (as `shadow_comparison` sets)
+    renames every series and silently breaks the cost panel's layout.
+    """
+    terms = CostTerms(lag=1.0, tool=2.0, progress=3.0, du=4.0, q_a=5.0)
+    status = reports.cost_terms(terms, Time().to_msg()).status[0]
+
+    assert (status.name, status.hardware_id) == ("cost", "")
+    assert {entry.key: float(entry.value) for entry in status.values} == {
+        "lag": 1.0,
+        "tool": 2.0,
+        "progress": 3.0,
+        "du": 4.0,
+    }
 
 
 def test_a_break_in_the_output_stream_drops_the_carry():

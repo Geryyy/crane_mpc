@@ -36,6 +36,8 @@ SET_PAYLOAD_SERVICE = "/crane/mpc/set_payload"
 SHADOW_HORIZON_TOPIC = "~/shadow_horizon"
 SHADOW_COMPARISON_TOPIC = "~/shadow_comparison"
 PUMP_FLOW_TOPIC = "~/pump_flow"
+#: The cost rows `SolverHealth.cost_term` is too short to carry. Both modes.
+COST_TERMS_TOPIC = "~/cost_terms"
 
 #: Where the canonical eight carry the six actuated and the two passive.
 ACTUATED_INDICES = cs.ACTUATED_INDICES

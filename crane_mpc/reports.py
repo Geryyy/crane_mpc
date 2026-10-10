@@ -33,7 +33,7 @@ from .cycle import (
     Cycle,
     FollowerCommand,
 )
-from .solver import Outcome
+from .solver import CostTerms, Outcome
 
 
 def _text(value: float) -> str:
@@ -223,6 +223,31 @@ def fill_cost_terms(health, terms) -> None:
     ]
 
 
+def cost_terms(terms, stamp) -> DiagnosticArray:
+    """
+    Report the cost rows `SolverHealth` cannot carry, beside the eight it can.
+
+    `cost_term` is `float64[8]`, so lag, tool, progress and C4's rate cost went
+    unpublished in active mode -- `~/shadow_comparison` has the first three, shadow
+    only. Same stamp and same decimation as the health message they belong with, and
+    `None` (no solve to split) reports zeros, as `cost_term` does. PlotJuggler names
+    these `~/cost_terms/cost/<key>`, so `hardware_id` stays empty.
+    """
+    terms = terms if terms is not None else CostTerms()
+    message = DiagnosticArray()
+    message.header.stamp = stamp
+    status = DiagnosticStatus(name="cost", level=DiagnosticStatus.OK)
+    status.message = "the cost rows SolverHealth/cost_term has no slot for"
+    status.values = [
+        KeyValue(key="lag", value=_text(terms.lag)),
+        KeyValue(key="tool", value=_text(terms.tool)),
+        KeyValue(key="progress", value=_text(terms.progress)),
+        KeyValue(key="du", value=_text(terms.du)),
+    ]
+    message.status = [status]
+    return message
+
+
 def shadow_comparison(cycle: Cycle, verdict: str, solution, joints, budget, stamp):
     """Judge the shadow command against what drove, per user story 68."""
     message = DiagnosticArray()
@@ -368,7 +393,9 @@ def tcp_path_error(cycle: Cycle, model):
     except Exception as error:
         return None, str(error)
     a, d = line[:-1], np.diff(line, axis=0)
-    t = np.clip(np.einsum("ij,ij->i", p - a, d) / np.maximum((d * d).sum(1), 1e-12), 0, 1)
+    t = np.clip(
+        np.einsum("ij,ij->i", p - a, d) / np.maximum((d * d).sum(1), 1e-12), 0, 1
+    )
     return float(np.min(np.linalg.norm(a + t[:, None] * d - p, axis=1))), None
 
 

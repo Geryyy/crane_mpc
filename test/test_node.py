@@ -94,6 +94,7 @@ def node(context, export_base):
         "_horizon_publisher",
         "_shadow_horizon_publisher",
         "_health_publisher",
+        "_cost_terms_publisher",
     ):
         publisher = getattr(node, name)
         publisher.publish = lambda message, name=name: published.setdefault(
@@ -224,6 +225,30 @@ def test_the_two_status_streams_are_stamped_with_the_cycle_they_share(node):
     health = node.published["_health_publisher"][0]
     assert len(settled) == 1
     assert settled[0].header.stamp == health.header.stamp
+
+
+def test_a_cycle_with_no_split_zeroes_both_halves_of_the_cost_panel(node):
+    """
+    One panel plots `health.cost_term` beside `~/cost_terms`, so the twelve rows have
+    to drop together. `cost_term` is a fixed `float64[8]` and goes out as zeros when
+    there is no solution to split; four rows holding their last line beside eight
+    zeros would read as a cost rebalance on a cycle that never solved.
+    """
+    configured(node)
+    node.update()
+    # `update`'s first act, and why the four rows read zero and not the last cycle's
+    # split. A changed verdict is then exempt from the decimation, so this reports.
+    node._cycle.begin()
+    node.report_solver_health(None, "the OCP refused its arguments")
+
+    health = node.published["_health_publisher"][-1]
+    message = node.published["_cost_terms_publisher"][-1]
+    assert len(node.published["_cost_terms_publisher"]) == len(
+        node.published["_health_publisher"]
+    )
+    assert list(health.cost_term) == [0.0] * 8
+    assert [float(entry.value) for entry in message.status[0].values] == [0.0] * 4
+    assert message.header.stamp == health.header.stamp
 
 
 def test_the_measurement_is_keyed_by_name_and_not_by_index(node):

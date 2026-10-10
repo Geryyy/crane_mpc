@@ -34,6 +34,7 @@ from .cycle import (
     ACTUATED_DOF,
     ACTUATED_INDICES,
     CONTROLLER_STATE_TOPIC,
+    COST_TERMS_TOPIC,
     HORIZON_TOPIC,
     JOINT_PATH_TOPIC,
     JOINT_STATE_TOPIC,
@@ -326,6 +327,9 @@ class MpcNode(Node):
         )
         self._comparison_publisher = self.create_publisher(
             DiagnosticArray, SHADOW_COMPARISON_TOPIC, _qos()
+        )
+        self._cost_terms_publisher = self.create_publisher(
+            DiagnosticArray, COST_TERMS_TOPIC, _qos()
         )
         # Sim only: on the machine `pump_flow_estimator` owns pump flow, and a bad
         # hydraulics file must not stop the node over a diagnostic it never uses.
@@ -859,6 +863,12 @@ class MpcNode(Node):
                 reports.fill_cost_terms(health, cycle.cost_terms)
             except Exception as error:
                 self.warn(f"The cost could not be split by term: {error}.")
+        # Unconditional, like `health.cost_term`, which goes out as its eight zeros
+        # when there is no split: on one panel the twelve rows have to drop together
+        # or a cycle with no solve reads as a cost rebalance.
+        self._cost_terms_publisher.publish(
+            reports.cost_terms(cycle.cost_terms, self._stamp)
+        )
         self._health_publisher.publish(health)
         self._last_health = health
 
