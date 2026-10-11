@@ -149,7 +149,10 @@ crane_mpc:
     q_a:
       type: double_array
       read_only: true
-      description: "Q -- actuated position tracking, diagonal of a weighted norm."
+      description: "Q -- actuated position tracking, diagonal of a weighted norm.
+        Every weight in this group carries a `tol=` comment in config/crane_mpc.yaml:
+        the residual a good move is allowed on that row, with w = 1/tol^2 (issue 278).
+        The comment is the decision; nothing derives the weight from it."
       validation:
         fixed_size<>: [6]
         lower_element_bounds<>: [0.0]
