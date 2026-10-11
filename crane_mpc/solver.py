@@ -1102,6 +1102,23 @@ class Ocp:
         # this term is load-bearing for is not the inertia it was written for:
         # priced against a *frozen* load it charges motion away from `x0` on the
         # luffing/reaching axes, and the whole weight set is tuned around that.
+        #
+        # 275 split it in two -- `tau_a - h_eff(x_k)` on `weights.tau_a` plus a
+        # gravity-weighted pose row `h_g(q_k) - h_g(anchor)` on its own weight --
+        # and that is the closest any pass has come and still did not ship. Two
+        # anchors, 30 offline arms: at `x0` it reproduces nothing (the issue's own
+        # gate: TCP p95 +81 to +226 %, tip sway +26 to +360 %), because **this row
+        # has no pose Jacobian at all** -- `h_eff(x0)` is a constant, so its whole
+        # curvature and gradient sit on the force state, and no pose cost can
+        # stand in for it. At the path point, `h_g(q_k) - h_g(q_ref(s_k))`, the
+        # best weight (1e-4, two decades off what the split's own algebra says)
+        # tracks *better* than today -- TCP p50 3-37 % better in 5 of 6 arms, p95
+        # -19 to +8 %, the progress term down 38-95 %, so the 269 stall goes --
+        # and costs peak tip sway +2 to +52 % and the late sway rate 1.6-20x
+        # (0.0086 -> 0.173 rad/s loaded, past the 0.02 the tree settles on in
+        # five of six arms). At that weight the row
+        # *is* `q_a` with a `dh_g/dq` weighting, and it trades the way the
+        # tracking weights do: tighter path, more swing. See the 275 notes.
         force_reference = self.static_hold_force(x0)
         measured = x0[cs.X_PLANNED_POSITION : cs.X_PLANNED_POSITION + cs.PLANNED_DOF]
         rate_max = self.progress_rate_max(path)
