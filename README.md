@@ -78,16 +78,18 @@ explicit step diverges in three samples.
 Stage and terminal costs use nonlinear least squares and a Gauss–Newton Hessian.
 The stage residual is
 
-    [q_a, dq_a, q_u, dq_u, tool, s, v_s, tau_a, u]
+    [q_a, dq_a, q_u, dq_u, tool, s, v_s, u]
 
-against `[0, 0, q_eq, 0, 0, min(1, s_ref), ds/dt|_plan, 0, 0]`, with the command
-state `c` appended under C4 (which is what ships). The tracking, `dq_a`, `tool`
-and effort rows carry their reference **inside** the residual, because it is
-evaluated at the decision variable `s` (and, for effort, at the stage's own
-pose) and `yref` is subtracted as a constant; everything else is `yref`.
-Issue 119's `lag` row — the tracking error projected on the reference's
-direction of travel, slewing axis only — came out in issue 276: ablated on six
-offline arms it moved no gate column at all.
+against `[0, 0, q_eq, 0, 0, min(1, s_ref), ds/dt|_plan, 0]`, with the command
+state `c` appended under C4 (which is what ships). The tracking, `dq_a` and
+`tool` rows carry their reference **inside** the residual, because it is
+evaluated at the decision variable `s` and `yref` is subtracted as a constant;
+everything else is `yref`.
+Two rows came out: issue 119's `lag` row — the tracking error projected on the
+reference's direction of travel, slewing axis only — in issue 276, ablated on
+six offline arms and moving no gate column at all; and the effort row
+`tau_a - g(q)` in issue 277. **The force state is now priced nowhere**, so
+`levenberg_marquardt` is the only curvature on those four QP directions.
 `tool` is the same tracking error read in metres at the tool, three rows,
 position only, because a centimetre at the tool is worth 2174 to 11905 mm of
 joint error depending on the pose. **The row priced toward one is `s`, not
@@ -96,18 +98,25 @@ to end up. `v_s` is priced against the plan's own `ds/dt` across that stage's
 interval, zero past the path's end; it was priced against zero until issue 276,
 which made the cost prefer a standing plan and was issue 269's stall — the `s`
 row cannot win that back, because its residual is pinned to 0 at stage 0 and so
-cannot grow with the lag. In particular,
-effort prices `tau_a`, not acceleration, so effective inertia affects how hard
-the optimizer pushes, and it prices it against the pose's own gravity
-`h_g(q_k)` and not zero (issues 117, 276), so holding the machine's own weight
-is free *at every stage* and what the row charges is
-`M q_ddot + C q_dot + damping q_dot`. Until 276 the reference was `h_eff(x0)`
-frozen for the whole horizon, i.e. a constant, and 85–99 % of what the row
-charged was the machine's weight moving away from `x0` (issue 265).
-Sway offset and sway rate are
-independent terms, and **only the rate is priced** — see below. The terminal cost
-omits the effort and input blocks and raises the remaining weights by
-`terminal_scale`; it is a cost, not a hard terminal set.
+cannot grow with the lag.
+
+**`dq_a` is the velocity price.** Its reference is `tangent(s) * v_s`, i.e. the
+velocity a machine travelling the plan at `v_s` would have, so running the plan
+costs nothing on it and standing still while the plan asks for a pace costs the
+whole of it — **per axis the plan moves**. On an axis the plan holds still the
+tangent column is zero and the row is an absolute velocity price again, at the
+same weight. (The `u` row prices the command toward zero as well, at 1.0; on the
+rotator that is 10x its own `dq_a`.) Until issue 277 the effort row
+`tau_a - g(q)` was priced beside it, sold as the effective inertia; measured on
+six offline arms, **96–100 % of what it charged was C3's damping `D dq_a`**
+(inertia 0.5–3.5 %, Coulomb zero on the planned axes), i.e. an *absolute*
+velocity price of `w_tau D^2` whose size came out of a hydraulic fit and which
+made standing still cheap (issue 269's stall). 277 deleted it and carried
+`1e-6 D^2` onto the planned axes' `weights.dq_a`; the history of the five
+passes that tried to make the row mean its inertia is in the 265–276 notes.
+Sway offset and sway rate are independent terms, and **only the rate is
+priced** — see below. The terminal cost omits the input block and raises the
+remaining weights by `terminal_scale`; it is a cost, not a hard terminal set.
 
 **`q_eq` is a table, one hanging pose per stage, carried along the plan**
 (`equilibrium.py`). Held at the measurement instead — as it was until issue 229 —
@@ -314,9 +323,11 @@ load 1.8, so a timing is quoted with its load. The budget is not widened to hide
 
 **4. Expose the residuals.** The per-constraint violation and the per-term cost
 go out on a stream, because they are the only way to tell a tuning problem from a
-modelling one — `tau_a` running decades above `q_a` is a statement about the
-weights, `q_u` refusing to fall with `tau_a` against its constraint is a
-statement about the machine. Eight rows, computed only on cycles that publish:
+modelling one — one row running decades above the rest is a statement about the
+weights, `q_u` refusing to fall against its constraint is a statement about the
+machine. Eight rows, computed only on cycles that publish (row 4, `COST_EFFORT`,
+is flat zero since 277 deleted that row; the slot stays because the numbering is
+crane_msgs'):
 **1.5 ms at 50 knots** on the CI image.
 
 The four constraint-violation rows are each divided by their own allowance, so

@@ -80,12 +80,11 @@ crane_mpc:
     max_state_age: 0.2
     # A fixed constant added to every Hessian **diagonal** -- it damps the
     # Newton step, it does not move the minimiser. It is the entirety of the
-    # regularisation on the four command-lag rows, which appear in no residual
-    # and so have no Gauss-Newton curvature of their own. On the unscaled
-    # problem it was also 100x the force rows' curvature, so it damped those to
-    # a hundredth and the single RTI step barely moved them; issue 226's state
-    # scaling lifted that curvature past it (13 on the rotator, 1e5 on luffing)
-    # and `weights.tau_a` had to move with it. Not swept.
+    # regularisation on the command-lag rows **and, since 277 deleted the
+    # effort row, on the four force rows too** -- neither appears in a residual
+    # any more, so neither has Gauss-Newton curvature of its own. Not swept.
+    # Measured after the deletion: solve p100 and `qp_iter_capped` unmoved, so
+    # the force rows did not need the cost that used to condition them.
     levenberg_marquardt: 1.0e-6
     # C4: command a state, `u` its rate. `du: 10` and false is C3.
     command_state: true
@@ -146,7 +145,32 @@ crane_mpc:
       # on the full chain. Not zero, and no weight makes it zero -- that wants
       # an estimator.
       q_a: [40.0, 40.0, 40.0, 40.0, 10.0, 10.0]
-      dq_a: [0.4, 0.4, 0.4, 0.4, 0.1, 0.1]
+      # The velocity price, and since 277 the only one on `dq_a`. The row is
+      # `dq_a - tangent*v_s`, i.e. deviation from the plan's own velocity, so on
+      # an axis the plan *moves* it does not make standing still cheap the way
+      # the effort row it deleted did. **On an axis the plan holds it does**:
+      # a constant column fits to a zero tangent, and the row is then the same
+      # absolute velocity price at the same weight. That is 276's behaviour
+      # exactly, so it is not a regression -- but no arm in 277's table holds a
+      # heavy axis, and a slew-only traverse puts ~4.8e4 of absolute damping on
+      # the luffing pair. Measure that before trusting this row there.
+      # The planned four are that row's weight carried over: it charged
+      # `w_tau*(tau_a - g(q))^2` with `tau_a - g(q)` 96-100 % C3's damping
+      # `D dq_a` (inertia 0.5-3.5 %, Coulomb 0 on these axes), so at `w_tau`
+      # 1e-6 it was an absolute velocity price of `1e-6 D^2`, with `D` =
+      # `c3_full_model.json`'s `axes.<a>.d`. These four are that product. The
+      # rotator keeps 0.1 (its own `1e-6 D^2` is 0.23, and the tool is never
+      # planned), which is what it always had.
+      # **Still a fit rather than a decision** -- but now written where it can
+      # be read and changed, and refitting `D` no longer retunes the MPC
+      # quadratically behind the yaml's back. 277's table has the scales tried.
+      # The fit is **provenance and not a live link**, by design: nothing
+      # re-derives these four, so a C3 refit moves the plant and leaves the cost
+      # where it is, and whoever refits decides this row again. Worth knowing
+      # that `sa`'s own `d_within_5pc` spans a factor of 20, i.e. 400 on a
+      # squared weight -- the fit does not determine the telescope's number to
+      # anything like the digits written here.
+      dq_a: [56.5, 27431.0, 2208.7, 17933.4, 0.1, 0.1]
       # 6400 from 0 (issue 229), and affordable only because `q_eq` is now a
       # per-stage table along the plan (`equilibrium.py`): frozen at the
       # measurement this row priced the hanging pose's own travel, ~0.9 rad of
@@ -193,25 +217,10 @@ crane_mpc:
       # tilt 0.056, tip 0.033, peak sway 0.163 -> 0.131 rad. Not the 0.02 rad/s
       # the PID JTC reaches; no weight in the sweep got there.
       dq_u: [1024.0, 1024.0]
-      # 1e-6 from 1e-8 (issue 226), and this **is** a 100x retune of the effort
-      # cost, not a restatement: `levenberg_marquardt` damps a Newton step, it
-      # does not move a minimiser. What it was doing is still why the number
-      # moved. The force residual row *is* the state (`symbolic.py` puts
-      # `x[X_ACTUATED_FORCE:]` in the residual unmodified), so unscaled its
-      # Gauss-Newton curvature was this weight, 1e-8, and the regulariser's
-      # 1e-6 on the same diagonal damped every step in that direction to a
-      # hundredth -- the single RTI step hardly moved the force states. Scaling
-      # the force state lifted the curvature past the regulariser (13 on the
-      # rotator, 1e5 on luffing) and the damping went with it, which is a
-      # change nobody asked for; 1e-6 buys the resistance back as cost.
-      # Measured, `wire_chain` on this A2B move (latency 26 ms, empty, MuJoCo
-      # and so **not** the machine): against the unscaled problem, final error
-      # 0.0015 -> 0.0001 rad, peak tip sway 0.024 -> 0.018, late tip rate
-      # 0.032 -> 0.027, QP iterations unmoved; leaving it at 1e-8 instead costs
-      # 0.0200 rad of final error and 0.125 rad/s of late tip sway. Not swept
-      # under load against droop, and `yref`'s force reference is `h_eff(x0)`
-      # frozen for the whole 4.68 s horizon -- see the issue notes.
-      tau_a: [1.0e-6, 1.0e-6, 1.0e-6, 1.0e-6, 1.0e-6, 1.0e-6]
+      # No `tau_a`: 277 deleted the effort row. The force state is priced
+      # nowhere now, so nothing in the cost resists a force step except the
+      # dynamics and constraint 6, and `levenberg_marquardt` is the only
+      # curvature left on those four QP directions (`problem.state_scale`).
       u: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
       # C4's rate cost: 0.1 kicks, 3 is no better.
       du: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
@@ -224,13 +233,18 @@ crane_mpc:
       # 0 is a cost that prefers standing still, which is what 269's stall was.
       # The row only bites where `v_s` is 0 and the reference is not, i.e. at a
       # stall: offline `v_s` already tracks the pace, so every weight here is one
-      # table row on the gate columns but for peak tip sway, which rises with it
-      # (+4 % at 300, +9 % at 1e3, +16 % at 3e3, +25 % at 1e4 -- and the final
-      # error improves the same way, 3.07x today down to 1.82x).
-      # 1e3 is the lowest weight that clears 269's loaded lift outright: live,
-      # the stall runs 34 cycles/3.95 s at 0.1, 15/1.67 s at 100, 4/0.35 s at 300
-      # and none at 1e3, arriving in 18.4 s against 23.3 s at 0.1 (15 s nominal).
-      progress_rate: 1000.0
+      # table row on every gate column.
+      # 1e3 from 276, where it was the lowest weight that cleared 269's loaded
+      # lift at all (4 stalled cycles at 300, 15 at 100, 34 at 0.1) and cost
+      # +9 % peak tip to do it. **277 deleted the effort row and both halves of
+      # that changed**: the lift is stall-free at 1e3, 300 and 100 alike -- the
+      # absolute velocity price was what made standing cheap -- and peak tip
+      # offline now moves 2 points, not 5, across that whole range (+9/+8/+7 at
+      # 1e3/300/100 against 276's shipped cost). 300 of the three: the sway
+      # left to buy is 1 point, and the lift's arrival grows monotonically as
+      # the weight falls (boom to 0.002 rad at t0+15.5/16.4/16.9 s against
+      # 15.00 s nominal), which is lag against a 2.0 s `max_stall_time`.
+      progress_rate: 300.0
       progress_accel: 0.01
       # Scales the whole terminal prefix, progress row included -- which is what
       # makes the machine arrive; scaling the tracking rows alone measured far

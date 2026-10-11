@@ -52,8 +52,9 @@ ABSENT = np.zeros(0)
 #: only the block says which of them carried the NaN in.
 INPUTS = (
     "x0",
-    # Carries its own NaN source: the force rows are `h_eff` at `x0` and
-    # nothing checks them, so a finite state can still write a non-finite one.
+    # Since 277 deleted the effort row every row of this is `q_eq`, the path's
+    # own progress or zero, so it no longer carries a casadi evaluation of its
+    # own -- scanned anyway, because it is what the solve was priced against.
     "yref",
     "q_eq",
     "q_a_ref",

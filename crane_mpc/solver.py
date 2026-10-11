@@ -244,7 +244,6 @@ class CostTerms:
     #: The three TCP-position rows -- the cm-scale metric, in metres, not joints.
     tool: float = 0.0
     progress: float = 0.0
-    tau_a: float = 0.0
     #: The command (C3: the input rows; C4: the `c` rows) plus progress accel.
     u: float = 0.0
     #: C4 only: the command's rate rows.
@@ -279,7 +278,6 @@ def weight_matrices(parameters: dict) -> tuple[np.ndarray, np.ndarray]:
                 float(weights["progress"]),
                 float(weights["progress_rate"]),
             ],
-            np.asarray(weights["tau_a"][:planned], dtype=float),
             rate if c4 else command,
             [float(weights["progress_accel"])],
             command if c4 else [],
@@ -410,7 +408,6 @@ def stage_equilibrium(q_eq: np.ndarray, stage: int) -> np.ndarray:
 
 def stage_reference(
     q_eq: np.ndarray,
-    tau_ref: np.ndarray,
     terminal: bool,
     progress: float,
     pace: float,
@@ -418,10 +415,6 @@ def stage_reference(
 ) -> np.ndarray:
     """
     Build a stage/terminal residual reference; tracking rows are zero (rides in `p`).
-
-    `tau_ref` rides on top of the force rows' own `h_g(q_k)` (issue 276), so what
-    the node writes is zero and only an offline arm writes anything else --
-    `cost_terms` reads it back, which is what keeps such an arm's cost honest.
 
     `progress` is where on the path this stage is asked to be -- no default, so
     that a caller has to say. robocrane asks for the end of the path at every
@@ -448,10 +441,6 @@ def stage_reference(
         float(problem.PROGRESS_RATE_REFERENCE), float(progress)
     )
     reference[problem.Y_PROGRESS_RATE] = float(pace)
-    if not terminal:
-        reference[
-            problem.Y_ACTUATED_FORCE : problem.Y_ACTUATED_FORCE + cs.PLANNED_DOF
-        ] = tau_ref
     return reference
 
 
@@ -701,7 +690,7 @@ class Ocp:
         self._check_dimensions()
 
         # Residual outside the solver: acados reports one cost, this splits
-        # tracking/sway/effort. Posed on the *scaled* state, like the generated
+        # tracking/sway/tool. Posed on the *scaled* state, like the generated
         # code -- `cost_terms` divides before it calls either.
         model = self._ocp.model
         self._residual = ca.Function(
@@ -854,7 +843,7 @@ class Ocp:
         """
         `h_eff` at `x`: the force that holds the machine where it is.
 
-        Seeds C3's force state and effort term's reference; zeroed there, buys droop (issue 117).
+        Seeds C3's force state; zeroed there, the first cycle buys droop (issue 117).
         """
         value = self._static_force(x, self._base_parameter[: cs.NP])
         return np.asarray(value).reshape(-1)[: cs.PLANNED_DOF]
@@ -1112,39 +1101,16 @@ class Ocp:
         # a factorisation of a problem this one is not.
         self.solver.reset(reset_qp_solver_mem=0 if warm else 1)
 
-        # Frozen at `x0` for the whole horizon, and that *is* 85-99 % of what the
-        # effort term charges (265). `h_eff` per stage at the warm start's own
-        # state was measured in its place (267, `--reference guess`): it removes
-        # the artefact -- the term's median falls 12-55x, its share of the cost
-        # from .18-.71 to .03-.12 -- and costs TCP path error p95 2-118 % in 5 of
-        # 6 arms and the endpoint up to 21x, so it did not ship. Whatever
-        # replaces this has to keep the path tail, not just the term.
-        #
-        # 271 took the reference out altogether -- `tau_a - h_eff(x_k)` inside
-        # `cost_y_expr`, gravity exact per stage, `yref` zero -- and it is
-        # **worse than either constant**: TCP p95 +155 to +304 %, peak tip sway
-        # up to +794 %, the endpoint x3 to x1080, every one of the six arms, and
-        # `weights.tau_a` buys none of it back anywhere over 1e-7..1e-2. What
-        # this term is load-bearing for is not the inertia it was written for:
-        # priced against a *frozen* load it charges motion away from `x0` on the
-        # luffing/reaching axes, and the whole weight set is tuned around that.
-        #
-        # 275 split it in two -- `tau_a - h_eff(x_k)` on `weights.tau_a` plus a
-        # gravity-weighted pose row `h_g(q_k) - h_g(anchor)` on its own weight --
-        # and that is the closest any pass has come and still did not ship. Two
-        # anchors, 30 offline arms: at `x0` it reproduces nothing (the issue's own
-        # gate: TCP p95 +81 to +226 %, tip sway +26 to +360 %), because **this row
-        # has no pose Jacobian at all** -- `h_eff(x0)` is a constant, so its whole
-        # curvature and gradient sit on the force state, and no pose cost can
-        # stand in for it. At the path point, `h_g(q_k) - h_g(q_ref(s_k))`, the
-        # best weight (1e-4, two decades off what the split's own algebra says)
-        # tracks *better* than today -- TCP p50 3-37 % better in 5 of 6 arms, p95
-        # -19 to +8 %, the progress term down 38-95 %, so the 269 stall goes --
-        # and costs peak tip sway +2 to +52 % and the late sway rate 1.6-20x
-        # (0.0086 -> 0.173 rad/s loaded, past the 0.02 the tree settles on in
-        # five of six arms). At that weight the row
-        # *is* `q_a` with a `dh_g/dq` weighting, and it trades the way the
-        # tracking weights do: tighter path, more swing. See the 275 notes.
+        # No force reference here any more: 277 deleted the effort row, so the
+        # force state is priced nowhere. Five passes had tried to make it mean
+        # the inertia it was sold as -- 265 measured 85-99 % of the frozen row's
+        # charge to be the load's gravity drift away from `x0`, 267's per-stage
+        # `h_eff` and 271's symbolic `h_eff(x_k)` and 275's two-row split each
+        # cost TCP p95 and sway, and 276's `tau_a - g(q_k)` passed the gate at
+        # exactly one weight. 277 measured *that* row: 96-100 % of its cost was
+        # C3's `D dq_a`, so the row was an absolute velocity price of `w_tau D^2`
+        # and the `dq_a` row now carries the price explicitly. The 265-276 notes
+        # hold the numbers.
         measured = x0[cs.X_PLANNED_POSITION : cs.X_PLANNED_POSITION + cs.PLANNED_DOF]
         rate_max = self.progress_rate_max(path)
         equilibrium = np.asarray(q_eq, dtype=float)
@@ -1180,8 +1146,6 @@ class Ocp:
         # that stage's interval. Zero here -- every cycle before 276 -- is a cost
         # that prefers standing still (269 "The cause").
         reference[:, problem.Y_PROGRESS_RATE] = path.pace_at(elapsed, self.Ts)
-        # The force rows stay zero: the effort residual subtracts the stage's own
-        # `h_g(q_k)` symbolically (`problem.py`).
 
         # Kept because `cost_terms` has to score against the path this cycle was
         # written to, not a refit of it.
@@ -1235,11 +1199,8 @@ class Ocp:
             "q_eq": np.asarray(q_eq, dtype=float),
             "path": path,
             "guess": Guess(states, inputs),
-            # Not derivable from `x0`: the force rows are `h_eff` at `x0`, a
-            # casadi evaluation through the cylinder kinematics, so a finite
-            # state can still write a non-finite reference. `cost_terms` reads
-            # its effort reference back off here rather than rebuilding it, so
-            # an arm that writes another one is still scored on what it paid.
+            # What the solve was actually priced against, so a replay re-poses
+            # the same QP rather than rebuilding a reference from `x0`.
             "yref": reference,
             "in_flight": self._in_flight,
             "warm": warm,
@@ -1418,13 +1379,6 @@ class Ocp:
                 "no problem has been written, so there is no cost to split"
             )
         terms = CostTerms(slack=solution.slack_penalty)
-        # Read back, not rebuilt. The shipped reference is zero since 276 (the
-        # row subtracts its own `h_g(q_k)`), so this is that; an arm that writes
-        # one anyway (`effort_split.py`) used to be reported a cost no cycle
-        # paid, i.e. the panel's effort row lied (265).
-        force_reference = self._written["yref"][
-            :, problem.Y_ACTUATED_FORCE : problem.Y_ACTUATED_FORCE + cs.PLANNED_DOF
-        ]
         diagonal = np.diag(self._weight)
         terminal_diagonal = np.diag(self._terminal_weight)
         planned = cs.PLANNED_DOF
@@ -1434,7 +1388,6 @@ class Ocp:
             terminal = stage == self.intervals
             reference = stage_reference(
                 stage_equilibrium(q_eq, stage),
-                force_reference[stage],
                 terminal,
                 self.nominal_progress(stage, self._last_path),
                 self.nominal_pace(stage, self._last_path),
@@ -1476,7 +1429,6 @@ class Ocp:
             terms.progress += float(
                 row[problem.Y_PROGRESS] + row[problem.Y_PROGRESS_RATE]
             )
-            terms.tau_a += float(np.sum(row[problem.Y_ACTUATED_FORCE :][:planned]))
             inputs = float(np.sum(row[problem.Y_INPUT :][: cs.NU_PROGRESS]))
             if self.command_state:
                 rate = float(np.sum(row[problem.Y_INPUT :][:planned]))

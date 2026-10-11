@@ -229,7 +229,7 @@ def test_the_two_status_streams_are_stamped_with_the_cycle_they_share(node):
 
 def test_a_cycle_with_no_split_zeroes_both_halves_of_the_cost_panel(node):
     """
-    One panel plots `health.cost_term` beside `~/cost_terms`, so the eleven rows have
+    One panel plots `health.cost_term` beside `~/cost_terms`, so the ten rows have
     to drop together. `cost_term` is a fixed `float64[8]` and goes out as zeros when
     there is no solution to split; three rows holding their last line beside eight
     zeros would read as a cost rebalance on a cycle that never solved.
@@ -618,14 +618,14 @@ def test_a_stall_names_the_cost_rows_solver_health_cannot_carry():
         tool=1.2,
         q_u=15.6,
         dq_u=46.4,
-        tau_a=139.2,
         q_a=0.54,
+        dq_a=139.2,
         terminal=2.79,
     )
     one = Stalled(terms)
     text = MpcNode.say_stalled(one, "converged", False, SOLVED)
     assert "the plan is stalled" in text
-    for named in ("progress 0.66", "tool 1.2", "effort 139.2"):
+    for named in ("progress 0.66", "tool 1.2", "velocity 139.2"):
         assert named in text, named
     assert one.errors and one.errors[0].startswith(text)
 

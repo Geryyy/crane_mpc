@@ -11,7 +11,7 @@ from ament_index_python.packages import get_package_share_directory
 from conftest import export_for, window_path
 from crane_model import hydraulic_limits
 from crane_model import symbolic as cs
-from crane_mpc import problem
+from crane_mpc import bspline, problem
 from crane_mpc.config import machine_limits
 from crane_mpc.horizon import Grid, Knots, resample
 from crane_mpc.solver import (
@@ -74,17 +74,6 @@ def hold_state(ocp):
 @pytest.fixture
 def state(ocp):
     return hold_state(ocp)
-
-
-def gravity_hold_force(ocp, x):
-    """`h_g` at a state's pose: `h_eff` with the velocity rows left at zero."""
-    pose = np.zeros(ocp.nx)
-    for row, width in (
-        (cs.X_PLANNED_POSITION, PLANNED),
-        (cs.X_PASSIVE_POSITION, cs.PASSIVE_DOF),
-    ):
-        pose[row : row + width] = x[row : row + width]
-    return ocp.static_hold_force(pose)
 
 
 def horizon_holding(ocp, position):
@@ -187,9 +176,7 @@ def test_the_rate_row_is_priced_against_the_plans_pace_and_not_against_standing(
 
     # And it is what lands in the residual's reference, for stage and terminal.
     for terminal in (False, True):
-        reference = stage_reference(
-            np.zeros(cs.PASSIVE_DOF), np.zeros(PLANNED), terminal, 0.3, 0.07
-        )
+        reference = stage_reference(np.zeros(cs.PASSIVE_DOF), terminal, 0.3, 0.07)
         assert reference[problem.Y_PROGRESS_RATE] == pytest.approx(0.07)
 
 
@@ -341,87 +328,111 @@ def test_the_cost_split_leaves_no_residual_row_out(ocp, state):
     assert total == pytest.approx(ocp.solver.get_cost(), rel=1e-9)
 
 
-def test_the_effort_term_is_scored_against_the_reference_that_was_written(ocp, state):
+def test_the_force_state_is_priced_by_no_row_at_all(ocp, state):
     """
-    `cost_terms` reads `yref`'s force rows back; it does not rebuild them.
+    Issue 277: the effort row is gone, so `tau_a` enters the cost nowhere.
 
-    Rebuilt off `solution.states[0]`, a per-stage effort reference -- every arm
-    of `scripts/trials/effort_split.py` writes one -- is reported as a cost no
-    cycle paid, and the effort row on the health panel then lies (issue 267).
-    """
-    position = state[cs.X_PLANNED_POSITION : cs.X_PLANNED_POSITION + PLANNED]
-    horizon = horizon_holding(ocp, position)
-    q_eq = state[cs.X_PASSIVE_POSITION : cs.X_PASSIVE_POSITION + cs.PASSIVE_DOF]
-    solution = solved(ocp, state, horizon, q_eq)
-
-    force = slice(problem.Y_ACTUATED_FORCE, problem.Y_ACTUATED_FORCE + PLANNED)
-    written = ocp.last_problem()["yref"]
-    # Per stage, which no rebuild off one state can produce; stage 0 untouched,
-    # so the shipped frozen reference is still a special case of this. Written
-    # down to acados too, the way an arm does it -- the oracle is what the
-    # solver was charged, not what the record happens to say.
-    written[: ocp.intervals, force] += np.linspace(0.0, 2000.0, ocp.intervals)[:, None]
-    for stage in range(ocp.intervals):
-        ocp.solver.cost_set(stage, "yref", written[stage])
-    charged = np.array(
-        [ocp.solver.cost_get(stage, "yref")[force] for stage in range(ocp.intervals)]
-    )
-
-    tau = solution.states[
-        : ocp.intervals, cs.X_ACTUATED_FORCE : cs.X_ACTUATED_FORCE + PLANNED
-    ]
-    # The row is `tau_a - h_g(q_k)`, so the reference it is scored against is
-    # what `yref` carries *on top of* the stage's own gravity.
-    gravity = np.array(
-        [
-            gravity_hold_force(ocp, solution.states[stage])
-            for stage in range(ocp.intervals)
-        ]
-    )
-    weight = np.diag(weight_matrices(ocp.parameters)[0])[force]
-    paid = float(np.sum(0.5 * weight * (tau - gravity - charged) ** 2))
-    assert paid > 0.0
-    assert ocp.cost_terms(solution, q_eq).tau_a == pytest.approx(paid, rel=1e-9)
-
-
-def test_the_effort_row_prices_the_pose_s_own_gravity_at_the_stage(ocp, state):
-    """
-    `tau_a - h_g(q_k)` is zero at *any* static hold, not only at `x0`.
-
-    The check has to be taken away from `x0` to mean anything: there the retired
-    frozen reference `h_eff(x0)` was right by construction (265's stage-0 zero),
-    so 0.4 rad of boom is the whole content of the first assert.
-
-    Moving, the row keeps `h_eff`'s velocity terms -- damping, Coulomb,
-    Coriolis -- which is what makes it neither 271's `tau_a - h_eff(x_k)` (pure
-    `M q_ddot`, measured worse on every arm) nor 275's pose regulariser.
+    Pushing the force state far off any hold moves the residual by exactly
+    nothing. That is what leaves `levenberg_marquardt` the only curvature on
+    those four QP directions, and why `problem.state_scale` still scales them.
     """
     position = state[cs.X_PLANNED_POSITION : cs.X_PLANNED_POSITION + PLANNED]
     q_eq = state[cs.X_PASSIVE_POSITION : cs.X_PASSIVE_POSITION + cs.PASSIVE_DOF]
     solved(ocp, state, horizon_holding(ocp, position), q_eq)
     parameter = ocp._last_parameter
-    force = slice(problem.Y_ACTUATED_FORCE, problem.Y_ACTUATED_FORCE + PLANNED)
     no_input = np.zeros(cs.NU_PROGRESS)
 
+    def residual(x):
+        value = ocp._residual(ocp._to_qp(x), no_input, parameter)
+        return np.asarray(value).reshape(-1)
+
+    pushed = state.copy()
+    pushed[cs.X_ACTUATED_FORCE : cs.X_ACTUATED_FORCE + PLANNED] += 5.0e4
+    assert residual(pushed) == pytest.approx(residual(state), abs=1e-9)
+
+
+def test_the_velocity_row_prices_deviation_from_the_plans_pace_not_motion(ocp, state):
+    """
+    Issue 277: what replaces the effort row's hidden `D dq_a` damper.
+
+    The row is `dq_a - tangent(s) v_s`, so a machine running the plan at the
+    plan's own pace pays nothing on it, while standing still *while the plan
+    asks for a pace* costs the whole of it -- which the absolute velocity price
+    the effort row smuggled in had backwards (269's stall).
+    """
+    q_eq = state[cs.X_PASSIVE_POSITION : cs.X_PASSIVE_POSITION + cs.PASSIVE_DOF]
+    position = state[cs.X_PLANNED_POSITION : cs.X_PLANNED_POSITION + PLANNED]
+    # A path that goes somewhere: a holding one has no tangent to be paced by.
+    reference = Knots.zeros(2)
+    reference.t[:] = [0.0, ocp.Ts * ocp.intervals]
+    reference.q_a_ref[0, :PLANNED] = position
+    reference.q_a_ref[1, :PLANNED] = position + 0.2
+    _, horizon = resample(reference, 0.0, Grid(ocp.Ts, ocp.intervals + 1))
+    solved(ocp, state, horizon, q_eq)
+    parameter = ocp._last_parameter
+    no_input = np.zeros(cs.NU_PROGRESS)
+    rows = slice(problem.Y_PLANNED_VELOCITY, problem.Y_PLANNED_VELOCITY + PLANNED)
+    velocity = slice(cs.X_PLANNED_VELOCITY, cs.X_PLANNED_VELOCITY + PLANNED)
+
     def row(x):
-        value = np.asarray(ocp._residual(ocp._to_qp(x), no_input, parameter))
-        return value.reshape(-1)[force]
+        value = ocp._residual(ocp._to_qp(x), no_input, parameter)
+        return np.asarray(value).reshape(-1)[rows]
 
-    held = state.copy()
-    held[cs.X_PLANNED_POSITION + 1] += 0.4
-    held[cs.X_ACTUATED_FORCE : cs.X_ACTUATED_FORCE + PLANNED] = gravity_hold_force(
-        ocp, held
-    )
-    assert row(held) == pytest.approx(np.zeros(PLANNED), abs=1e-6)
+    # Mid path: `resample` rests the window at both ends, so the tangent at
+    # `s = 0` is zero and the stage would have nothing to be paced against.
+    resting = state.copy()
+    resting[cs.X_PROGRESS] = 0.5
+    resting[cs.X_PROGRESS_RATE] = 0.0
+    resting[velocity] = 0.0
+    assert row(resting) == pytest.approx(np.zeros(PLANNED), abs=1e-9)
 
-    moving = held.copy()
-    moving[cs.X_PLANNED_VELOCITY + 1] = 0.05
-    moving[cs.X_ACTUATED_FORCE : cs.X_ACTUATED_FORCE + PLANNED] = ocp.static_hold_force(
-        moving
-    )
-    velocity_terms = ocp.static_hold_force(moving) - gravity_hold_force(ocp, moving)
-    assert np.max(np.abs(velocity_terms)) > 1.0
-    assert row(moving) == pytest.approx(velocity_terms, abs=1e-6)
+    # The tangent off `bspline.value`, not off the row being tested: derived
+    # from the row, the zero below is true of any `dq_a - f(x) v_s` and would
+    # not catch a sign, a transpose or the wrong knot vector.
+    path = ocp._last_path
+    step = 1e-6
+    s = path.origin + 0.5
+    control, knots = path.control, problem.PATH_KNOTS
+    tangent = (
+        bspline.value(np.array([s + step]), control, knots)
+        - bspline.value(np.array([s - step]), control, knots)
+    ).reshape(-1) / (2.0 * step)
+    assert np.max(np.abs(tangent)) > 0.1
+
+    # Standing still while the plan asks for a pace is what the row charges.
+    standing = resting.copy()
+    standing[cs.X_PROGRESS_RATE] = 0.1
+    assert row(standing) == pytest.approx(-0.1 * tangent, abs=1e-6)
+
+    on_plan = standing.copy()
+    on_plan[velocity] = 0.1 * tangent
+    assert row(on_plan) == pytest.approx(np.zeros(PLANNED), abs=1e-6)
+
+
+def test_each_weight_block_lands_on_the_rows_it_is_named_for(parameters):
+    """
+    The diagonal against the residual's own row order, block by block.
+
+    `test_the_cost_split_leaves_no_residual_row_out` cannot see this: it applies
+    the same `W` on both sides, so two blocks swapped cancel and it passes.
+    Since 277 that matters -- `q_a` 40 sits directly above `dq_a` 27431 on the
+    boom, both five wide, a factor of 686 apart.
+    """
+    diagonal = np.diag(weight_matrices(parameters)[0])
+    weights = parameters["weights"]
+    blocks = {
+        problem.Y_PLANNED_POSITION: weights["q_a"][:PLANNED],
+        problem.Y_PLANNED_VELOCITY: weights["dq_a"][:PLANNED],
+        problem.Y_PASSIVE_POSITION: weights["q_u"],
+        problem.Y_PASSIVE_VELOCITY: weights["dq_u"],
+        problem.Y_TOOL: [weights["tcp"]] * 3,
+        problem.Y_PROGRESS: [weights["progress"], weights["progress_rate"]],
+        problem.Y_INPUT: weights["u"][:PLANNED],
+    }
+    for row, expected in blocks.items():
+        assert diagonal[row : row + len(expected)] == pytest.approx(expected), row
+    assert diagonal[problem.Y_INPUT + PLANNED] == weights["progress_accel"]
+    assert diagonal.size == problem.NY
 
 
 def test_the_warm_start_is_the_last_solution_unshifted(ocp, state):

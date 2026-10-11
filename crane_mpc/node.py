@@ -705,8 +705,8 @@ class MpcNode(Node):
         return (
             f"; what outpriced it: progress {terms.progress:.4g}, tool "
             f"{terms.tool:.4g}, sway {terms.q_u:.4g}, sway "
-            f"rate {terms.dq_u:.4g}, effort {terms.tau_a:.4g}, tracking "
-            f"{terms.q_a:.4g}, terminal {terms.terminal:.4g}"
+            f"rate {terms.dq_u:.4g}, tracking {terms.q_a:.4g}, velocity "
+            f"{terms.dq_a:.4g}, terminal {terms.terminal:.4g}"
         )
 
     def complain(self, verdict) -> None:

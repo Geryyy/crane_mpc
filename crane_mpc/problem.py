@@ -216,8 +216,8 @@ PATH_KNOTS = bspline.knot_vector(PATH_POINTS)
 # --- the residual blocks -------------------------------------------------------
 #
 # Terminal residual is the leading prefix of the stage one, sharing offsets.
-# Tool/progress rows sit inside that prefix; effort/smoothness (need an input)
-# come after.
+# Tool/progress rows sit inside that prefix; the smoothness rows (they need an
+# input) come after.
 Y_PLANNED_POSITION = 0
 Y_PLANNED_VELOCITY = cs.PLANNED_DOF
 Y_PASSIVE_POSITION = 2 * cs.PLANNED_DOF
@@ -231,8 +231,9 @@ Y_TOOL = Y_PASSIVE_VELOCITY + cs.PASSIVE_DOF
 Y_PROGRESS = Y_TOOL + 3
 Y_PROGRESS_RATE = Y_PROGRESS + 1
 NY_TERMINAL = Y_PROGRESS_RATE + 1
-Y_ACTUATED_FORCE = NY_TERMINAL
-Y_INPUT = Y_ACTUATED_FORCE + cs.PLANNED_DOF
+#: No force row: issue 277 deleted the effort row, so `tau_a` is priced nowhere
+#: and the input rows follow the terminal prefix directly.
+Y_INPUT = NY_TERMINAL
 NY = Y_INPUT + cs.NU_PROGRESS
 # C4 only: the command state `c`, after the input rows (which then carry `dc`).
 Y_COMMAND = NY
@@ -392,7 +393,6 @@ def build_ocp(description_xml: str, parameters: dict, hydraulics: dict) -> tuple
     # change as discrete and drops the warm start. Both are written every stage;
     # the export ships a zero default (empty gripper).
     xdot = model.xdot
-    tau_a = model.tau_a
     output = model.z
 
     x = model.x
@@ -441,18 +441,25 @@ def build_ocp(description_xml: str, parameters: dict, hydraulics: dict) -> tuple
 
     # --- the cost, as a nonlinear least-squares residual -----------------------
     #
-    # Row order: tracking, sway, tool/progress, effort, smoothness. `yref`
-    # carries `q_eq`, `min(1, s_ref)` and the plan's own pace; every other row
-    # is zero, because the rows that need a reference carry it inside themselves.
+    # Row order: tracking, sway, tool/progress, smoothness. `yref` carries
+    # `q_eq`, `min(1, s_ref)` and the plan's own pace; every other row is zero,
+    # because the rows that need a reference carry it inside themselves.
     #
     # Issue 276 took the lag row out: ablated on 267's six arms it moves no gate
     # column at all (every quality number within 0.5 %, the final error within
     # 2 %), which 248 §11 had already found and the shipped weight of 40 was
     # priced for a row whose term ran 0.15-6.9 against a cost of order 1e3.
     #
-    # Effort rows are `tau_a`, not `u`: pricing acceleration carries the
-    # effective inertia, so the optimizer is gentler extended/loaded -- why
-    # inverse dynamics is in the loop.
+    # Issue 277 took the effort row out. It was `tau_a - g(q_k)`, sold as the
+    # effective inertia, and measured on 267's arms **96-100 % of its cost was
+    # C3's damping term `D dq_a`** (inertia 0.5-3.5 %, Coulomb zero on the
+    # planned axes) -- i.e. an absolute joint-velocity price of `w_tau D^2`,
+    # whose weight came out of a hydraulic fit rather than a decision and which
+    # made standing still cheap (269's stall). What priced velocity now says so:
+    # the `dq_a` row, against the plan's own tangent -- on every axis the plan
+    # moves. On an axis it holds, `tangent` is exactly zero (a constant column
+    # fits to one control point value) and that row is the absolute price again,
+    # at the same weight; 276's behaviour, measured on no arm yet (277 notes).
     #
     # Four actuated blocks are planned rows only: no tool row (follows the
     # low-level controller, optimizer can't move it).
@@ -475,18 +482,6 @@ def build_ocp(description_xml: str, parameters: dict, hydraulics: dict) -> tuple
     at_path = model.tool_position(canonical)
     tool = at_machine - at_path
     #
-    # Effort row: the force state against the pose's own weight, at the stage's
-    # own `q_a`/`q_u`. `h_g` is `h_eff` with the velocities substituted out, i.e.
-    # pinocchio's generalized gravity -- so what is left in the residual is
-    # `M q_ddot + C q_dot + damping q_dot` (+ Coulomb), which is what the row was
-    # written to price. `yref`'s force rows are zero and the reference follows the
-    # plan instead of freezing at `x0`.
-    gravity = ca.substitute(
-        model.h_eff,
-        ca.vertcat(dq_a, dq_u),
-        ca.SX.zeros(cs.PLANNED_DOF + cs.PASSIVE_DOF),
-    )
-    #
     # Progress row: `s` against `min(1, s_ref)` -- where to end up, not when to
     # be there. `v_s` is a separate row, priced against the plan's own pace
     # since 276; its `yref` was zero, i.e. a cost that preferred standing.
@@ -498,7 +493,6 @@ def build_ocp(description_xml: str, parameters: dict, hydraulics: dict) -> tuple
         tool,
         s,
         progress_rate,
-        tau_a[: cs.PLANNED_DOF] - gravity,
         u,
     )
     if c4:
@@ -549,13 +543,15 @@ def build_ocp(description_xml: str, parameters: dict, hydraulics: dict) -> tuple
     # *not* buy: the live refusals. Those were the preparation/feedback split
     # and the position box, not the conditioning -- see `solver.Ocp.solve`.
     #
-    # One trap, and it is the whole of why `weights.tau_a` moved: a scalar
-    # `levenberg_marquardt` is **not** invariant under this. Unscaled its 1e-6
-    # was 100x the force rows' own curvature (`w_tau` = 1e-8, and the residual
-    # row *is* `tau_a`), so it damped every step in those directions to a
-    # hundredth; scaled, the curvature is `w_tau * S^2` -- 13 on the rotator,
-    # 1e5 on luffing -- and the damping is gone. `weights.tau_a` buys that
-    # resistance back as cost, which is a retune and says so in the yaml.
+    # Since 277 deleted the effort row the force block carries **no cost
+    # curvature at all**, so what conditions those four directions is
+    # `levenberg_marquardt` alone (plus the dynamics and constraint 6). That is
+    # why the scaling stays: 226's measurement was the stage-0 bound gap, which
+    # is a property of the state and not of the cost. Measured after the
+    # deletion, solve p100 and `qp_iter_capped` are unmoved -- see the 277
+    # notes; the scalar regulariser is *not* invariant under this change of
+    # variables, so if a future variant does see conditioning move, the fix is
+    # `levenberg_marquardt`, not a cost row put back.
     #
     # acados' own `qpscaling_*` cannot do any of this: it raises
     # `NotImplementedError` under `SQP_RTI` (`acados_ocp.py:1301`).

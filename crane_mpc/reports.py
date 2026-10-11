@@ -214,12 +214,16 @@ def follower_command(state, joints, now_ns, max_clock_skew, max_state_age):
 
 
 def fill_cost_terms(health, terms) -> None:
+    # `COST_EFFORT` (row 4) is flat zero since 277 deleted the effort row. The
+    # slot stays because `cost_term` is a fixed `float64[8]` in crane_msgs and
+    # the numbering is a cross-node contract; dropping the row there is that
+    # package's change, not this one's.
     health.cost_term = [
         terms.q_a,
         terms.dq_a,
         terms.q_u,
         terms.dq_u,
-        terms.tau_a,
+        0.0,
         terms.u,
         terms.terminal,
         terms.slack,
@@ -240,7 +244,10 @@ def cost_terms(terms, stamp) -> DiagnosticArray:
     message = DiagnosticArray()
     message.header.stamp = stamp
     status = DiagnosticStatus(name="cost", level=DiagnosticStatus.OK)
-    status.message = "the cost rows SolverHealth/cost_term has no slot for"
+    status.message = (
+        "the cost rows SolverHealth/cost_term has no slot for; its row 4, "
+        "COST_EFFORT, is unused since issue 277 deleted that row and reads 0"
+    )
     status.values = [
         KeyValue(key="tool", value=_text(terms.tool)),
         KeyValue(key="progress", value=_text(terms.progress)),

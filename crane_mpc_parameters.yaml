@@ -156,7 +156,10 @@ crane_mpc:
     dq_a:
       type: double_array
       read_only: true
-      description: "Q_dot_a -- actuated velocity tracking."
+      description: "Q_dot_a -- actuated velocity tracking, against the path tangent times
+        `v_s` and so a deviation from the plan's pace, not a price on motion. Since issue
+        277 it is also the **only** velocity price: the deleted effort row was `1e-6 D^2`
+        per axis absolute, which is where the planned axes' numbers come from."
       validation:
         fixed_size<>: [6]
         lower_element_bounds<>: [0.0]
@@ -177,15 +180,6 @@ crane_mpc:
         a rate residual needs no centre. Swept with `q_u` in issue 229 and unmoved at 1024."
       validation:
         fixed_size<>: [2]
-        lower_element_bounds<>: [0.0]
-    tau_a:
-      type: double_array
-      read_only: true
-      description: "R_tau -- effort, pricing **tau_a and never u** and against h_eff rather
-        than zero, so an acceleration costs its effective inertia and the optimizer buys no
-        droop. Small because tau_a runs to 1e4-1e5 N m while the tracking residuals are rad."
-      validation:
-        fixed_size<>: [6]
         lower_element_bounds<>: [0.0]
     u:
       type: double_array
@@ -223,8 +217,10 @@ crane_mpc:
     progress_rate:
       type: double
       read_only: true
-      description: "w_v_s -- the path parameter's rate, priced toward rest. Damping and not a
-        regulator; may be zero, the limits still bound the rate."
+      description: "w_v_s -- the path parameter's rate, priced against the plan's own ds/dt
+        across that stage's interval since issue 276 (zero past the path's end), not toward
+        rest: a reference of zero is a cost that prefers a standing plan, which was 269's
+        stall. It bites only where `v_s` is zero and the plan's pace is not."
       validation:
         gt_eq<>: [0.0]
     progress_accel:
