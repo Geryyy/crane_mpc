@@ -352,11 +352,13 @@ with the window fit gone (issue 188) that cycle refuses and `forget_plan` drops
 the warm start. The JTC's unconsumed tail covers the gap, so it is a solve-budget
 spike at a move boundary rather than a break in motion.
 
-**A stalled reference is a silence too.** `max_reference_age`,
-`min_progress_rate` and `max_stall_time` decide it: a plan is spent in virtual
-time whether or not anything follows it, so a reference that has aged out, or
-progress that has sat below the rate for longer than the stall time, stops the
-cycle rather than driving on a plan that no longer describes the machine.
+**A stale reference is a silence too; a stalled one is only reported.** A plan
+is spent in virtual time whether or not anything follows it, so a reference older
+than `max_reference_age` stops the cycle rather than driving on a plan that no
+longer describes the machine. Progress below `min_progress_rate` for longer than
+`max_stall_time` does not stop it: the horizon keeps going out and
+`/crane/mpc/solver_health` carries `FAULT_SOLVER` with the cost terms that
+outpriced progress (issue 269).
 
 **On failure, the shifted previous solution and a diagnostic** — never zero
 velocity; the same path as requirement 3.
