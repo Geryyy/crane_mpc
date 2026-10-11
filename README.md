@@ -357,8 +357,8 @@ is spent in virtual time whether or not anything follows it, so a reference olde
 than `max_reference_age` stops the cycle rather than driving on a plan that no
 longer describes the machine. Progress below `min_progress_rate` for longer than
 `max_stall_time` does not stop it: the horizon keeps going out and
-`/crane/mpc/solver_health` carries `FAULT_SOLVER` with the cost terms that
-outpriced progress (issue 269).
+`/crane/mpc/solver_health` carries `FAULT_PLAN_STALLED` with the cost terms that
+outpriced progress (issues 269, 273).
 
 **On failure, the shifted previous solution and a diagnostic** — never zero
 velocity; the same path as requirement 3.
@@ -420,9 +420,11 @@ fitted against two different outgoing commands, is two different splines.
 | Names | the six actuated URDF joints, carried in the message |
 
 `fault` is a `SupervisorStatus` `FAULT_*` constant and is deliberately not
-renumbered: the supervisor merges the code rather than translating it. The only
-one this producer raises is `FAULT_SOLVER`, which covers non-convergence and a
-deadline miss alike, and it still has no consumer (issue 054).
+renumbered: the supervisor merges the code rather than translating it. This
+producer raises two: `FAULT_SOLVER`, which covers non-convergence and a deadline
+miss alike, and `FAULT_PLAN_STALLED` for a converged, on-time solve whose plan
+has stopped advancing (issue 273). A failed solve outranks a stall. Neither has
+a consumer yet (issue 054).
 
 The repeated-failure escalation goes out on the same stream under the same code,
 with `applied_previous_solution` false — nothing was published at all — and the

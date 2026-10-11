@@ -464,20 +464,38 @@ def test_one_progressing_cycle_inside_the_window_clears_the_count():
     assert not watch(held, MIN_RATE, 10000)[1]
 
 
-def test_a_stalled_plan_reports_fault_solver_on_a_converged_solve():
-    one = stall(cycle())
-    assert one.progress_stalled
+def test_a_stall_and_a_solver_failure_carry_different_codes():
+    """
+    Issue 273: a stalled plan is converged and on time, so FAULT_SOLVER there
+    points the reader at a component that did nothing wrong.
+    """
     joints = [f"axis{axis}" for axis in range(cs.ACTUATED_DOF)]
-    health = reports.solver_health(
-        one,
-        solution(Outcome.CONVERGED, 0.0),
-        "a verdict",
-        joints,
-        0.02,
-        Time().to_msg(),
-    )
+
+    def health_for(one, answer):
+        return reports.solver_health(
+            one, answer, "a verdict", joints, 0.02, Time().to_msg()
+        )
+
+    stalled = stall(cycle())
+    assert stalled.progress_stalled
+    health = health_for(stalled, solution(Outcome.CONVERGED, 0.0))
     assert health.outcome == SolverHealth.SOLVE_CONVERGED
-    assert health.fault == SupervisorStatus.FAULT_SOLVER
+    assert health.fault == SupervisorStatus.FAULT_PLAN_STALLED
+
+    # A solve that failed keeps FAULT_SOLVER, and outranks a stall if both hold.
+    failed = health_for(cycle(), solution(Outcome.FAILED, 0.0))
+    assert failed.outcome == SolverHealth.SOLVE_FAILED
+    assert failed.fault == SupervisorStatus.FAULT_SOLVER
+    assert (
+        health_for(stall(cycle()), solution(Outcome.FAILED, 0.0)).fault
+        == SupervisorStatus.FAULT_SOLVER
+    )
+
+    # And a converged, progressing solve is still healthy.
+    assert (
+        health_for(cycle(), solution(Outcome.CONVERGED, 0.0)).fault
+        == SupervisorStatus.FAULT_NONE
+    )
 
 
 def test_a_new_reference_and_a_mode_change_each_clear_the_stall():

@@ -69,14 +69,17 @@ def solver_health(cycle: Cycle, solution, why: str, joints, budget: float, stamp
         Outcome.FAILED: SolverHealth.SOLVE_FAILED,
     }[solution.outcome]
     # A stalled plan is a *converged* solve (answering "wait"); without this it reads
-    # healthy forever. Reuses FAULT_SOLVER (no dedicated stall code, a crane_msgs
-    # field add); no node here acts on the distinction yet. `health_is_due` exempts a
-    # changed verdict from decimation, so a new stall goes out immediately.
-    health.fault = (
-        SupervisorStatus.FAULT_NONE
-        if solution.outcome is Outcome.CONVERGED and not cycle.progress_stalled
-        else SupervisorStatus.FAULT_SOLVER
-    )
+    # healthy forever. Its own code: the solve is converged and on time, so
+    # FAULT_SOLVER would name the wrong component (issue 273). A non-converged solve
+    # outranks the stall -- the solver really did fail, and that is the actionable
+    # half. No node here acts on either yet. `health_is_due` exempts a changed verdict
+    # from decimation, so a new stall goes out immediately.
+    if solution.outcome is not Outcome.CONVERGED:
+        health.fault = SupervisorStatus.FAULT_SOLVER
+    elif cycle.progress_stalled:
+        health.fault = SupervisorStatus.FAULT_PLAN_STALLED
+    else:
+        health.fault = SupervisorStatus.FAULT_NONE
     health.status = solution.status
     health.status_word = solution.status_word
     health.iterations = solution.iterations

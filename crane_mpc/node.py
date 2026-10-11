@@ -679,8 +679,8 @@ class MpcNode(Node):
             text += self.outpriced(solution)
             self.get_logger().error(
                 f"{text}. The horizon still goes out, but {SOLVER_HEALTH_TOPIC} now "
-                "carries FAULT_SOLVER; this node reports the stall, it does not "
-                "recover from it."
+                "carries FAULT_PLAN_STALLED; this node reports the stall, it does "
+                "not recover from it."
             )
         return text
 

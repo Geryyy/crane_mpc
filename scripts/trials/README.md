@@ -141,7 +141,8 @@ sections; one whose topics are absent says "not recorded" and does not fail.
    horizon's cadence as the cycle grid.
 2. **Solve timing** — `solve_time` p50/p90/max against `solve_budget`; the late,
    non-converged, `used_slack` and `applied_previous_solution` shares;
-   `FAULT_SOLVER` count; silence episodes. The stream is decimated by
+   fault count, split `FAULT_SOLVER` vs `FAULT_PLAN_STALLED`; silence episodes.
+   The stream is decimated by
    `solver_health_decimation`, so a gap is not a missed solve.
 3. **Model skill** — `modelfit.py`'s one-cycle skill per axis, scored against
    `controller_state.output`, the command the machine actually received. Where

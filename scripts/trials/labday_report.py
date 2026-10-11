@@ -64,8 +64,12 @@ SCHEMAS = {
     "epsilon_crane_msgs/msg/CraneData": "cranedata",
 }
 OUTCOME = {0: "unknown", 1: "converged", 2: "budget_exceeded", 3: "failed"}
-#: `SupervisorStatus.FAULT_NONE`; anything else on this stream is FAULT_SOLVER.
+#: `SupervisorStatus.FAULT_NONE` and `FAULT_PLAN_STALLED`. This stream raises
+#: those two plus `FAULT_SOLVER`, and the stall is the one that is *not* a
+#: solver fault -- counting them together labels a converged, on-time plan a
+#: solver failure (issue 273).
 FAULT_NONE = 0
+FAULT_PLAN_STALLED = 10
 #: Recorded, and the layer's abort condition holds -- not the same as absent.
 NO_FOLLOWER = "no follower velocity on any axis"
 #: A `/cranedata` sample further than this from a state stamp is not that state's.
@@ -238,6 +242,7 @@ def solve_timing(bag):
         fallback=float(np.mean(fallback)),
         slack=float(np.mean(slack)),
         fault=int(np.sum(fault != FAULT_NONE)),
+        stalled=int(np.sum(fault == FAULT_PLAN_STALLED)),
     )
     lines = [
         "2 SOLVE TIMING",
@@ -257,7 +262,9 @@ def solve_timing(bag):
             f"{OUTCOME.get(code, code)} {int(np.sum(outcome == code))}"
             for code in sorted(set(outcome.tolist()))
         ),
-        f"  FAULT_SOLVER on {stats['fault']} of {len(rows)} reports",
+        f"  a fault on {stats['fault']} of {len(rows)} reports, of which "
+        f"{stats['stalled']} are FAULT_PLAN_STALLED (a converged, on-time plan "
+        "that stopped advancing) and the rest FAULT_SOLVER",
         "  every share above is of the *published* reports, which "
         "`reports.health_is_due` thins",
         "  by `solver_health_decimation` and then exempts a changed verdict from "
@@ -784,8 +791,8 @@ def checklist(timing, rate, suspect, shadow, scored, jtc_rate):
             timing["slack"] == 0.0,
         )
         check(
-            "`FAULT_SOLVER` reports",
-            str(timing["fault"]),
+            "fault reports (`FAULT_SOLVER` + `FAULT_PLAN_STALLED`)",
+            f"{timing['fault']} ({timing['stalled']} stalled)",
             "0",
             timing["fault"] == 0,
         )
