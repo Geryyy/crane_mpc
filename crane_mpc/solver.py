@@ -1093,6 +1093,15 @@ class Ocp:
         # from .18-.71 to .03-.12 -- and costs TCP path error p95 2-118 % in 5 of
         # 6 arms and the endpoint up to 21x, so it did not ship. Whatever
         # replaces this has to keep the path tail, not just the term.
+        #
+        # 271 took the reference out altogether -- `tau_a - h_eff(x_k)` inside
+        # `cost_y_expr`, gravity exact per stage, `yref` zero -- and it is
+        # **worse than either constant**: TCP p95 +155 to +304 %, peak tip sway
+        # up to +794 %, the endpoint x3 to x1080, every one of the six arms, and
+        # `weights.tau_a` buys none of it back anywhere over 1e-7..1e-2. What
+        # this term is load-bearing for is not the inertia it was written for:
+        # priced against a *frozen* load it charges motion away from `x0` on the
+        # luffing/reaching axes, and the whole weight set is tuned around that.
         force_reference = self.static_hold_force(x0)
         measured = x0[cs.X_PLANNED_POSITION : cs.X_PLANNED_POSITION + cs.PLANNED_DOF]
         rate_max = self.progress_rate_max(path)
