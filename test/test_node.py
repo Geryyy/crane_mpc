@@ -229,9 +229,9 @@ def test_the_two_status_streams_are_stamped_with_the_cycle_they_share(node):
 
 def test_a_cycle_with_no_split_zeroes_both_halves_of_the_cost_panel(node):
     """
-    One panel plots `health.cost_term` beside `~/cost_terms`, so the twelve rows have
+    One panel plots `health.cost_term` beside `~/cost_terms`, so the eleven rows have
     to drop together. `cost_term` is a fixed `float64[8]` and goes out as zeros when
-    there is no solution to split; four rows holding their last line beside eight
+    there is no solution to split; three rows holding their last line beside eight
     zeros would read as a cost rebalance on a cycle that never solved.
     """
     configured(node)
@@ -247,7 +247,7 @@ def test_a_cycle_with_no_split_zeroes_both_halves_of_the_cost_panel(node):
         node.published["_health_publisher"]
     )
     assert list(health.cost_term) == [0.0] * 8
-    assert [float(entry.value) for entry in message.status[0].values] == [0.0] * 4
+    assert [float(entry.value) for entry in message.status[0].values] == [0.0] * 3
     assert message.header.stamp == health.header.stamp
 
 
@@ -610,13 +610,12 @@ class Stalled:
 
 def test_a_stall_names_the_cost_rows_solver_health_cannot_carry():
     """
-    Issue 269: a stall with no constraint bound is a cost trade, and the three
-    terms that say which way it went are the ones `cost_term`'s eight omit.
+    Issue 269: a stall with no constraint bound is a cost trade, and the terms
+    that say which way it went are the ones `cost_term`'s eight omit.
     """
     terms = SimpleNamespace(
         progress=0.66,
         tool=1.2,
-        lag=0.3,
         q_u=15.6,
         dq_u=46.4,
         tau_a=139.2,
@@ -626,7 +625,7 @@ def test_a_stall_names_the_cost_rows_solver_health_cannot_carry():
     one = Stalled(terms)
     text = MpcNode.say_stalled(one, "converged", False, SOLVED)
     assert "the plan is stalled" in text
-    for named in ("progress 0.66", "tool 1.2", "lag 0.3", "effort 139.2"):
+    for named in ("progress 0.66", "tool 1.2", "effort 139.2"):
         assert named in text, named
     assert one.errors and one.errors[0].startswith(text)
 

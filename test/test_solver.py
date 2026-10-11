@@ -22,6 +22,7 @@ from crane_mpc.solver import (
     move_suppression,
     predictor_label,
     slack_prices,
+    stage_reference,
     weight_matrices,
 )
 
@@ -73,6 +74,17 @@ def hold_state(ocp):
 @pytest.fixture
 def state(ocp):
     return hold_state(ocp)
+
+
+def gravity_hold_force(ocp, x):
+    """`h_g` at a state's pose: `h_eff` with the velocity rows left at zero."""
+    pose = np.zeros(ocp.nx)
+    for row, width in (
+        (cs.X_PLANNED_POSITION, PLANNED),
+        (cs.X_PASSIVE_POSITION, cs.PASSIVE_DOF),
+    ):
+        pose[row : row + width] = x[row : row + width]
+    return ocp.static_hold_force(pose)
 
 
 def horizon_holding(ocp, position):
@@ -148,6 +160,37 @@ def test_a_path_with_no_time_law_is_priced_at_the_mean_pace_exactly():
             path.progress_at(elapsed),
             np.minimum(1.0, 0.25 + elapsed * 0.1),
         )
+
+
+def test_the_rate_row_is_priced_against_the_plans_pace_and_not_against_standing():
+    """
+    Issue 276: a `v_s` reference of 0 is a cost that prefers a standing plan.
+
+    That is what 269's loaded lift was -- nothing bound while `s` stood, the
+    rate row charged for moving, and the `s` row could not win it back because
+    its residual is pinned to 0 at stage 0. Both ends matter: the reference is
+    the plan's own pace where the path runs, and 0 past its end, where a
+    surviving demand would price motion away from the goal.
+    """
+    step = 0.5
+    path, _, _ = resting_path(duration=10.0)
+    pace = path.pace_at(np.array([0.0, 5.0]), step)
+    # The law rests at the start and is fastest at the half-way point.
+    assert pace[0] < path.nominal_rate
+    assert pace[1] == pytest.approx(LAW_PEAK_OVER_MEAN * path.nominal_rate, rel=0.02)
+    assert path.pace_at(2.0 * 10.0, step) == pytest.approx(0.0)
+
+    # The mean ramp has no shape, so its pace is the mean until the path ends.
+    plain = PathCycle(np.zeros((problem.PATH_POINTS, PLANNED)), 0.0, 0.1, None)
+    assert plain.pace_at(np.arange(3) * step, step) == pytest.approx(0.1)
+    assert plain.pace_at(10.0, step) == pytest.approx(0.0)
+
+    # And it is what lands in the residual's reference, for stage and terminal.
+    for terminal in (False, True):
+        reference = stage_reference(
+            np.zeros(cs.PASSIVE_DOF), np.zeros(PLANNED), terminal, 0.3, 0.07
+        )
+        assert reference[problem.Y_PROGRESS_RATE] == pytest.approx(0.07)
 
 
 def test_a_time_law_that_does_not_advance_is_refused():
@@ -327,10 +370,58 @@ def test_the_effort_term_is_scored_against_the_reference_that_was_written(ocp, s
     tau = solution.states[
         : ocp.intervals, cs.X_ACTUATED_FORCE : cs.X_ACTUATED_FORCE + PLANNED
     ]
+    # The row is `tau_a - h_g(q_k)`, so the reference it is scored against is
+    # what `yref` carries *on top of* the stage's own gravity.
+    gravity = np.array(
+        [
+            gravity_hold_force(ocp, solution.states[stage])
+            for stage in range(ocp.intervals)
+        ]
+    )
     weight = np.diag(weight_matrices(ocp.parameters)[0])[force]
-    paid = float(np.sum(0.5 * weight * (tau - charged) ** 2))
+    paid = float(np.sum(0.5 * weight * (tau - gravity - charged) ** 2))
     assert paid > 0.0
     assert ocp.cost_terms(solution, q_eq).tau_a == pytest.approx(paid, rel=1e-9)
+
+
+def test_the_effort_row_prices_the_pose_s_own_gravity_at_the_stage(ocp, state):
+    """
+    `tau_a - h_g(q_k)` is zero at *any* static hold, not only at `x0`.
+
+    The check has to be taken away from `x0` to mean anything: there the retired
+    frozen reference `h_eff(x0)` was right by construction (265's stage-0 zero),
+    so 0.4 rad of boom is the whole content of the first assert.
+
+    Moving, the row keeps `h_eff`'s velocity terms -- damping, Coulomb,
+    Coriolis -- which is what makes it neither 271's `tau_a - h_eff(x_k)` (pure
+    `M q_ddot`, measured worse on every arm) nor 275's pose regulariser.
+    """
+    position = state[cs.X_PLANNED_POSITION : cs.X_PLANNED_POSITION + PLANNED]
+    q_eq = state[cs.X_PASSIVE_POSITION : cs.X_PASSIVE_POSITION + cs.PASSIVE_DOF]
+    solved(ocp, state, horizon_holding(ocp, position), q_eq)
+    parameter = ocp._last_parameter
+    force = slice(problem.Y_ACTUATED_FORCE, problem.Y_ACTUATED_FORCE + PLANNED)
+    no_input = np.zeros(cs.NU_PROGRESS)
+
+    def row(x):
+        value = np.asarray(ocp._residual(ocp._to_qp(x), no_input, parameter))
+        return value.reshape(-1)[force]
+
+    held = state.copy()
+    held[cs.X_PLANNED_POSITION + 1] += 0.4
+    held[cs.X_ACTUATED_FORCE : cs.X_ACTUATED_FORCE + PLANNED] = gravity_hold_force(
+        ocp, held
+    )
+    assert row(held) == pytest.approx(np.zeros(PLANNED), abs=1e-6)
+
+    moving = held.copy()
+    moving[cs.X_PLANNED_VELOCITY + 1] = 0.05
+    moving[cs.X_ACTUATED_FORCE : cs.X_ACTUATED_FORCE + PLANNED] = ocp.static_hold_force(
+        moving
+    )
+    velocity_terms = ocp.static_hold_force(moving) - gravity_hold_force(ocp, moving)
+    assert np.max(np.abs(velocity_terms)) > 1.0
+    assert row(moving) == pytest.approx(velocity_terms, abs=1e-6)
 
 
 def test_the_warm_start_is_the_last_solution_unshifted(ocp, state):

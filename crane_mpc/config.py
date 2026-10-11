@@ -73,7 +73,6 @@ WEIGHTS = (
     "tau_a",
     "u",
     "du",
-    "lag",
     "tcp",
     "progress",
     "progress_rate",
@@ -248,7 +247,7 @@ def check_settings(parameters: dict, hydraulics: dict) -> None:
     _refuse(
         _offender(
             weights,
-            ("q_a", "dq_a", "q_u", "dq_u", "tau_a", "u", "du", "lag", "progress_accel"),
+            ("q_a", "dq_a", "q_u", "dq_u", "tau_a", "u", "du", "progress_accel"),
             _non_negative,
         ),
         "every weight of `mpc` §2 must be finite and non-negative: the Gauss-Newton "

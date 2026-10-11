@@ -215,15 +215,22 @@ crane_mpc:
       u: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
       # C4's rate cost: 0.1 kicks, 3 is no better.
       du: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
-      # Marc's ratio against q_a's 4.0, deliberately left where it was when q_a
-      # rose -- that is what was measured.
-      lag: 40.0
       # With the TCP row priced at 1000 the pull to the end of the path has to
       # rise with it: arrival keeps improving to 20480 at flat path error, and
       # the cost is ~1% refused cycles.
       tcp: 1000.0
       progress: 20480.0
-      progress_rate: 0.1
+      # Priced against the plan's own pace since 276, not against 0 -- a `yref` of
+      # 0 is a cost that prefers standing still, which is what 269's stall was.
+      # The row only bites where `v_s` is 0 and the reference is not, i.e. at a
+      # stall: offline `v_s` already tracks the pace, so every weight here is one
+      # table row on the gate columns but for peak tip sway, which rises with it
+      # (+4 % at 300, +9 % at 1e3, +16 % at 3e3, +25 % at 1e4 -- and the final
+      # error improves the same way, 3.07x today down to 1.82x).
+      # 1e3 is the lowest weight that clears 269's loaded lift outright: live,
+      # the stall runs 34 cycles/3.95 s at 0.1, 15/1.67 s at 100, 4/0.35 s at 300
+      # and none at 1e3, arriving in 18.4 s against 23.3 s at 0.1 (15 s nominal).
+      progress_rate: 1000.0
       progress_accel: 0.01
       # Scales the whole terminal prefix, progress row included -- which is what
       # makes the machine arrive; scaling the tracking rows alone measured far

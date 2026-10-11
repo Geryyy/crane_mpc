@@ -216,19 +216,18 @@ PATH_KNOTS = bspline.knot_vector(PATH_POINTS)
 # --- the residual blocks -------------------------------------------------------
 #
 # Terminal residual is the leading prefix of the stage one, sharing offsets.
-# Lag/progress rows sit inside that prefix; effort/smoothness (need an input)
+# Tool/progress rows sit inside that prefix; effort/smoothness (need an input)
 # come after.
 Y_PLANNED_POSITION = 0
 Y_PLANNED_VELOCITY = cs.PLANNED_DOF
 Y_PASSIVE_POSITION = 2 * cs.PLANNED_DOF
 Y_PASSIVE_VELOCITY = Y_PASSIVE_POSITION + cs.PASSIVE_DOF
-Y_LAG = Y_PASSIVE_VELOCITY + cs.PASSIVE_DOF
 #: Where the tool is against where the path says it should be, in metres. The
 #: target is a centimetre at the tool and every other tracking row is in joint
 #: space, where the same error is worth 2174 to 11905 mm depending on the pose
 #: -- a factor of 5.5 that no per-axis weight can absorb, which is why sweeping
 #: them is inert. Three rows, position only; orientation is a second metric.
-Y_TOOL = Y_LAG + 1
+Y_TOOL = Y_PASSIVE_VELOCITY + cs.PASSIVE_DOF
 Y_PROGRESS = Y_TOOL + 3
 Y_PROGRESS_RATE = Y_PROGRESS + 1
 NY_TERMINAL = Y_PROGRESS_RATE + 1
@@ -257,13 +256,6 @@ def boxed_state_rows(parameters: dict) -> np.ndarray:
         rows = np.concatenate([rows, np.arange(cs.X_COMMAND, cs.NX_COMMAND)])
     return rows
 
-
-# Axis the lag row is written on: Marc's slewing joint alone
-# (`timber_crane_cost_js_pfc_pt2.cpp:62-74`), not generalised across axes --
-# the five planned coords mix four radians and one metre, so a unit tangent
-# has no fixed conversion. Slewing is slowest, drives the pendulum laterally,
-# and is the axis the progress variable buys time for.
-LAG_AXIS = 0
 
 # `s = 1`: the end of the path, which is what the progress row is priced
 # against now that the progress state is the path parameter. It was the rate's
@@ -449,9 +441,14 @@ def build_ocp(description_xml: str, parameters: dict, hydraulics: dict) -> tuple
 
     # --- the cost, as a nonlinear least-squares residual -----------------------
     #
-    # Row order: tracking, sway, lag/tool/progress, effort, smoothness. `yref`
-    # carries `q_eq`, `min(1, s_ref)` and `h_eff`; every other row is zero,
-    # because the rows that need a reference carry it inside themselves.
+    # Row order: tracking, sway, tool/progress, effort, smoothness. `yref`
+    # carries `q_eq`, `min(1, s_ref)` and the plan's own pace; every other row
+    # is zero, because the rows that need a reference carry it inside themselves.
+    #
+    # Issue 276 took the lag row out: ablated on 267's six arms it moves no gate
+    # column at all (every quality number within 0.5 %, the final error within
+    # 2 %), which 248 §11 had already found and the shipped weight of 40 was
+    # priced for a row whose term ran 0.15-6.9 against a cost of order 1e3.
     #
     # Effort rows are `tau_a`, not `u`: pricing acceleration carries the
     # effective inertia, so the optimizer is gentler extended/loaded -- why
@@ -478,23 +475,30 @@ def build_ocp(description_xml: str, parameters: dict, hydraulics: dict) -> tuple
     at_path = model.tool_position(canonical)
     tool = at_machine - at_path
     #
-    # Lag row (`timber_crane_cost_js_pfc_pt2.cpp:62-74`): tracking error
-    # projected on reference direction of travel, slewing axis only,
-    # unnormalised -- weight absorbs scale.
-    lag = tracking[LAG_AXIS] * tangent[LAG_AXIS]
+    # Effort row: the force state against the pose's own weight, at the stage's
+    # own `q_a`/`q_u`. `h_g` is `h_eff` with the velocities substituted out, i.e.
+    # pinocchio's generalized gravity -- so what is left in the residual is
+    # `M q_ddot + C q_dot + damping q_dot` (+ Coulomb), which is what the row was
+    # written to price. `yref`'s force rows are zero and the reference follows the
+    # plan instead of freezing at `x0`.
+    gravity = ca.substitute(
+        model.h_eff,
+        ca.vertcat(dq_a, dq_u),
+        ca.SX.zeros(cs.PLANNED_DOF + cs.PASSIVE_DOF),
+    )
     #
     # Progress row: `s` against `min(1, s_ref)` -- where to end up, not when to
-    # be there. `v_s` is a separate row and its `yref` stays zero.
+    # be there. `v_s` is a separate row, priced against the plan's own pace
+    # since 276; its `yref` was zero, i.e. a cost that preferred standing.
     residual = ca.vertcat(
         tracking,
         dq_a - tangent * progress_rate,
         q_u,
         dq_u,
-        lag,
         tool,
         s,
         progress_rate,
-        tau_a[: cs.PLANNED_DOF],
+        tau_a[: cs.PLANNED_DOF] - gravity,
         u,
     )
     if c4:

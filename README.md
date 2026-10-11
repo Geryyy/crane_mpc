@@ -78,22 +78,33 @@ explicit step diverges in three samples.
 Stage and terminal costs use nonlinear least squares and a Gauss–Newton Hessian.
 The stage residual is
 
-    [q_a, dq_a, q_u, dq_u, lag, tool, s, v_s, tau_a, u]
+    [q_a, dq_a, q_u, dq_u, tool, s, v_s, tau_a, u]
 
-against `[0, 0, q_eq, 0, 0, 0, min(1, s_ref), 0, h_eff, 0]`, with the command
-state `c` appended under C4 (which is what ships). The tracking, `dq_a`, `lag`
-and `tool` rows carry their reference **inside** the residual, because it is
-evaluated at the decision variable `s` and `yref` is subtracted as a constant;
-everything else is `yref`. `lag` is issue 119's row — the tracking error
-projected on the reference's direction of travel, on the slewing axis alone.
+against `[0, 0, q_eq, 0, 0, min(1, s_ref), ds/dt|_plan, 0, 0]`, with the command
+state `c` appended under C4 (which is what ships). The tracking, `dq_a`, `tool`
+and effort rows carry their reference **inside** the residual, because it is
+evaluated at the decision variable `s` (and, for effort, at the stage's own
+pose) and `yref` is subtracted as a constant; everything else is `yref`.
+Issue 119's `lag` row — the tracking error projected on the reference's
+direction of travel, slewing axis only — came out in issue 276: ablated on six
+offline arms it moved no gate column at all.
 `tool` is the same tracking error read in metres at the tool, three rows,
 position only, because a centimetre at the tool is worth 2174 to 11905 mm of
 joint error depending on the pose. **The row priced toward one is `s`, not
 `v_s`**: the cost stopped saying when to be somewhere and started saying where
-to end up, so the progress *rate*'s `yref` stays at zero. In particular,
+to end up. `v_s` is priced against the plan's own `ds/dt` across that stage's
+interval, zero past the path's end; it was priced against zero until issue 276,
+which made the cost prefer a standing plan and was issue 269's stall — the `s`
+row cannot win that back, because its residual is pinned to 0 at stage 0 and so
+cannot grow with the lag. In particular,
 effort prices `tau_a`, not acceleration, so effective inertia affects how hard
-the optimizer pushes, and it prices it against `h_eff` and not zero (issue 117),
-so holding the machine's own weight is free. Sway offset and sway rate are
+the optimizer pushes, and it prices it against the pose's own gravity
+`h_g(q_k)` and not zero (issues 117, 276), so holding the machine's own weight
+is free *at every stage* and what the row charges is
+`M q_ddot + C q_dot + damping q_dot`. Until 276 the reference was `h_eff(x0)`
+frozen for the whole horizon, i.e. a constant, and 85–99 % of what the row
+charged was the machine's weight moving away from `x0` (issue 265).
+Sway offset and sway rate are
 independent terms, and **only the rate is priced** — see below. The terminal cost
 omits the effort and input blocks and raises the remaining weights by
 `terminal_scale`; it is a cost, not a hard terminal set.

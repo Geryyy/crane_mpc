@@ -354,12 +354,11 @@ def test_the_cost_rows_solver_health_cannot_carry_go_out_under_plottable_names()
     while `hardware_id` is empty -- a non-empty one (as `shadow_comparison` sets)
     renames every series and silently breaks the cost panel's layout.
     """
-    terms = CostTerms(lag=1.0, tool=2.0, progress=3.0, du=4.0, q_a=5.0)
+    terms = CostTerms(tool=2.0, progress=3.0, du=4.0, q_a=5.0)
     status = reports.cost_terms(terms, Time().to_msg()).status[0]
 
     assert (status.name, status.hardware_id) == ("cost", "")
     assert {entry.key: float(entry.value) for entry in status.values} == {
-        "lag": 1.0,
         "tool": 2.0,
         "progress": 3.0,
         "du": 4.0,

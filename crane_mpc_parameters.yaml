@@ -204,14 +204,6 @@ crane_mpc:
       validation:
         fixed_size<>: [6]
         lower_element_bounds<>: [0.0]
-    lag:
-      type: double
-      read_only: true
-      description: "w_lag -- tracking error projected on the reference's direction of travel,
-        **slewing joint only** and **unnormalised**, so it absorbs the reference speed's
-        scale. Marc's `weights.weight_lag` reproduced, not generalised to mixed units."
-      validation:
-        gt_eq<>: [0.0]
     tcp:
       type: double
       read_only: true

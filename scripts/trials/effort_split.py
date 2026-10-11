@@ -1,30 +1,30 @@
 #!/usr/bin/env python3
 """
-Issues 265 / 267: what the effort term prices, and what each `h_bar` does.
+Issue 276: the gate columns of one cost, per offline arm.
 
-`yref`'s force rows are `h_eff(x0)` held for the whole 4.68 s horizon
-(`solver.Ocp._write_problem`), so a stage that luffs or reaches away from `x0`
-carries the *gravity change* as "effort" -- 85-99 % of the term (265). This
-splits the term per stage and A/Bs every candidate reference against it without
-shipping one; 267 measured four of them and shipped none:
+What the effort row is since 276 is `tau_a - h_g(q_k)`, gravity at the stage's
+own pose, symbolic in `cost_y_expr` with `yref`'s force rows zero. The four
+`--reference` arms 265/267 drove this file with are **gone**: they wrote a
+constant into rows that now subtract gravity themselves, so an arm would price
+`tau - h_g(q_k) - h_bar` and mean nothing (271's note, made good).
 
-    ./scripts/trials/effort_split.py --report build/267_shipped.json
-    ./scripts/trials/effort_split.py --reference guess --report build/267_guess.json
+    ./scripts/trials/effort_split.py --goal out --payload-mass 800 \
+        --plant-payload 800 --report build/276_ship_out_800.json
 
-Every arm calls `wire_chain.main` -- the node's own `Cycle` through the wire --
-under monkeypatches and no edit to the package. Every `wire_chain` flag passes
-through, so `--payload-mass 800 --plant-payload 800` is the loaded arm.
+Calls `wire_chain.main` -- the node's own `Cycle` through the wire -- under
+monkeypatches and no edit to the package. Every `wire_chain` flag passes
+through, so `--payload-mass 800 --plant-payload 800` is the loaded arm and
+`--set weights.<key>=<value>` is the ablation lever (a row at weight 0 is a row
+removed, Gauss-Newton: no cost, no gradient, no curvature).
 
-* a wrapper on `Ocp.cost_terms` records, per scored cycle and stage, `tau_a`, `h(x0)`,
-  `h(q_k)` at the stage's own solved pose and `h(q_ref,k)` at the path point.
-  The residual then splits as `tau - h(x0) = (h(q_k) - h(x0)) + (tau - h(q_k))`
-  -- gravity drift plus what inertia and damping actually cost.
-* `--reference` rewrites `yref`'s force rows after `_write_problem` to one of
-  `ARMS`; `shipped` patches nothing.
+A wrapper on `Ocp.cost_terms` records, per scored cycle and stage, `tau_a`,
+`h_eff(x0)`, `h_eff(x_k)` and `h(q_ref,k)`; one on `Cycle.step` records
+`tcp_path_error` and the stall watch's verdict. The `drift_*`/`*_of_square`
+keys decompose what the **retired** frozen row would have charged on these
+trajectories (265's question); `effort_*` and `term_mean` are what this cost
+actually paid.
 
-`--split` dumps the per-stage arrays as npz. The effort number reported is the
-one the cycle paid in every arm -- since 267 `cost_terms` reads its reference
-off `_written["yref"]` rather than rebuilding a frozen one off `states[0]`.
+`--split` dumps the per-stage arrays as npz.
 """
 
 import argparse
@@ -73,96 +73,9 @@ def per_stage_reference(ocp: Ocp, path, q_eq) -> np.ndarray:
 
 
 def frozen_reference(ocp: Ocp, path, q_eq) -> np.ndarray:
-    """`h_eff(x0)` for every stage: what ships, and what a cold cycle keeps."""
+    """`h_eff(x0)` for every stage: the row 276 retired, as a yardstick."""
     frozen = ocp.static_hold_force(ocp._written["x0"])
     return np.repeat(frozen[None], ocp.intervals, axis=0)
-
-
-def path_origin_reference(ocp: Ocp, path, q_eq) -> np.ndarray:
-    """
-    `h(q_ref,0)` for every stage: the path point at this cycle's own origin.
-
-    265's third arm. Frozen like `shipped` but at the plan's pose rather than
-    the measured one and at rest, so it separates a *level* effect from the
-    per-stage *shape* effect -- if this alone moves pace and sway, the shape is
-    not what did it.
-    """
-    pose = path_poses(ocp, path)[0]
-    frozen = hold_force(ocp, pose, stage_equilibrium(q_eq, 0))
-    return np.repeat(frozen[None], ocp.intervals, axis=0)
-
-
-def guess_reference(ocp: Ocp, path, q_eq) -> np.ndarray:
-    """
-    267's candidate: `h_eff(guess.states[k])`, the stage's *predicted* state.
-
-    The guess is the last solution unshifted (`Ocp.carried`), so stage k's
-    reference is the state that stage was last planned to be in -- no new state
-    and no extra solve. Stage 0 keeps `h_eff(x0)`: it is pinned there, so its
-    residual is inertia alone by construction. A cold cycle has no prediction
-    and keeps the frozen reference. The whole state, not the pose alone:
-    `h_eff` carries velocity terms (`--reference guess-pose` is that arm).
-
-    `_written["guess"]` is the *seeded* iterate, so `states[0]` is already `x0`
-    and `states[1:]` were clipped into the stage boxes. An in-solver version
-    reads the caller's raw guess instead; measured over 346 cycles the two agree
-    (267: four arms bit-identical, two to 1e-10), because the clip only bites
-    where the carried solution left a soft box.
-    """
-    written = ocp._written
-    if not written["warm"]:
-        return frozen_reference(ocp, path, q_eq)
-    states = written["guess"].states
-    reference = np.array(
-        [ocp.static_hold_force(states[stage]) for stage in range(ocp.intervals)]
-    )
-    # A no-op on the seeded iterate, and not one on a raw guess: kept so the arm
-    # means the same thing either way.
-    reference[0] = ocp.static_hold_force(written["x0"])
-    return reference
-
-
-def guess_pose_reference(ocp: Ocp, path, q_eq) -> np.ndarray:
-    """Take the guess' *pose* at rest instead: the velocity terms stay in the residual."""
-    written = ocp._written
-    if not written["warm"]:
-        return frozen_reference(ocp, path, q_eq)
-    states = written["guess"].states
-    reference = np.array(
-        [
-            hold_force(ocp, states[stage][Q_A], states[stage][Q_U])
-            for stage in range(ocp.intervals)
-        ]
-    )
-    reference[0] = ocp.static_hold_force(written["x0"])
-    return reference
-
-
-#: The arms `--reference` can put in `yref`'s force rows. `shipped` patches
-#: nothing: `h_eff(x0)` held for the whole horizon, which is what 265 measured
-#: and what 267 left in place.
-ARMS = {
-    "shipped": None,
-    "path-origin": path_origin_reference,
-    "path-point": per_stage_reference,
-    "guess": guess_reference,
-    "guess-pose": guess_pose_reference,
-}
-
-
-def install_reference(arm) -> None:
-    """Rewrite `yref`'s force rows to this arm's once the cycle is written."""
-    original = Ocp._write_problem
-
-    def _write_problem(self, x0, path, q_eq, guess, in_flight=None):
-        warm = original(self, x0, path, q_eq, guess, in_flight)
-        reference = self._written["yref"]
-        reference[: self.intervals, FORCE] = arm(self, path, q_eq)
-        for stage in range(self.intervals):
-            self.solver.cost_set(stage, "yref", reference[stage])
-        return warm
-
-    Ocp._write_problem = _write_problem
 
 
 def install_recorder(log: list) -> None:
@@ -177,8 +90,14 @@ def install_recorder(log: list) -> None:
     Ocp.cost_terms = cost_terms
 
 
-def install_tcp_error(log: list, model) -> None:
-    """`reports.tcp_path_error` per cycle: the metric the node publishes."""
+def install_tcp_error(log: list, stalled: list, model) -> None:
+    """
+    Record, per cycle, `reports.tcp_path_error` and the stall watch's own verdict.
+
+    `progress_stalled` is the flag 269's loaded lift fires -- the plan standing
+    still for `max_stall_time` with no constraint binding -- read off the node's
+    own `Cycle`, so an offline arm answers the same question the live one does.
+    """
     original = cy.Cycle.step
 
     def step(self, *args, **kwargs):
@@ -186,6 +105,7 @@ def install_tcp_error(log: list, model) -> None:
         error, _ = reports.tcp_path_error(self, model)
         if error is not None:
             log.append(float(error))
+        stalled.append(bool(self.progress_stalled))
         return outcome
 
     cy.Cycle.step = step
@@ -212,13 +132,13 @@ def split(ocp: Ocp, solution, q_eq, terms) -> dict:
         "written": written,
         "weight": weight,
         # As `cost_terms` reports it: since 267 it reads the effort reference
-        # back off `_written["yref"]`, so `tau_a` is the cost that was paid in
-        # every arm and the recomputation this used to carry is gone.
+        # back off `_written["yref"]` (zero since 276), so `tau_a` is the cost
+        # the cycle paid.
         "terms": dataclasses.asdict(terms),
     }
 
 
-def summarise(log: list, tcp: list, scores: dict) -> dict:
+def summarise(log: list, tcp: list, stalled: list, scores: dict) -> dict:
     """Reduce the log to the two numbers the issue asks for, and the A/B columns."""
     if not log:
         return {}
@@ -227,14 +147,13 @@ def summarise(log: list, tcp: list, scores: dict) -> dict:
     frozen = np.concatenate([row["frozen"] for row in log])
     solved = np.concatenate([row["solved"] for row in log])
     path = np.concatenate([row["path"] for row in log])
-    # `tau - h(x0) = drift + inertial`, so the shipped square is
-    # `drift^2 + 2 drift inertial + inertial^2` and the three shares say how
-    # much of the term a reference that tracked the pose would not have charged.
+    # `tau - h(x0) = drift + inertial`, so the retired frozen row's square is
+    # `drift^2 + 2 drift inertial + inertial^2` and the three shares are 265's
+    # question: how much of it a reference tracking the pose would not charge.
     #
-    # `frozen` is `h_eff(x0)` whatever `--reference` wrote, so every `drift_*`,
-    # `*_share_of_square` and `effort_vs_*` key below decomposes the **shipped**
-    # term -- in another arm they are a counterfactual on that arm's
-    # trajectories. The A/B columns (`effort_*`, `term_mean`) are the arm's own.
+    # Every `drift_*`, `*_share_of_square` and `effort_vs_*` key below is that
+    # **retired** row decomposed on this run's trajectories -- a counterfactual
+    # since 276. `effort_*` and `term_mean` are what this cost paid.
     drift = solved - frozen
     inertial = tau - solved
     total = float(np.sum(0.5 * weight * (drift + inertial) ** 2))
@@ -274,6 +193,8 @@ def summarise(log: list, tcp: list, scores: dict) -> dict:
             for name in log[0]["terms"]
         },
         "tcp_path_error_m": (np.percentile(tcp, [50, 95, 100]).tolist() if tcp else []),
+        # Share of stepped cycles the stall watch called stalled (269).
+        "stalled_share": float(np.mean(stalled)) if stalled else 0.0,
         # Straight off `wire_chain`, so the A/B reads one json per arm.
         "sway_peak": scores.get("sway_peak"),
         "sway_rate_after_2s": scores.get("sway_rate_after_2s"),
@@ -291,7 +212,6 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser(
         description=__doc__.splitlines()[1], add_help=False
     )
-    parser.add_argument("--reference", choices=sorted(ARMS), default="shipped")
     parser.add_argument(
         "--cost-decimation",
         type=int,
@@ -306,17 +226,16 @@ def main(argv=None) -> int:
     wire_chain.COST_DECIMATION = mine.cost_decimation
     log: list = []
     tcp: list = []
+    stalled: list = []
     install_recorder(log)
-    install_tcp_error(tcp, CraneModel(harness.description_xml(), Tool(problem.TOOL)))
-    if ARMS[mine.reference] is not None:
-        install_reference(ARMS[mine.reference])
-
+    install_tcp_error(
+        tcp, stalled, CraneModel(harness.description_xml(), Tool(problem.TOOL))
+    )
     scores = Path("build") / "effort_split_scores.json"
     scores.parent.mkdir(parents=True, exist_ok=True)
     status = wire_chain.main([*rest, "--json", str(scores)])
     read = json.loads(scores.read_text()) if scores.exists() else {}
-    summary = summarise(log, tcp, read if isinstance(read, dict) else read[-1])
-    summary["reference"] = mine.reference
+    summary = summarise(log, tcp, stalled, read if isinstance(read, dict) else read[-1])
     summary["wire_chain_status"] = status
     print(json.dumps(summary, indent=1))
     if mine.report:

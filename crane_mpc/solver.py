@@ -201,6 +201,21 @@ class PathCycle:
             reached = np.interp(start + ahead, self._grid(), self.s_profile)
         return np.minimum(problem.PROGRESS_RATE_REFERENCE, reached)
 
+    def pace_at(self, elapsed, step: float) -> np.ndarray:
+        """
+        Give the plan's own `ds/dt` over the `step` that starts at `elapsed`.
+
+        A forward difference of `progress_at`, not a second reading of the law:
+        that is the one place deciding law-or-mean-ramp, and differencing it is
+        what makes the rate row ask for exactly the `s` the position row asks
+        for one interval on. Past the path's end `progress_at` caps, so this
+        falls to zero by itself -- a rate reference that outlived the path
+        would price motion away from the goal at the tracking weight, which is
+        what `progress_ceiling` exists to stop.
+        """
+        ahead = np.asarray(elapsed, dtype=float)
+        return (self.progress_at(ahead + step) - self.progress_at(ahead)) / step
+
     def peak_rate(self) -> float:
         """
         Give the fastest pace the plan asks for, `max ds/dt`; the mean with no law.
@@ -226,7 +241,6 @@ class CostTerms:
     dq_a: float = 0.0
     q_u: float = 0.0
     dq_u: float = 0.0
-    lag: float = 0.0
     #: The three TCP-position rows -- the cm-scale metric, in metres, not joints.
     tool: float = 0.0
     progress: float = 0.0
@@ -260,9 +274,6 @@ def weight_matrices(parameters: dict) -> tuple[np.ndarray, np.ndarray]:
             np.asarray(weights["dq_a"][:planned], dtype=float),
             np.asarray(weights["q_u"][:passive], dtype=float),
             np.asarray(weights["dq_u"][:passive], dtype=float),
-            [
-                float(weights["lag"]),
-            ],
             np.full(3, float(weights["tcp"])),
             [
                 float(weights["progress"]),
@@ -402,12 +413,15 @@ def stage_reference(
     tau_ref: np.ndarray,
     terminal: bool,
     progress: float,
+    pace: float,
     rows: int = problem.NY,
 ) -> np.ndarray:
     """
     Build a stage/terminal residual reference; tracking rows are zero (rides in `p`).
 
-    `tau_ref` is `h_eff`; zeroed, it prices holding own weight and buys droop (issue 117).
+    `tau_ref` rides on top of the force rows' own `h_g(q_k)` (issue 276), so what
+    the node writes is zero and only an offline arm writes anything else --
+    `cost_terms` reads it back, which is what keeps such an arm's cost honest.
 
     `progress` is where on the path this stage is asked to be -- no default, so
     that a caller has to say. robocrane asks for the end of the path at every
@@ -418,6 +432,13 @@ def stage_reference(
     end is in sight, and a pace everywhere else. `Ocp.nominal_progress` is
     that pace. `rows` is the stage residual's width (C4 appends `c`, referenced
     to zero like C3's `u`).
+
+    `pace` is that same plan's `ds/dt` over this stage's own interval, and it
+    is what the rate row is priced against (issue 276). Zero -- every cycle
+    before 276 -- makes the cost prefer `v_s = 0`, so a standing plan pays
+    nothing for standing and the progress pair can only pull through `s`,
+    whose residual is pinned to 0 at stage 0 and so cannot grow with the lag
+    (269 "The cause"). `Ocp.nominal_pace` is the reference.
     """
     reference = np.zeros(problem.NY_TERMINAL if terminal else rows)
     reference[
@@ -426,6 +447,7 @@ def stage_reference(
     reference[problem.Y_PROGRESS] = min(
         float(problem.PROGRESS_RATE_REFERENCE), float(progress)
     )
+    reference[problem.Y_PROGRESS_RATE] = float(pace)
     if not terminal:
         reference[
             problem.Y_ACTUATED_FORCE : problem.Y_ACTUATED_FORCE + cs.PLANNED_DOF
@@ -1025,6 +1047,10 @@ class Ocp:
         """
         return float(path.progress_at(stage * self.Ts))
 
+    def nominal_pace(self, stage: int, path: PathCycle) -> float:
+        """Give the plan's `ds/dt` across this stage's interval: the rate row's reference."""
+        return float(path.pace_at(stage * self.Ts, self.Ts))
+
     def progress_rate_max(self, path: PathCycle) -> float:
         """`v_s`'s ceiling: declared headroom against this path's fastest pace."""
         headroom = float(self.parameters["limits"]["progress_rate_headroom"])
@@ -1119,7 +1145,6 @@ class Ocp:
         # five of six arms). At that weight the row
         # *is* `q_a` with a `dh_g/dq` weighting, and it trades the way the
         # tracking weights do: tighter path, more swing. See the 275 notes.
-        force_reference = self.static_hold_force(x0)
         measured = x0[cs.X_PLANNED_POSITION : cs.X_PLANNED_POSITION + cs.PLANNED_DOF]
         rate_max = self.progress_rate_max(path)
         equilibrium = np.asarray(q_eq, dtype=float)
@@ -1151,10 +1176,12 @@ class Ocp:
         reference[:, passive] = equilibrium
         # `nominal_progress` per stage: where the plan's own pace reaches by then.
         reference[:, problem.Y_PROGRESS] = path.progress_at(elapsed)
-        reference[
-            :intervals,
-            problem.Y_ACTUATED_FORCE : problem.Y_ACTUATED_FORCE + cs.PLANNED_DOF,
-        ] = force_reference
+        # `nominal_pace` per stage: the `ds/dt` the plan itself asks for across
+        # that stage's interval. Zero here -- every cycle before 276 -- is a cost
+        # that prefers standing still (269 "The cause").
+        reference[:, problem.Y_PROGRESS_RATE] = path.pace_at(elapsed, self.Ts)
+        # The force rows stay zero: the effort residual subtracts the stage's own
+        # `h_g(q_k)` symbolically (`problem.py`).
 
         # Kept because `cost_terms` has to score against the path this cycle was
         # written to, not a refit of it.
@@ -1391,10 +1418,10 @@ class Ocp:
                 "no problem has been written, so there is no cost to split"
             )
         terms = CostTerms(slack=solution.slack_penalty)
-        # Read back, not rebuilt. The shipped reference is frozen at `x0` and
-        # stage 0 is pinned there, so this is the same number; an arm that
-        # writes a per-stage one (267, `effort_split.py`) used to be reported a
-        # cost no cycle paid, i.e. the panel's effort row lied (265).
+        # Read back, not rebuilt. The shipped reference is zero since 276 (the
+        # row subtracts its own `h_g(q_k)`), so this is that; an arm that writes
+        # one anyway (`effort_split.py`) used to be reported a cost no cycle
+        # paid, i.e. the panel's effort row lied (265).
         force_reference = self._written["yref"][
             :, problem.Y_ACTUATED_FORCE : problem.Y_ACTUATED_FORCE + cs.PLANNED_DOF
         ]
@@ -1410,7 +1437,8 @@ class Ocp:
                 force_reference[stage],
                 terminal,
                 self.nominal_progress(stage, self._last_path),
-                self._ny,
+                self.nominal_pace(stage, self._last_path),
+                rows=self._ny,
             )
             if terminal:
                 value = np.asarray(
@@ -1440,10 +1468,11 @@ class Ocp:
             terms.dq_a += float(np.sum(row[problem.Y_PLANNED_VELOCITY :][:planned]))
             terms.q_u += float(np.sum(row[problem.Y_PASSIVE_POSITION :][:passive]))
             terms.dq_u += float(np.sum(row[problem.Y_PASSIVE_VELOCITY :][:passive]))
-            terms.lag += float(row[problem.Y_LAG])
             terms.tool += float(np.sum(row[problem.Y_TOOL :][:3]))
-            # Both rows of the pair: the path-following one carries the weight
-            # (8 against 0.1), so reporting the rate alone hid the term.
+            # Both rows of the pair: the `s` row used to carry it alone, so
+            # reporting the rate alone hid the term. Since 276 the rate row is
+            # priced against the plan's pace and is the half that moves at a
+            # stall, so the sum is the only honest single number.
             terms.progress += float(
                 row[problem.Y_PROGRESS] + row[problem.Y_PROGRESS_RATE]
             )

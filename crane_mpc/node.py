@@ -691,8 +691,8 @@ class MpcNode(Node):
         A stall with every soft constraint slack-free is a cost trade and not a
         bound: issue 269's loaded lift reproduced with all four violation rows
         at 0.0, the pump at 0.14 of its limit and the command box at 0.12, so
-        the only thing left to read is the split -- and `progress`, `tool` and
-        `lag` are exactly the three terms `float64[8]` leaves out. That array is
+        the only thing left to read is the split -- and `progress` and `tool`
+        are exactly the terms `float64[8]` leaves out. That array is
         frozen, `message` is the field that exists for saying what happened,
         and the stall edge is the one cycle worth a second split on (1.5 ms).
         """
@@ -704,7 +704,7 @@ class MpcNode(Node):
             return f"; the cost could not be split by term: {error}"
         return (
             f"; what outpriced it: progress {terms.progress:.4g}, tool "
-            f"{terms.tool:.4g}, lag {terms.lag:.4g}, sway {terms.q_u:.4g}, sway "
+            f"{terms.tool:.4g}, sway {terms.q_u:.4g}, sway "
             f"rate {terms.dq_u:.4g}, effort {terms.tau_a:.4g}, tracking "
             f"{terms.q_a:.4g}, terminal {terms.terminal:.4g}"
         )

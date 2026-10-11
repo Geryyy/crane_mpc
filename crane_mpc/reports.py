@@ -230,7 +230,7 @@ def cost_terms(terms, stamp) -> DiagnosticArray:
     """
     Report the cost rows `SolverHealth` cannot carry, beside the eight it can.
 
-    `cost_term` is `float64[8]`, so lag, tool, progress and C4's rate cost went
+    `cost_term` is `float64[8]`, so tool, progress and C4's rate cost go
     unpublished in active mode -- `~/shadow_comparison` has the first three, shadow
     only. Same stamp and same decimation as the health message they belong with, and
     `None` (no solve to split) reports zeros, as `cost_term` does. PlotJuggler names
@@ -242,7 +242,6 @@ def cost_terms(terms, stamp) -> DiagnosticArray:
     status = DiagnosticStatus(name="cost", level=DiagnosticStatus.OK)
     status.message = "the cost rows SolverHealth/cost_term has no slot for"
     status.values = [
-        KeyValue(key="lag", value=_text(terms.lag)),
         KeyValue(key="tool", value=_text(terms.tool)),
         KeyValue(key="progress", value=_text(terms.progress)),
         KeyValue(key="du", value=_text(terms.du)),
@@ -291,7 +290,6 @@ def shadow_comparison(cycle: Cycle, verdict: str, solution, joints, budget, stam
         put("constraint.pump_flow", _text(solution.violation.pump_flow))
         # The cost rows `SolverHealth` has no field for (issue 119 made them interesting).
         if cycle.cost_terms is not None:
-            put("cost.lag", _text(cycle.cost_terms.lag))
             put("cost.tool", _text(cycle.cost_terms.tool))
             put("cost.progress", _text(cycle.cost_terms.progress))
 
