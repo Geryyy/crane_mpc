@@ -207,8 +207,8 @@ intent, where depth would buy staleness rather than samples. A capture cannot se
 any of this: `looptiming.py`'s `starved` is measured on the publish stream and
 read 0 % throughout.
 
-`T_s` and the horizon length have one parameter source. The shipped grid is 60
-knots at 60 ms (59 shooting intervals, 3.54 s from first to last knot). The
+`T_s` and the horizon length have one parameter source. The shipped grid is 40
+knots at 120 ms (39 shooting intervals, 4.68 s from first to last knot). The
 length remains a design value based on a sway period of order two seconds; the
 slowest sway period has never been computed and is not presented as a
 measurement.
