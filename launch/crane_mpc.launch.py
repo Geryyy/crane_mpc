@@ -18,6 +18,7 @@ from launch_ros.substitutions import FindPackageShare
 def generate_launch_description():
     controller_state_topic = LaunchConfiguration("controller_state_topic")
     joint_states_topic = LaunchConfiguration("joint_states_topic")
+    horizon_topic = LaunchConfiguration("horizon_topic")
     mode = LaunchConfiguration("mode")
     start_signal_action = LaunchConfiguration("start_signal_action")
     use_sim_time = LaunchConfiguration("use_sim_time")
@@ -72,6 +73,14 @@ def generate_launch_description():
                     "shadow command is judged against."
                 ),
             ),
+            # Publisher-side remap for a JTC spawned without the subscriber-side one (the
+            # IPC's): /trajectory_controller_a2b/joint_trajectory. Sim keeps the default --
+            # its spawner already remaps the JTC onto /crane/mpc/horizon.
+            DeclareLaunchArgument(
+                "horizon_topic",
+                default_value="/crane/mpc/horizon",
+                description="Where the active horizon is published.",
+            ),
             Node(
                 package="crane_mpc",
                 executable="crane_mpc_node",
@@ -94,6 +103,7 @@ def generate_launch_description():
                 remappings=[
                     ("/joint_states", joint_states_topic),
                     ("/crane/controller_state", controller_state_topic),
+                    ("/crane/mpc/horizon", horizon_topic),
                 ],
                 # acados parallelises shooting nodes via OpenMP; eight threads
                 # cost 1.7x the median of one, p95 27.6 ms vs 30 ms budget.
