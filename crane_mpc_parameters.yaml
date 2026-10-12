@@ -68,6 +68,16 @@ crane_mpc:
       fixed_size<>: [6]
       lower_element_bounds<>: [0.0]
 
+  horizon_publish_s:
+    type: double
+    read_only: true
+    description: "Reach, s, of the active horizon *message*; 0 publishes all of it. The solve
+      keeps the whole horizon. A truncated message keeps the JTC fed between cycles and under
+      Cyclone's 14720 B MaxMessageSize, so one lost UDP fragment no longer drops a horizon;
+      must exceed the JTC's topic_timeout so its watchdog, not the message end, stops it."
+    validation:
+      gt_eq<>: [0.0]
+
   solve_budget:
     type: double
     description: "Budget, s, from the /joint_states sample to the solved horizon -- end to

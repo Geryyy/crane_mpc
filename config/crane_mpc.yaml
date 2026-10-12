@@ -93,8 +93,22 @@ crane_mpc:
     # generalizes Marc's slewing-only velocity feedback to every axis, which
     # carries his noise exposure with it -- dq_a_divergence_max watches for it
     # and reports, a quarter of dq_a_max per axis.
+    # dq_a_feedback: [true, true, true, true, true, true]
+    # Lab 2026-10-12: rotator off -- MPC drove a 0.3 Hz rotator swing (0.43 rad range,
+    # err 0.29 rad) off its noisy measured velocity; bag 2026-10-12_12-20-16-record.
+    # dq_a_feedback: [true, true, true, true, false, true]  # lab step 1
+    # Lab step 2: measured velocity only on slewing (Marc's original); boom/arm/telescope
+    # carried the 1.6 Hz mode into x0. Positions stay measured; divergence_max reports drift.
+    # dq_a_feedback: [true, false, false, false, false, true]  # lab step 2: run 12-51-52 was
+    # confounded by 35 JTC topic-watchdog holds (horizons lost to the IPC), not judged.
+    # Lab step 3: full feedback again (rotator included).
     dq_a_feedback: [true, true, true, true, true, true]
     dq_a_divergence_max: [0.19, 0.06, 0.08, 0.10, 0.53, 0.13]
+
+    # Lab 2026-10-12: the full 81-point horizon is 18.4 kB, above Cyclone's 14720 B, so it
+    # went out fragmented and a lost fragment dropped it: the IPC JTC hit its 0.24 s
+    # topic_timeout 35x in run 12-51-52. 1.2 s is ~21 points, ~4.8 kB.
+    horizon_publish_s: 1.2
 
     # = Ts: the horizon is stamped at the sample and knot 0 sits one Ts into it,
     # behind the in-flight prepend, so Ts is the deadline and not a margin --
@@ -199,7 +213,18 @@ crane_mpc:
       # The fit is **provenance and not a live link**, by design: nothing
       # re-derives these four, so a C3 refit moves the plant and leaves the cost
       # where it is, and whoever refits decides this row again.
-      dq_a: [56.5, 27431.0, 2208.7, 17933.4, 0.1, 0.1]
+      # dq_a: [56.5, 27431.0, 2208.7, 17933.4, 0.1, 0.1]
+      # Lab 2026-10-12: boom/telescope /4 (tol 0.006->0.012 rad/s, 0.0075->0.015 m/s). Live
+      # boom rode a 1.6 Hz mode at 0.009-0.022 rad/s rms, 1.5-3.6 tol: a stiff velocity loop
+      # through 0.24 s of delay. 278: flat 5 % on all axes cost 15x final error (sim).
+      # dq_a: [56.5, 6858.0, 2208.7, 4483.0, 0.1, 0.1]  # lab step 1: improved
+      # Lab step 2: boom/arm/telescope /4 again (tol 0.024 rad/s, 0.043 rad/s, 0.030 m/s =
+      # 10/13/7.5 % of dq_max). Watch arrival: 278 measured flat 10 % at 166x final error (sim).
+      # dq_a: [56.5, 1714.5, 552.2, 1120.8, 0.1, 0.1]  # lab step 2
+      # dq_a: [5.65, 171.45, 55.22, 112.08, 0.01, 0.01]  # lab step 3: smooth moving, but
+      # oscillated at standstill -- on a held axis this row is the only velocity price.
+      # Lab step 4: back to step 2, with dq_a_feedback off on boom/arm/telescope.
+      dq_a: [56.5, 1714.5, 552.2, 1120.8, 0.1, 0.1]
       # tol = 0.0125 rad, 6.25 % of `limits.q_sway_max`. 278 tried 0.02 (10 % of
       # the bound, 2500) and 0.01 (10000) on top of the tool row below and both
       # are worse on peak tip and the late rate, so the sweep's own tolerance
@@ -236,7 +261,14 @@ crane_mpc:
       # at the bottom: 0.10 rad/s against 0.33-0.43 at zero and 0.23-0.33 at the
       # binding bound. Pricing sway harder buys command ripple at the mode's own
       # frequency and the plant rides it. `horizon_length` is what moved it.
-      q_u: [6400.0, 6400.0]
+      # q_u: [6400.0, 6400.0]
+      # Lab 2026-10-12: tol 0.0125->0.05 rad. Live tip/tilt sit +0.034/-0.010 rad off
+      # passive_equilibrium at standstill (calibration, before any MPC); priced at 6400 it
+      # was 26-28 % of hold cost the MPC can only "fix" by accelerating. Fix the zero, then revisit.
+      # q_u: [400.0, 400.0]  # lab step 1
+      # Lab step 2: tol 0.2 rad (= limits.q_sway_max, which still bounds deflection softly).
+      # Hanging pose is set by gravity, not by u; only accelerating moves it.
+      q_u: [25.0, 25.0]
       # tol = 0.03125 rad/s, 1.6x `sway.dq_u_settled` -- i.e. this row is
       # content a little short of where the tree calls the load settled.
       # Tightening it to the 0.02 itself (2500) is **the single worst tolerance
@@ -274,7 +306,11 @@ crane_mpc:
       # ablated it to zero and the final error went 362x, TCP p50 +143 % and the
       # late sway rate broke on 11 of 16 rows. Its 0.1-0.3 % share measures how
       # little a well-behaved command costs, not how little the row matters.
-      du: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+      # du: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+      # Lab 2026-10-12: x4 (tol 0.5 rad/s^2) on the driven axes. The MPC fed back a
+      # 1.5-1.8 Hz machine mode its model lacks (tip rms 0.03->0.13 rad/s, IMUs
+      # id14-17); the rate cost weighs it ~13x the 0.44 Hz sway. Sim has no such mode.
+      du: [4.0, 4.0, 4.0, 4.0, 4.0, 1.0]
       # tol = 0.025 m at the tool. **1600 from 1000 (0.0316 m) is 278's one
       # weight change**, and the only Bryson tolerance that paid: on its own it
       # takes TCP p95 down on all eight arms (44.6 -> 37.8, 73.2 -> 55.5,
@@ -332,7 +368,10 @@ crane_mpc:
       # 278 ablated the prefix to zero: peak tilt +8 % against +3 % with it and
       # the late tilt rate worse, for a slightly better final error. Its share
       # is ~0 outside the cold-start cycle and it still earns the row.
-      terminal_scale: 60.0
+      # terminal_scale: 60.0
+      # Lab 2026-10-12: 20 ("20 and 60 are one number within noise", sim). Live the terminal
+      # share reached 49 % in a hold (sim: ~0): x60 on an end state predicted from noisy x0.
+      terminal_scale: 20.0
 
     limits:
       # No q_a_lower/q_a_upper/q_a_margin/dq_a_max/u_max here: crane_model owns

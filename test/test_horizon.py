@@ -351,3 +351,22 @@ def test_without_a_lead_the_wire_form_is_unchanged():
     message = horizon_to_message(horizon, CANONICAL, Time(sec=1, nanosec=0))
     assert len(message.points) == len(horizon)
     assert message.points[0].time_from_start == Duration(sec=0, nanosec=0)
+
+
+def test_truncated_keeps_the_head_within_the_reach():
+    from crane_mpc.horizon import truncated
+
+    message = JointTrajectory()
+    for t in np.arange(0.0, 4.8, 0.06):
+        point = JointTrajectoryPoint()
+        point.time_from_start = Duration(
+            sec=int(t), nanosec=int(round((t - int(t)) * 1e9))
+        )
+        message.points.append(point)
+    whole = len(message.points)
+    cut = truncated(message, 1.2)
+    times = [
+        p.time_from_start.sec + 1e-9 * p.time_from_start.nanosec for p in cut.points
+    ]
+    assert 2 <= len(times) < whole and max(times) <= 1.2 + 1e-9 and times[0] == 0.0
+    assert len(truncated(cut, 0.0).points) == len(times)

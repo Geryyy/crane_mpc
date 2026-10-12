@@ -343,6 +343,15 @@ def horizon_to_message(
     return message
 
 
+def truncated(message: JointTrajectory, seconds: float) -> JointTrajectory:
+    """Keep the points within `seconds` of the stamp; 0 keeps all. Never fewer than two."""
+    if seconds <= 0.0:
+        return message
+    kept = [p for p in message.points if duration_seconds(p.time_from_start) <= seconds]
+    message.points = kept if len(kept) >= 2 else list(message.points[:2])
+    return message
+
+
 def _jtc_cubic(t0, t1, p0, v0, p1, v1, t):
     """Interpolate as the JTC does between two points (cubic Hermite)."""
     T, x = t1 - t0, t - t0

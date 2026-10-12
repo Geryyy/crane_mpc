@@ -801,7 +801,9 @@ class MpcNode(Node):
         )
         self.publish_tcp_horizon()
         if self.mode == "active":
-            self._horizon_publisher.publish(message)
+            self._horizon_publisher.publish(
+                hz.truncated(message, float(self._values.horizon_publish_s))
+            )
         else:
             self._shadow_horizon_publisher.publish(message)
             cycle.take_shadow_command()
