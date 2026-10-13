@@ -29,6 +29,6 @@ then withdrawn on that metric. Score on the growth rate instead.
   field `t`). `plotjuggler.py`; layout `wire_chain_pj.xml` (tabs sway, axes, tracking, cost, solver). Cost split every cycle under `--pj`.
 - Joint readings carry the Gazebo description's noise and bias, read off its
   xacro; `--noise-scale 0` is the exact measurement the numbers above were taken on.
-- `--drop P [--topic-timeout S]` — lose a fraction P of horizons on the wire (lab 2026-10-12:
-  ~1.3 of 8.3 Hz arrived, P ≈ 0.84). At the JTC's `topic_timeout` 0.24 s one lost horizon already
+- `--drop P [--topic-timeout S]` — lose a fraction P of horizons on the wire (P = 0.84: ~1.3 of
+  8.3 Hz arrive). At the JTC's `topic_timeout` 0.24 s one lost horizon already
   means a hold; at 1.0 s, P = 0.5 matches a lossless run.

@@ -72,17 +72,17 @@ from plotjuggler import PORT, PlotJuggler
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 
 ROTATOR = 4
-TOPIC_TIMEOUT = 0.24  # a2b JTC yaml topic_timeout, pzs100 sim
+TOPIC_TIMEOUT = 0.24  # s without a horizon before the JTC holds position
 EPOCH = 1.0  # sim clock origin; zero stamp reads as "start on receipt"
 DIVERGED_SWAY = 1.2  # rad
-SWAY_PERIOD_S = 2.34  # `limits.du_max` is derived from it
-AFTER_ARRIVAL_S = (1.5, 2.5)  # "2 s after arrival" +-0.5 s, ~1/5 sway period
+SWAY_PERIOD_S = 2.34  # s, window of the sway-rate envelope in the decay scores
+AFTER_ARRIVAL_S = (1.5, 2.5)  # s after arrival where "rate at +2 s" is read
 ACTIVE_MARGIN = 0.99  # not equality: QP tolerance, du_max reached by a ramp
 COST_DECIMATION = 10  # each cost split costs N+1 residual evaluations
-RELAXED = 10.0  # --relax-h widening; 1e6 hurts HPIPM conditioning (issue 248)
+RELAXED = 10.0  # --relax-h factor that switches the row off
 PLAN_RGBA = (0.15, 0.85, 0.45, 0.6)
 HORIZON_RGBA = (1.0, 0.45, 0.05, 0.9)
-#: `gz_system_actuators` measurement params, in `Sensor`'s order
+#: per-joint noise and bias params read from the Gazebo description
 NOISE_KEYS = (
     "position_noise_std",
     "position_noise_tau",
@@ -317,7 +317,7 @@ def offset_tau_v(fit, offset):
 
 
 def wire_161(horizon, joints, stamp, lead, in_flight):
-    """Issue 161's encoding: knot i at lead + t_i, in-flight knot at 0, u - dq per knot."""
+    """`--wire 161` encoding: knot i at lead + t_i, in-flight knot at 0, u - dq per knot."""
     message = hz.horizon_to_message(horizon, joints, stamp)
     for point in message.points:
         point.time_from_start = hz.seconds_duration(
@@ -346,7 +346,7 @@ def main(argv=None) -> int:
         "--drop",
         type=float,
         default=0.0,
-        help="fraction of horizons lost on the wire; lab 2026-10-12 got ~1.3 of 8.3 Hz, i.e. 0.84",
+        help="fraction of horizons lost on the wire; 0 = none",
     )
     parser.add_argument(
         "--csv", type=Path, default=None, help="per-cycle log, last move's"
@@ -357,21 +357,18 @@ def main(argv=None) -> int:
         "--cadence-phase",
         type=float,
         default=0.0,
-        help="s; stamp every horizon this far off the measurement, as the "
-        "once-anchored grid did",
+        help="s; stamp every horizon this far off the measurement (regression check)",
     )
     parser.add_argument(
         "--pace",
         type=float,
         default=1.0,
-        help="divide the duration handed to adopt_path, i.e. compress the "
-        "progress reference in time. 1 is the plan's own pace (issue 250)",
+        help="MPC's progress reference runs this much faster than the plan; 1 = plan pace",
     )
     parser.add_argument(
         "--mean-pace",
         action="store_true",
-        help="hand adopt_path no time law, so the progress row is priced "
-        "against the plan's mean pace -- every cycle before issue 253",
+        help="price progress against the plan's mean pace instead of its time law",
     )
     parser.add_argument(
         "--plant-payload", type=float, default=None, help="kg; default --payload-mass"

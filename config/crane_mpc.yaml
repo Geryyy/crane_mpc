@@ -1,58 +1,58 @@
 crane_mpc:
   ros__parameters:
-    mode: shadow
-    start_signal_action: ""  # empty: /crane/reference is the go signal
-    jtc_name: trajectory_controller_a2b
+    mode: shadow  # shadow: compute only; active: drives the crane
+    start_signal_action: ""  # empty: /crane/reference starts the move; else that action's accepted goal
+    jtc_name: trajectory_controller_a2b  # JTC that plays the horizon; its rate must match velocity_loop.yaml
 
-    Ts: 0.12  # = sensor_to_valve_delay, whole velocity_loop ticks
-    horizon_length: 40  # 4.68 s reach, ~1.5 loaded sway periods
+    Ts: 0.12  # s, control cycle and knot spacing; must equal sensor_to_valve_delay
+    horizon_length: 40  # knots; longer sees more of the sway, solves slower
 
-    sensor_to_valve_delay: 0.12  # dead time in predictor; pinned to Ts
-    max_state_age: 0.2
-    levenberg_marquardt: 1.0e-6  # Hessian diag damping; only curvature on force rows
-    command_state: true  # C4; false is C3
-    dq_a_feedback: [true, true, true, true, true, true]  # measured velocity into x0
-    dq_a_divergence_max: [0.19, 0.06, 0.08, 0.10, 0.53, 0.13]  # report only
+    sensor_to_valve_delay: 0.12  # s, dead time the state is predicted over; must equal Ts
+    max_state_age: 0.2  # s, older /joint_states are not solved from
+    levenberg_marquardt: 1.0e-6  # solver regularisation; up = steadier, slower to converge
+    command_state: true  # true: MPC commands the velocity's rate (smooth); false: velocity; recompiles
+    dq_a_feedback: [true, true, true, true, true, true]  # per axis: measured velocity into the prediction; false: model's own
+    dq_a_divergence_max: [0.19, 0.06, 0.08, 0.10, 0.53, 0.13]  # model vs measured velocity gap that gets reported; nothing corrected
 
-    horizon_publish_s: 1.2  # ~21 pts, stays under Cyclone fragment size
-    solve_budget: 0.12  # = Ts, from state stamp
-    solver_health_decimation: 1  # also rate of /crane/sway_settled
-    max_consecutive_failures: 5  # 600 ms fallback
-    max_failing_tick_dumps: 5  # one escalation, ~130 kB each
+    horizon_publish_s: 1.2  # s of horizon sent to the JTC; longer rides out lost messages, bigger message
+    solve_budget: 0.12  # s, state to horizon; over it the previous horizon goes out shifted
+    solver_health_decimation: 1  # solves per solver_health report, also /crane/sway_settled rate
+    max_consecutive_failures: 5  # failed solves before the MPC stops publishing
+    max_failing_tick_dumps: 5  # failed ticks dumped to the ros log dir per run
 
     sway:
-      dq_u_settled: [0.02, 0.02]  # rad/s; still machine 0.0046 RMS
+      dq_u_settled: [0.02, 0.02]  # rad/s, sway rate below which the load counts as settled; no dwell
 
-    weights:  # Bryson w = 1/tol^2
-      q_a: [40.0, 40.0, 40.0, 40.0, 10.0, 10.0]  # posture, tol 0.158
-      dq_a: [56.5, 1714.5, 552.2, 1120.8, 0.1, 0.1]  # dev from plan vel; lab step 2
-      q_u: [25.0, 25.0]  # tol 0.2 rad = q_sway_max (lab)
-      dq_u: [128.0, 128.0]  # tol 0.088 rad/s, wire_chain sweep 2026-10-13
-      u: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]  # curvature on c rows, can't bite
-      du: [64.0, 64.0, 64.0, 64.0, 64.0, 64.0]  # tol 0.125, wire_chain sweep 2026-10-13; lab x4 fought horizon loss
-      tcp: 1600.0  # tol 0.025 m
-      progress: 20480.0  # tol 0.007 of path
-      progress_rate: 300.0  # stall watch vs plan pace
-      progress_accel: 0.01  # inert, tol 5x its bound
-      terminal_scale: 20.0  # lab: 60 dominated hold cost
+    weights:  # axis order slew, boom, arm, telescope, rotator, tool; up = that row matters more
+      q_a: [40.0, 40.0, 40.0, 40.0, 10.0, 10.0]  # joint position vs path point (posture)
+      dq_a: [56.5, 1714.5, 552.2, 1120.8, 0.1, 0.1]  # joint velocity vs plan velocity at the current pace
+      q_u: [25.0, 25.0]  # sway angle vs hanging equilibrium
+      dq_u: [128.0, 128.0]  # sway rate: damping; too high chases sensor noise
+      u: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]  # command magnitude (regulariser)
+      du: [64.0, 64.0, 64.0, 64.0, 64.0, 64.0]  # command rate: smoothness; up = calmer, slower reaction
+      tcp: 1600.0  # TCP distance from the path point, sway excluded
+      progress: 20480.0  # pull along the path; down = the crane lags the plan
+      progress_rate: 300.0  # progress speed vs plan pace; keeps the crane from stalling
+      progress_accel: 0.01  # progress acceleration (regulariser)
+      terminal_scale: 20.0  # end-of-horizon weights over stage weights
 
     limits:
-      q_sway_max: [0.2, 0.2]  # same as crane_planner.yaml, by hand
-      dq_sway_max: [1.0, 0.5]
-      progress_rate_headroom: 1.5  # x peak plan pace
-      progress_accel_max: 2.0
-      du_max: [1.304, 0.408, 0.524, 0.684, 3.628]  # 4x u_max/2.34 s, anti-hunt
+      q_sway_max: [0.2, 0.2]  # rad, sway angle allowed from equilibrium (soft)
+      dq_sway_max: [1.0, 0.5]  # rad/s, sway rate allowed (soft)
+      progress_rate_headroom: 1.5  # x plan peak pace the MPC may run at
+      progress_accel_max: 2.0  # how fast the pace may change
+      du_max: [1.304, 0.408, 0.524, 0.684, 3.628]  # rad/s^2, command rate per axis; down = smoother, slower reaction
 
     slack:
-      q_u: [1.0e3, 1.0e3]  # decade above stage cost
-      dq_u: [1.0e3, 1.0e3]
-      cylinder_force: [1.0e4, 1.0e4, 1.0e4, 1.0e4, 1.0e4, 1.0e4]
-      pump_flow: 1.0e4
+      q_u: [1.0e3, 1.0e3]  # price for exceeding q_sway_max (soft)
+      dq_u: [1.0e3, 1.0e3]  # price for exceeding dq_sway_max (soft)
+      cylinder_force: [1.0e4, 1.0e4, 1.0e4, 1.0e4, 1.0e4, 1.0e4]  # price for exceeding the cylinder force limit (soft)
+      pump_flow: 1.0e4  # price for exceeding the pump flow limit (soft)
 
-    max_reference_age: 20.0  # whole move overrun budget; BT fails move after
-    max_reference_age_loaded: 20.0
+    max_reference_age: 20.0  # s the MPC holds the goal after the plan ends, then goes silent
+    max_reference_age_loaded: 20.0  # same, with a payload set
 
-    min_progress_rate: 0.1  # liveness, wall clock
-    max_stall_time: 2.0  # one horizon without progress
+    min_progress_rate: 0.1  # fraction of plan pace below which the move counts as stalled
+    max_stall_time: 2.0  # s stalled before it is reported; no recovery
 
-    max_clock_skew: 0.08  # 2/3 Ts, not enforced
+    max_clock_skew: 0.08  # s a reference stamp may lead this clock; more stops the publisher
