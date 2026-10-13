@@ -1,0 +1,108 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<root>
+ <tabbed_widget parent="main_window" name="Main Window">
+  <Tab containers="1" tab_name="sway">
+   <Container>
+     <DockSplitter orientation="-" count="3" sizes="0.333333;0.333333;0.333333">
+      <DockArea name="sway angle about equilibrium, tip (blue) / tilt (red) [rad]">
+       <plot mode="TimeSeries" style="Lines" flip_x="false" flip_y="false">
+        <range top="1" bottom="0" right="1" left="0"/>
+        <curve color="#1f77b4" name="/sway/theta6_tip_joint"/>
+        <curve color="#d62728" name="/sway/theta7_tilt_joint"/>
+       </plot>
+      </DockArea>
+      <DockArea name="tip rate: true (blue), MPC measured (grey) [rad/s]">
+       <plot mode="TimeSeries" style="Lines" flip_x="false" flip_y="false">
+        <range top="1" bottom="0" right="1" left="0"/>
+        <curve color="#1f77b4" name="/dq_u/theta6_tip_joint"/>
+        <curve color="#7f7f7f" name="/dq_u_measured/theta6_tip_joint"/>
+       </plot>
+      </DockArea>
+      <DockArea name="tilt rate: true (red), MPC measured (grey) [rad/s]">
+       <plot mode="TimeSeries" style="Lines" flip_x="false" flip_y="false">
+        <range top="1" bottom="0" right="1" left="0"/>
+        <curve color="#d62728" name="/dq_u/theta7_tilt_joint"/>
+        <curve color="#7f7f7f" name="/dq_u_measured/theta7_tilt_joint"/>
+       </plot>
+      </DockArea>
+     </DockSplitter>
+   </Container>
+  </Tab>
+  <Tab containers="1" tab_name="axes">
+   <Container>
+     <DockSplitter orientation="-" count="5" sizes="0.200000;0.200000;0.200000;0.200000;0.200000">
+      <DockArea name="theta1_slewing_joint: dq_ref (blue), u0 (red), dq (green) [rad/s, m/s]">
+       <plot mode="TimeSeries" style="Lines" flip_x="false" flip_y="false">
+        <range top="1" bottom="0" right="1" left="0"/>
+        <curve color="#1f77b4" name="/dq_a_ref/theta1_slewing_joint"/>
+        <curve color="#d62728" name="/u0/theta1_slewing_joint"/>
+        <curve color="#2ca02c" name="/dq_a/theta1_slewing_joint"/>
+       </plot>
+      </DockArea>
+      <DockArea name="theta2_boom_joint: dq_ref (blue), u0 (red), dq (green) [rad/s, m/s]">
+       <plot mode="TimeSeries" style="Lines" flip_x="false" flip_y="false">
+        <range top="1" bottom="0" right="1" left="0"/>
+        <curve color="#1f77b4" name="/dq_a_ref/theta2_boom_joint"/>
+        <curve color="#d62728" name="/u0/theta2_boom_joint"/>
+        <curve color="#2ca02c" name="/dq_a/theta2_boom_joint"/>
+       </plot>
+      </DockArea>
+      <DockArea name="theta3_arm_joint: dq_ref (blue), u0 (red), dq (green) [rad/s, m/s]">
+       <plot mode="TimeSeries" style="Lines" flip_x="false" flip_y="false">
+        <range top="1" bottom="0" right="1" left="0"/>
+        <curve color="#1f77b4" name="/dq_a_ref/theta3_arm_joint"/>
+        <curve color="#d62728" name="/u0/theta3_arm_joint"/>
+        <curve color="#2ca02c" name="/dq_a/theta3_arm_joint"/>
+       </plot>
+      </DockArea>
+      <DockArea name="q4_big_telescope: dq_ref (blue), u0 (red), dq (green) [rad/s, m/s]">
+       <plot mode="TimeSeries" style="Lines" flip_x="false" flip_y="false">
+        <range top="1" bottom="0" right="1" left="0"/>
+        <curve color="#1f77b4" name="/dq_a_ref/q4_big_telescope"/>
+        <curve color="#d62728" name="/u0/q4_big_telescope"/>
+        <curve color="#2ca02c" name="/dq_a/q4_big_telescope"/>
+       </plot>
+      </DockArea>
+      <DockArea name="theta8_rotator_joint: dq_ref (blue), u0 (red), dq (green) [rad/s, m/s]">
+       <plot mode="TimeSeries" style="Lines" flip_x="false" flip_y="false">
+        <range top="1" bottom="0" right="1" left="0"/>
+        <curve color="#1f77b4" name="/dq_a_ref/theta8_rotator_joint"/>
+        <curve color="#d62728" name="/u0/theta8_rotator_joint"/>
+        <curve color="#2ca02c" name="/dq_a/theta8_rotator_joint"/>
+       </plot>
+      </DockArea>
+     </DockSplitter>
+   </Container>
+  </Tab>
+  <Tab containers="1" tab_name="solver">
+   <Container>
+     <DockSplitter orientation="-" count="3" sizes="0.333333;0.333333;0.333333">
+      <DockArea name="solve time [ms]">
+       <plot mode="TimeSeries" style="Lines" flip_x="false" flip_y="false">
+        <range top="1" bottom="0" right="1" left="0"/>
+        <curve color="#1f77b4" name="/solver/solve_ms"/>
+       </plot>
+      </DockArea>
+      <DockArea name="QP iterations">
+       <plot mode="TimeSeries" style="Lines" flip_x="false" flip_y="false">
+        <range top="1" bottom="0" right="1" left="0"/>
+        <curve color="#ff7f0e" name="/solver/qp_iterations"/>
+       </plot>
+      </DockArea>
+      <DockArea name="status (0 ok)">
+       <plot mode="TimeSeries" style="Lines" flip_x="false" flip_y="false">
+        <range top="1" bottom="0" right="1" left="0"/>
+        <curve color="#d62728" name="/solver/status"/>
+       </plot>
+      </DockArea>
+     </DockSplitter>
+   </Container>
+  </Tab>
+  <currentTabIndex index="0"/>
+ </tabbed_widget>
+ <use_relative_time_offset enabled="0"/>
+ <previouslyLoaded_Datafiles/>
+ <previouslyLoaded_Streamer name="UDP Server"/>
+ <customMathEquations/>
+ <snippets/>
+</root>
