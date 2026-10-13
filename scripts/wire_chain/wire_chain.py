@@ -73,8 +73,8 @@ from plotjuggler import PORT, PlotJuggler
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 
 ROTATOR = 4
-#: ros2_control yaml `topic_timeout`: past it the JTC holds position.
-TOPIC_TIMEOUT = 0.18
+#: `topic_timeout` of the a2b JTC yaml (pzs100 sim); past it the JTC holds position.
+TOPIC_TIMEOUT = 0.24
 #: Sim clock origin; trajectory.cpp reads a zero stamp as "start on receipt".
 EPOCH = 1.0
 #: |sway| past this is a diverged run, not a bad one.
@@ -411,6 +411,18 @@ def main(argv=None) -> int:
         "--seconds", type=float, default=None, help="default plan + 5 s"
     )
     parser.add_argument(
+        "--topic-timeout",
+        type=float,
+        default=TOPIC_TIMEOUT,
+        help="s; JTC holds after this long without a horizon",
+    )
+    parser.add_argument(
+        "--drop",
+        type=float,
+        default=0.0,
+        help="fraction of horizons lost on the wire; lab 2026-10-12 got ~1.3 of 8.3 Hz, i.e. 0.84",
+    )
+    parser.add_argument(
         "--csv", type=Path, default=None, help="per-cycle log, last move's"
     )
     # Regression checks: each reverts one fix of issue 171 and must diverge.
@@ -700,7 +712,8 @@ def fly(
     joints = [f"j{i}" for i in range(cs.GENERALIZED_DOF)]
     h, ff = chain.step_s, chain.ff_scale
     ticks = int(round(Ts / h))
-    events = {"silence": 0, "handback": 0}
+    events = {"silence": 0, "handback": 0, "dropped": 0}
+    loss = np.random.default_rng(1)
     log = []
     # The JTC's total command `forward + correction` per tick -- `u`, i.e. Psi's
     # input, which is the signal `u_clamp_*` is the fitted domain of. Not a bound
@@ -761,7 +774,11 @@ def fly(
                     in_flight_u=cycle.in_flight_command(),
                     linear=cycle.command_state,
                 )
-            flight.append((clock + options.latency, message))
+                message = hz.truncated(message, float(parameters["horizon_publish_s"]))
+            if loss.random() < options.drop:
+                events["dropped"] += 1
+            else:
+                flight.append((clock + options.latency, message))
             u0 = cycle.horizon.u[0, : cs.PLANNED_DOF].copy()
             asked = np.abs(cycle.horizon.dq_a_ref)
             asked_now.append(asked[0])
@@ -850,7 +867,7 @@ def fly(
                         flight.pop(0)[1], clock, sensor.q[PLANNED], sensor.dq[PLANNED]
                     )
                     last_receipt = clock
-                if clock - last_receipt > TOPIC_TIMEOUT:
+                if clock - last_receipt > options.topic_timeout:
                     live, last_receipt = Playback.hold(clock, sensor.q[PLANNED]), np.inf
                 q_ref, dq_ref, _ = live.sample(clock)
                 _, dq_next, effort_next = live.sample(clock + h)
@@ -952,6 +969,7 @@ def fly(
     )
     print(
         f"wire {options.wire}, latency {1e3 * options.latency:.0f} ms, "
+        f"dropped {events['dropped']} horizons, "
         f"cadence phase {1e3 * options.cadence_phase:.0f} ms, {len(log)} cycles\n"
         f"  final error      {np.abs(log[-1, 2 : 2 + nq] - plan.q[-1, PLANNED]).max():.4f}\n"
         f"  sway peak        {np.round(np.abs(sway).max(axis=0), 3)} rad\n"

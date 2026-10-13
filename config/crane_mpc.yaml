@@ -29,7 +29,7 @@ crane_mpc:
       q_u: [25.0, 25.0]  # tol 0.2 rad = q_sway_max (lab)
       dq_u: [128.0, 128.0]  # tol 0.088 rad/s, wire_chain sweep 2026-10-13
       u: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]  # curvature on c rows, can't bite
-      du: [64.0, 64.0, 64.0, 64.0, 64.0, 64.0]  # tol 0.125, wire_chain sweep 2026-10-13
+      du: [64.0, 64.0, 64.0, 64.0, 64.0, 64.0]  # tol 0.125, wire_chain sweep 2026-10-13; lab x4 fought horizon loss
       tcp: 1600.0  # tol 0.025 m
       progress: 20480.0  # tol 0.007 of path
       progress_rate: 300.0  # stall watch vs plan pace
