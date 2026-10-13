@@ -11,6 +11,7 @@ Move
   --goal {out,here} | --goal-pose X Y Z YAW    target; default out = (4, 0, 2) m
   --random [N] --seed S    chain N random moves; no N: until the viewer closes
   --start X*10             8 canonical positions + tip/tilt rates; plant swings from it
+  --kick TIP TILT          rad, load swung at the first move's start; plan starts hanging
   --resettle-start         passive pair at its own equilibrium
   --seconds S              per move; default plan + 5 s
   --speed-scale --kappa --ocp-duration-max --ocp-integrator --margin-safety
@@ -426,6 +427,13 @@ def main(argv=None) -> int:
         help=f"stream each cycle to PlotJuggler's UDP server (JSON); default {PORT}",
     )
     parser.add_argument(
+        "--kick",
+        type=float,
+        nargs=2,
+        metavar=("TIP", "TILT"),
+        help="rad, load swung this far at the first move's start; the plan starts hanging",
+    )
+    parser.add_argument(
         "--noise-scale",
         type=float,
         default=1.0,
@@ -536,6 +544,9 @@ def main(argv=None) -> int:
         swing = (
             None if options.start is None or moves else (start.q[PASSIVE], start.dq_u)
         )
+        if options.kick and not moves:
+            hanging_q = equilibrium(start.q[ACTUATED]) if swing is None else swing[0]
+            swing = (hanging_q + np.asarray(options.kick), start.dq_u)
         if markers is not None:
             markers.path("plan", plan.q, PLAN_RGBA, width=0.02)
         reason, score = fly(
@@ -662,7 +673,12 @@ def fly(
     scored = int(round(seconds / Ts))
 
     path_q = plan.q[:: max(1, len(plan.q) // 400)]  # viewer's green line, thinned
-    path_tcp = plant.positions_of(TCP_BODY, path_q) if options.pj is not None else None
+    path_tcp = plant.positions_of(TCP_BODY, path_q)
+
+    def tcp_off_path():
+        """Distance m from the tool, sway included, to the nearest planned TCP point."""
+        tool = plant.positions_of(TCP_BODY, plant.q[None, :])[0]
+        return float(np.linalg.norm(path_tcp - tool, axis=1).min())
 
     def tracking(t):
         """Planned-axes error vs plan at t and vs nearest path point; TCP m for both."""
@@ -826,8 +842,10 @@ def fly(
             yield step.solution, u0
 
     run = cycles()
+    off_path = []
     for k, (solution, u0) in zip(range(scored), run):
         q, dq = plant.q, plant.dq
+        off_path.append(tcp_off_path())
         sway = q[PASSIVE] - equilibrium(q[ACTUATED])
         status = -1 if solution is None else solution.status
         log.append(
@@ -952,6 +970,8 @@ def fly(
                 np.abs(log[-1, 2 : 2 + nq] - plan.q[-1, PLANNED]).max()
             ),
             "sway_peak": np.abs(sway).max(axis=0).tolist(),
+            "tcp_path_error_p95": float(np.percentile(off_path, 95)),
+            "tcp_path_error_max": float(np.max(off_path)),
             "sway_late": np.abs(late).max(axis=0).tolist(),
             "sway_rate_late": np.abs(rate_late).max(axis=0).tolist(),
             "arrival_s": arrival,

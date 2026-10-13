@@ -32,3 +32,11 @@ then withdrawn on that metric. Score on the growth rate instead.
 - `--drop P [--topic-timeout S]` — lose a fraction P of horizons on the wire (P = 0.84: ~1.3 of
   8.3 Hz arrive). At the JTC's `topic_timeout` 0.24 s one lost horizon already
   means a hold; at 1.0 s, P = 0.5 matches a lossless run.
+- `tune_weights.py --trials N --storage sqlite:///tune.db` — Optuna search over the MPC weights
+  (`dq_u`, `q_u`, `du`, `dq_a` luffing / slew+telescope, `tcp`, `terminal_scale`, log-uniform).
+  Each trial: 4 runs of 4 random moves (seeds 1, 2 × empty, 800 kg) and 4 kick tests (tip, tilt ×
+  near, far pose). Minimises kick decay to 10 % (worst), sway rate left after moves, TCP path error
+  p95; any failed run makes the trial infeasible. First trial = the yaml. ~50 s a trial at
+  `--jobs 4`; more workers: start it again on the same `--storage`. Browse: `optuna-dashboard
+  sqlite:///tune.db`. Prints the Pareto front as `--set` lines.
+- `--kick TIP TILT` — swing the load this far at the first move's start; the plan starts hanging.
