@@ -2,15 +2,42 @@
 """
 The node's own `Cycle`, closed through the wire: horizon message -> JTC -> MuJoCo.
 
-    ./scripts/wire_chain/wire_chain.py --goal out --latency 0.02
+    ./scripts/wire_chain/wire_chain.py --goal out --pj
+    ./scripts/wire_chain/wire_chain.py --random 4 --viewer --set weights.dq_u=256
     ./scripts/wire_chain/wire_chain.py --goal out --wire 161            # must diverge
     ./scripts/wire_chain/wire_chain.py --goal out --cadence-phase 0.03  # must diverge
-    ./scripts/wire_chain/wire_chain.py --goal out --viewer --realtime 0
-    ./scripts/wire_chain/wire_chain.py --random --viewer                # space: next move
-    ./scripts/wire_chain/wire_chain.py --goal out --set weights.du=30   # override crane_mpc.yaml
 
-Plan, plant mismatch and solver flags: `harness.add_arguments`. A `solver.export_key`
-setting (Ts, horizon_length, ...) re-exports the solver: minutes, unlocked.
+Move
+  --goal {out,here} | --goal-pose X Y Z YAW    target; default out = (4, 0, 2) m
+  --random [N] --seed S    chain N random moves; no N: until the viewer closes
+  --start X*10             8 canonical positions + tip/tilt rates; plant swings from it
+  --resettle-start         passive pair at its own equilibrium
+  --seconds S              per move; default plan + 5 s
+  --speed-scale --kappa --ocp-duration-max --ocp-integrator --margin-safety
+  --margin-interp          planner (tune_planner)
+MPC / OCP
+  --set KEY=VALUE          crane_mpc.yaml override; scalar fills a list
+  --payload-mass KG --payload-com M M M    what the OCP believes
+  --pace F | --mean-pace   progress reference compressed / plan's mean pace
+  --relax-h {force,pump,both} --h-factor F    scale constraint 6/7 allowance
+  --rebuild --verbose-build                re-export the solver
+Wire and JTC
+  --latency S              measurement to JTC receipt
+  --drop P                 fraction of horizons lost; default 0
+  --topic-timeout S        JTC hold after silence; default 0.24 = sim yaml
+  --cadence-phase S | --wire {today,161}   regression checks
+  --control-rate HZ --pi-rung {full,no-integral,feedforward} --pi-scale F
+Plant (MuJoCo + C3), mismatch against the OCP
+  --plant-payload KG --plant-payload-com M M M    default the OCP's
+  --noise-scale F          joint noise + bias off the Gazebo xacro; 0 = exact
+  --k-scale --d-scale --lag-shift --tau-v-scale --tau-v-offset --dead-time
+  --psi-gain-positive --psi-gain-negative --no-clamp --timestep
+Output
+  --csv PATH --json PATH   per-cycle log (last move) / scores
+  --viewer --realtime F    MuJoCo viewer: plan green, horizon orange
+  --pj [PORT]              PlotJuggler UDP JSON, timestamp `t`; default 9870
+
+A `solver.export_key` setting (Ts, horizon_length, ...) re-exports: minutes, unlocked.
 Exit 1 on divergence, hunting (`hunting.py`) or a JTC command outside `u_clamp_*`.
 
 Not the machine: measured at the cycle instant, solve takes no time (latency is delivery
