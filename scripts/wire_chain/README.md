@@ -26,7 +26,7 @@ then withdrawn on that metric. Score on the growth rate instead.
   (issue 190).
 - `wire_chain.py --goal out --pj [PORT]` — stream every cycle as JSON over UDP
   to PlotJuggler (Streaming → UDP server, port 9870 default, JSON, timestamp
-  field `t`). `plotjuggler.py`; layout `wire_chain_pj.xml` (tabs sway, axes, tracking, cost, solver). Cost split every cycle under `--pj`.
+  field `t`). `plotjuggler.py`; layout `wire_chain_pj.xml` (tabs sway, axes, tracking, authority, cost, solver; authority = sway accel the joints can produce at `du_max`, B = -M_uu^-1 M_ua). Cost split every cycle under `--pj`.
 - Joint readings carry the Gazebo description's noise and bias, read off its
   xacro; `--noise-scale 0` is the exact measurement the numbers above were taken on.
 - `--drop P [--topic-timeout S]` — lose a fraction P of horizons on the wire (P = 0.84: ~1.3 of

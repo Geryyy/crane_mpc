@@ -627,7 +627,17 @@ def fly(
     chain.seed(x_init)
     sensor.tick()
     status_line = sys.stderr.isatty()
-    pj = None if options.pj is None else PlotJuggler(options.pj)
+    pj = (
+        None
+        if options.pj is None
+        else PlotJuggler(
+            harness.description_xml(),
+            parameters["limits"]["du_max"],
+            ocp.payload_mass_kg,
+            ocp.payload_com_m,
+            port=options.pj,
+        )
+    )
 
     joints = [f"j{i}" for i in range(cs.GENERALIZED_DOF)]
     h, ff = chain.step_s, chain.ff_scale

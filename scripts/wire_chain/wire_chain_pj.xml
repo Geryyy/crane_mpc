@@ -102,6 +102,36 @@
      </DockSplitter>
    </Container>
   </Tab>
+  <Tab containers="1" tab_name="authority">
+   <Container>
+     <DockSplitter orientation="-" count="3" sizes="0.333333;0.333333;0.333333">
+      <DockArea name="max sway accel the joints can produce at du_max, tip (blue) / tilt (red) [rad/s^2]">
+       <plot mode="TimeSeries" style="Lines" flip_x="false" flip_y="false">
+        <curve color="#1f77b4" name="/authority/tip"/>
+        <curve color="#d62728" name="/authority/tilt"/>
+       </plot>
+      </DockArea>
+      <DockArea name="tip coupling: sway accel per joint accel [-]">
+       <plot mode="TimeSeries" style="Lines" flip_x="false" flip_y="false">
+        <curve color="#1f77b4" name="/coupling/tip/theta1_slewing_joint"/>
+        <curve color="#ff7f0e" name="/coupling/tip/theta2_boom_joint"/>
+        <curve color="#2ca02c" name="/coupling/tip/theta3_arm_joint"/>
+        <curve color="#d62728" name="/coupling/tip/q4_big_telescope"/>
+        <curve color="#9467bd" name="/coupling/tip/theta8_rotator_joint"/>
+       </plot>
+      </DockArea>
+      <DockArea name="tilt coupling: sway accel per joint accel [-]">
+       <plot mode="TimeSeries" style="Lines" flip_x="false" flip_y="false">
+        <curve color="#1f77b4" name="/coupling/tilt/theta1_slewing_joint"/>
+        <curve color="#ff7f0e" name="/coupling/tilt/theta2_boom_joint"/>
+        <curve color="#2ca02c" name="/coupling/tilt/theta3_arm_joint"/>
+        <curve color="#d62728" name="/coupling/tilt/q4_big_telescope"/>
+        <curve color="#9467bd" name="/coupling/tilt/theta8_rotator_joint"/>
+       </plot>
+      </DockArea>
+     </DockSplitter>
+   </Container>
+  </Tab>
   <Tab containers="1" tab_name="cost">
    <Container>
      <DockSplitter orientation="-" count="2" sizes="0.5;0.5">
