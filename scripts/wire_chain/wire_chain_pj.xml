@@ -74,6 +74,71 @@
      </DockSplitter>
    </Container>
   </Tab>
+  <Tab containers="1" tab_name="tracking">
+   <Container>
+     <DockSplitter orientation="-" count="3" sizes="0.333333;0.333333;0.333333">
+      <DockArea name="joint tracking error, plan at t - measured [rad, m]">
+       <plot mode="TimeSeries" style="Lines" flip_x="false" flip_y="false">
+        <range top="1" bottom="0" right="1" left="0"/>
+        <curve color="#1f77b4" name="/tracking_error/theta1_slewing_joint"/>
+        <curve color="#ff7f0e" name="/tracking_error/theta2_boom_joint"/>
+        <curve color="#2ca02c" name="/tracking_error/theta3_arm_joint"/>
+        <curve color="#d62728" name="/tracking_error/q4_big_telescope"/>
+        <curve color="#9467bd" name="/tracking_error/theta8_rotator_joint"/>
+       </plot>
+      </DockArea>
+      <DockArea name="TCP tracking error at the current sway [m]">
+       <plot mode="TimeSeries" style="Lines" flip_x="false" flip_y="false">
+        <range top="1" bottom="0" right="1" left="0"/>
+        <curve color="#1f77b4" name="/tcp_error"/>
+       </plot>
+      </DockArea>
+      <DockArea name="sway angle, tip (blue) / tilt (red) [rad]">
+       <plot mode="TimeSeries" style="Lines" flip_x="false" flip_y="false">
+        <range top="1" bottom="0" right="1" left="0"/>
+        <curve color="#1f77b4" name="/sway/theta6_tip_joint"/>
+        <curve color="#d62728" name="/sway/theta7_tilt_joint"/>
+       </plot>
+      </DockArea>
+     </DockSplitter>
+   </Container>
+  </Tab>
+  <Tab containers="1" tab_name="cost">
+   <Container>
+     <DockSplitter orientation="-" count="2" sizes="0.5;0.5">
+      <DockArea name="cost per term, summed over the horizon">
+       <plot mode="TimeSeries" style="Lines" flip_x="false" flip_y="false">
+        <range top="1" bottom="0" right="1" left="0"/>
+        <curve color="#1f77b4" name="/cost/q_a"/>
+        <curve color="#ff7f0e" name="/cost/dq_a"/>
+        <curve color="#2ca02c" name="/cost/q_u"/>
+        <curve color="#d62728" name="/cost/dq_u"/>
+        <curve color="#9467bd" name="/cost/tool"/>
+        <curve color="#8c564b" name="/cost/progress"/>
+        <curve color="#e377c2" name="/cost/u"/>
+        <curve color="#7f7f7f" name="/cost/du"/>
+        <curve color="#bcbd22" name="/cost/terminal"/>
+        <curve color="#17becf" name="/cost/slack"/>
+       </plot>
+      </DockArea>
+      <DockArea name="share of total cost per term">
+       <plot mode="TimeSeries" style="Lines" flip_x="false" flip_y="false">
+        <range top="1" bottom="0" right="1" left="0"/>
+        <curve color="#1f77b4" name="/cost_share/q_a"/>
+        <curve color="#ff7f0e" name="/cost_share/dq_a"/>
+        <curve color="#2ca02c" name="/cost_share/q_u"/>
+        <curve color="#d62728" name="/cost_share/dq_u"/>
+        <curve color="#9467bd" name="/cost_share/tool"/>
+        <curve color="#8c564b" name="/cost_share/progress"/>
+        <curve color="#e377c2" name="/cost_share/u"/>
+        <curve color="#7f7f7f" name="/cost_share/du"/>
+        <curve color="#bcbd22" name="/cost_share/terminal"/>
+        <curve color="#17becf" name="/cost_share/slack"/>
+       </plot>
+      </DockArea>
+     </DockSplitter>
+   </Container>
+  </Tab>
   <Tab containers="1" tab_name="solver">
    <Container>
      <DockSplitter orientation="-" count="3" sizes="0.333333;0.333333;0.333333">

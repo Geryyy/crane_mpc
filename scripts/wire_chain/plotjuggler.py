@@ -6,6 +6,7 @@ field `t`. Nested keys come out as `/group/name` series. One datagram per cycle,
 fire and forget: nothing listening costs nothing.
 """
 
+import dataclasses
 import json
 import socket
 
@@ -38,8 +39,21 @@ class PlotJuggler:
         except OSError:
             pass  # nothing listening, or past the UDP limit: a plot gap, not an abort
 
-    def cycle(self, t, plant, sensor, sway, solution, u0, dq_ref, indices) -> None:
-        """One MPC cycle: true and measured state, command, solver."""
+    def cycle(
+        self,
+        t,
+        plant,
+        sensor,
+        sway,
+        solution,
+        u0,
+        dq_ref,
+        indices,
+        terms,
+        error,
+        tcp_error,
+    ) -> None:
+        """One MPC cycle: true and measured state, command, solver, cost split."""
         planned, passive = indices
         solver = (
             {}
@@ -50,8 +64,15 @@ class PlotJuggler:
                 "status": float(solution.status),
             }
         )
+        cost = {} if terms is None else dataclasses.asdict(terms)
+        total = sum(cost.values())
+        share = {k: v / total for k, v in cost.items()} if total > 0 else {}
         self.send(
             t,
+            tracking_error=self.joints(error, planned),
+            tcp_error=tcp_error,
+            cost=cost,
+            cost_share=share,
             sway=self.joints(sway, passive),
             dq_u=self.joints(plant.dq[passive], passive),
             q_u_measured=self.joints(sensor.q[passive], passive),

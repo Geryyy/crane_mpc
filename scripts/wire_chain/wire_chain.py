@@ -59,7 +59,7 @@ from crane_model.mismatch import perturb_fit
 from crane_model.model import Payload
 from crane_model.mujoco_plant import MujocoPlant, leave
 from crane_model.symbolic import PAYLOAD_MOUNT_LINK
-from crane_model.viewing import Markers, SpaceGate, canonical_rows
+from crane_model.viewing import TCP_BODY, Markers, SpaceGate, canonical_rows
 from crane_mpc import cycle as cy
 from crane_mpc import horizon as hz
 from crane_mpc import problem as ocp_problem
@@ -654,6 +654,16 @@ def fly(
     diverged = False
     scored = int(round(seconds / Ts))
 
+    def tracking(t):
+        """Plan at t minus measured (planned axes), TCP distance m at the current sway."""
+        q_ref = np.array([np.interp(t, plan.time, column) for column in plan.q_a.T])
+        q_ref = q_ref[: cs.PLANNED_DOF]
+        rows = canonical_rows(
+            np.vstack([q_ref, plant.q[PLANNED]]), [plant.q[PASSIVE]] * 2, chain.q_tool
+        )
+        tcp = plant.positions_of(TCP_BODY, rows)
+        return q_ref - plant.q[PLANNED], float(np.linalg.norm(tcp[0] - tcp[1]))
+
     def cycles():
         """Run the node's cycle then the JTC's ticks, once per `next`; `(solution, u0)`."""
         clock = EPOCH
@@ -711,13 +721,17 @@ def fly(
                 bounds,
                 publish=send,
             )
+            terms = None
             if step.solution is not None:
                 solve_times.append(step.solution.solve_time_s)
                 qp_iterations.append(step.solution.qp_iterations)
                 riders.append(riding(step.solution, parameters["limits"]))
                 # right after the solve: cost_terms needs that solve's parameters and path
-                if len(riders) % COST_DECIMATION == 1:
-                    costs.append(ocp.cost_terms(step.solution, cycle.q_eq))
+                scored = len(riders) % COST_DECIMATION == 1
+                if scored or pj is not None:
+                    terms = ocp.cost_terms(step.solution, cycle.q_eq)
+                if scored:
+                    costs.append(terms)
             if markers is not None and cycle.horizon is not None:
                 rows = canonical_rows(
                     cycle.horizon.q_a_ref[:, : cs.PLANNED_DOF],
@@ -742,6 +756,8 @@ def fly(
                     u0,
                     dq_ref,
                     (PLANNED, PASSIVE),
+                    terms,
+                    *tracking(t),
                 )
             if status_line:
                 solved = step.solution
