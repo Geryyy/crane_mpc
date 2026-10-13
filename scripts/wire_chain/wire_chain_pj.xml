@@ -6,21 +6,18 @@
      <DockSplitter orientation="-" count="3" sizes="0.333333;0.333333;0.333333">
       <DockArea name="sway angle about equilibrium, tip (blue) / tilt (red) [rad]">
        <plot mode="TimeSeries" style="Lines" flip_x="false" flip_y="false">
-        <range top="1" bottom="0" right="1" left="0"/>
         <curve color="#1f77b4" name="/sway/theta6_tip_joint"/>
         <curve color="#d62728" name="/sway/theta7_tilt_joint"/>
        </plot>
       </DockArea>
       <DockArea name="tip rate: true (blue), MPC measured (grey) [rad/s]">
        <plot mode="TimeSeries" style="Lines" flip_x="false" flip_y="false">
-        <range top="1" bottom="0" right="1" left="0"/>
         <curve color="#1f77b4" name="/dq_u/theta6_tip_joint"/>
         <curve color="#7f7f7f" name="/dq_u_measured/theta6_tip_joint"/>
        </plot>
       </DockArea>
       <DockArea name="tilt rate: true (red), MPC measured (grey) [rad/s]">
        <plot mode="TimeSeries" style="Lines" flip_x="false" flip_y="false">
-        <range top="1" bottom="0" right="1" left="0"/>
         <curve color="#d62728" name="/dq_u/theta7_tilt_joint"/>
         <curve color="#7f7f7f" name="/dq_u_measured/theta7_tilt_joint"/>
        </plot>
@@ -33,7 +30,6 @@
      <DockSplitter orientation="-" count="5" sizes="0.200000;0.200000;0.200000;0.200000;0.200000">
       <DockArea name="theta1_slewing_joint: dq_ref (blue), u0 (red), dq (green) [rad/s, m/s]">
        <plot mode="TimeSeries" style="Lines" flip_x="false" flip_y="false">
-        <range top="1" bottom="0" right="1" left="0"/>
         <curve color="#1f77b4" name="/dq_a_ref/theta1_slewing_joint"/>
         <curve color="#d62728" name="/u0/theta1_slewing_joint"/>
         <curve color="#2ca02c" name="/dq_a/theta1_slewing_joint"/>
@@ -41,7 +37,6 @@
       </DockArea>
       <DockArea name="theta2_boom_joint: dq_ref (blue), u0 (red), dq (green) [rad/s, m/s]">
        <plot mode="TimeSeries" style="Lines" flip_x="false" flip_y="false">
-        <range top="1" bottom="0" right="1" left="0"/>
         <curve color="#1f77b4" name="/dq_a_ref/theta2_boom_joint"/>
         <curve color="#d62728" name="/u0/theta2_boom_joint"/>
         <curve color="#2ca02c" name="/dq_a/theta2_boom_joint"/>
@@ -49,7 +44,6 @@
       </DockArea>
       <DockArea name="theta3_arm_joint: dq_ref (blue), u0 (red), dq (green) [rad/s, m/s]">
        <plot mode="TimeSeries" style="Lines" flip_x="false" flip_y="false">
-        <range top="1" bottom="0" right="1" left="0"/>
         <curve color="#1f77b4" name="/dq_a_ref/theta3_arm_joint"/>
         <curve color="#d62728" name="/u0/theta3_arm_joint"/>
         <curve color="#2ca02c" name="/dq_a/theta3_arm_joint"/>
@@ -57,7 +51,6 @@
       </DockArea>
       <DockArea name="q4_big_telescope: dq_ref (blue), u0 (red), dq (green) [rad/s, m/s]">
        <plot mode="TimeSeries" style="Lines" flip_x="false" flip_y="false">
-        <range top="1" bottom="0" right="1" left="0"/>
         <curve color="#1f77b4" name="/dq_a_ref/q4_big_telescope"/>
         <curve color="#d62728" name="/u0/q4_big_telescope"/>
         <curve color="#2ca02c" name="/dq_a/q4_big_telescope"/>
@@ -65,7 +58,6 @@
       </DockArea>
       <DockArea name="theta8_rotator_joint: dq_ref (blue), u0 (red), dq (green) [rad/s, m/s]">
        <plot mode="TimeSeries" style="Lines" flip_x="false" flip_y="false">
-        <range top="1" bottom="0" right="1" left="0"/>
         <curve color="#1f77b4" name="/dq_a_ref/theta8_rotator_joint"/>
         <curve color="#d62728" name="/u0/theta8_rotator_joint"/>
         <curve color="#2ca02c" name="/dq_a/theta8_rotator_joint"/>
@@ -76,10 +68,9 @@
   </Tab>
   <Tab containers="1" tab_name="tracking">
    <Container>
-     <DockSplitter orientation="-" count="3" sizes="0.333333;0.333333;0.333333">
-      <DockArea name="joint tracking error, plan at t - measured [rad, m]">
+     <DockSplitter orientation="-" count="4" sizes="0.25;0.25;0.25;0.25">
+      <DockArea name="joint error vs plan at t, includes schedule lag [rad, m]">
        <plot mode="TimeSeries" style="Lines" flip_x="false" flip_y="false">
-        <range top="1" bottom="0" right="1" left="0"/>
         <curve color="#1f77b4" name="/tracking_error/theta1_slewing_joint"/>
         <curve color="#ff7f0e" name="/tracking_error/theta2_boom_joint"/>
         <curve color="#2ca02c" name="/tracking_error/theta3_arm_joint"/>
@@ -87,15 +78,23 @@
         <curve color="#9467bd" name="/tracking_error/theta8_rotator_joint"/>
        </plot>
       </DockArea>
-      <DockArea name="TCP tracking error at the current sway [m]">
+      <DockArea name="joint error vs nearest path point [rad, m]">
        <plot mode="TimeSeries" style="Lines" flip_x="false" flip_y="false">
-        <range top="1" bottom="0" right="1" left="0"/>
+        <curve color="#1f77b4" name="/path_error/theta1_slewing_joint"/>
+        <curve color="#ff7f0e" name="/path_error/theta2_boom_joint"/>
+        <curve color="#2ca02c" name="/path_error/theta3_arm_joint"/>
+        <curve color="#d62728" name="/path_error/q4_big_telescope"/>
+        <curve color="#9467bd" name="/path_error/theta8_rotator_joint"/>
+       </plot>
+      </DockArea>
+      <DockArea name="TCP error: vs plan at t, no sway (blue); to nearest path point, with sway = viewer (red) [m]">
+       <plot mode="TimeSeries" style="Lines" flip_x="false" flip_y="false">
         <curve color="#1f77b4" name="/tcp_error"/>
+        <curve color="#d62728" name="/tcp_path_error"/>
        </plot>
       </DockArea>
       <DockArea name="sway angle, tip (blue) / tilt (red) [rad]">
        <plot mode="TimeSeries" style="Lines" flip_x="false" flip_y="false">
-        <range top="1" bottom="0" right="1" left="0"/>
         <curve color="#1f77b4" name="/sway/theta6_tip_joint"/>
         <curve color="#d62728" name="/sway/theta7_tilt_joint"/>
        </plot>
@@ -108,7 +107,6 @@
      <DockSplitter orientation="-" count="2" sizes="0.5;0.5">
       <DockArea name="cost per term, summed over the horizon">
        <plot mode="TimeSeries" style="Lines" flip_x="false" flip_y="false">
-        <range top="1" bottom="0" right="1" left="0"/>
         <curve color="#1f77b4" name="/cost/q_a"/>
         <curve color="#ff7f0e" name="/cost/dq_a"/>
         <curve color="#2ca02c" name="/cost/q_u"/>
@@ -123,7 +121,6 @@
       </DockArea>
       <DockArea name="share of total cost per term">
        <plot mode="TimeSeries" style="Lines" flip_x="false" flip_y="false">
-        <range top="1" bottom="0" right="1" left="0"/>
         <curve color="#1f77b4" name="/cost_share/q_a"/>
         <curve color="#ff7f0e" name="/cost_share/dq_a"/>
         <curve color="#2ca02c" name="/cost_share/q_u"/>
@@ -144,19 +141,16 @@
      <DockSplitter orientation="-" count="3" sizes="0.333333;0.333333;0.333333">
       <DockArea name="solve time [ms]">
        <plot mode="TimeSeries" style="Lines" flip_x="false" flip_y="false">
-        <range top="1" bottom="0" right="1" left="0"/>
         <curve color="#1f77b4" name="/solver/solve_ms"/>
        </plot>
       </DockArea>
       <DockArea name="QP iterations">
        <plot mode="TimeSeries" style="Lines" flip_x="false" flip_y="false">
-        <range top="1" bottom="0" right="1" left="0"/>
         <curve color="#ff7f0e" name="/solver/qp_iterations"/>
        </plot>
       </DockArea>
       <DockArea name="status (0 ok)">
        <plot mode="TimeSeries" style="Lines" flip_x="false" flip_y="false">
-        <range top="1" bottom="0" right="1" left="0"/>
         <curve color="#d62728" name="/solver/status"/>
        </plot>
       </DockArea>

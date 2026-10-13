@@ -52,6 +52,8 @@ class PlotJuggler:
         terms,
         error,
         tcp_error,
+        path_error,
+        tcp_path_error,
     ) -> None:
         """One MPC cycle: true and measured state, command, solver, cost split."""
         planned, passive = indices
@@ -71,6 +73,8 @@ class PlotJuggler:
             t,
             tracking_error=self.joints(error, planned),
             tcp_error=tcp_error,
+            path_error=self.joints(path_error, planned),
+            tcp_path_error=tcp_path_error,
             cost=cost,
             cost_share=share,
             sway=self.joints(sway, passive),

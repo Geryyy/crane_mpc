@@ -654,15 +654,25 @@ def fly(
     diverged = False
     scored = int(round(seconds / Ts))
 
+    path_q = plan.q[:: max(1, len(plan.q) // 400)]  # viewer's green line, thinned
+    path_tcp = plant.positions_of(TCP_BODY, path_q) if options.pj is not None else None
+
     def tracking(t):
-        """Plan at t minus measured (planned axes), TCP distance m at the current sway."""
+        """Planned-axes error vs plan at t and vs nearest path point; TCP m for both."""
         q_ref = np.array([np.interp(t, plan.time, column) for column in plan.q_a.T])
         q_ref = q_ref[: cs.PLANNED_DOF]
         rows = canonical_rows(
             np.vstack([q_ref, plant.q[PLANNED]]), [plant.q[PASSIVE]] * 2, chain.q_tool
         )
         tcp = plant.positions_of(TCP_BODY, rows)
-        return q_ref - plant.q[PLANNED], float(np.linalg.norm(tcp[0] - tcp[1]))
+        tool = plant.positions_of(TCP_BODY, plant.q[None, :])[0]  # sway included
+        nearest = int(np.argmin(np.linalg.norm(path_tcp - tool, axis=1)))
+        return (
+            q_ref - plant.q[PLANNED],
+            float(np.linalg.norm(tcp[0] - tcp[1])),
+            path_q[nearest][PLANNED] - plant.q[PLANNED],
+            float(np.linalg.norm(path_tcp[nearest] - tool)),
+        )
 
     def cycles():
         """Run the node's cycle then the JTC's ticks, once per `next`; `(solution, u0)`."""
