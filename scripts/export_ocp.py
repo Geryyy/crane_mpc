@@ -85,7 +85,7 @@ from crane_mpc.problem import (  # noqa: E402
     build_ocp,
 )
 
-# default description location, shared with scripts/trials/harness.py
+# default description location, shared with scripts/wire_chain/harness.py
 DEFAULT_DESCRIPTIONS = ox.default_descriptions(PACKAGE)
 
 # --- the C3 fit, and the places it lives --------------------------------------

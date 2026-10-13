@@ -18,8 +18,8 @@ The node is Python and the solver is generated C:
 | `crane_mpc/horizon.py` | the reference read off the wire, resampled, and written back |
 | `crane_mpc/problem.py` | the OCP itself, as an `AcadosOcp` |
 | `scripts/export_ocp.py` | **run this first**: the same problem generated, compiled and recorded |
-| `scripts/trials/hunting.py` | is the chain off, or oscillating? A trial score, kept out of goal error |
-| `scripts/trials/wire_chain.py` | the node's `Cycle` offline, through the published horizon, the JTC's playback and MuJoCo; `sweep_robust.py` sweeps it over plant samples |
+| `scripts/wire_chain/hunting.py` | is the chain off, or oscillating? A trial score, kept out of goal error |
+| `scripts/wire_chain/wire_chain.py` | the node's `Cycle` offline, through the published horizon, the JTC's playback and MuJoCo; `sweep_robust.py` sweeps it over plant samples |
 
 `problem.py` is imported by both the node and the exporter, so the solver a
 deployment runs and the tree that is checked in are one definition of the
@@ -164,7 +164,7 @@ machine's, and the PZS100 is the machine that has to run; there is no tool
 selection anywhere in this package.
 
 The offline harness is the one exception to "never build at startup":
-`scripts/trials/wire_chain.py` exports on demand, into a directory named for the
+`scripts/wire_chain/wire_chain.py` exports on demand, into a directory named for the
 problem, through the same `ox.export`. A sweep walks configurations no
 deliberate export could have anticipated — a compiled `--set` or an acados
 variant — so a hand-run export per variant would make it unusable. The node has
@@ -204,7 +204,7 @@ output over the dead time, the tick the JTC is checked against
 (`RateQuery` asks the controller manager and `Timing.rate_mismatch` judges) and
 whether a solve came back late. `Cycle` holds it and `node.py` reads the same
 one. The order those are used in is `Cycle.step`, which the node and
-`scripts/trials/wire_chain.py` both call rather than each writing out — as two
+`scripts/wire_chain/wire_chain.py` both call rather than each writing out — as two
 copies they had already drifted apart (issue 186).
 
 Two fallbacks inside it are silent by construction and so are logged once:
@@ -792,7 +792,7 @@ applied last, so a swept setting beats anything set above it, and it enters
 `.so` and read as a null result**, which is how a sweep measures the baseline
 once per variant.
 
-    CRANE_MPC_OCP_OPTIONS='{"hpipm_mode":"SPEED"}' ./scripts/trials/wire_chain.py \
+    CRANE_MPC_OCP_OPTIONS='{"hpipm_mode":"SPEED"}' ./scripts/wire_chain/wire_chain.py \
         --goal out --json build/speed.json      # solve_time_s: p50, p90, max
 
 The numbers below are from `bench_ocp.py`, retired in issue 181: it ran its own

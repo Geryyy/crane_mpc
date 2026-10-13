@@ -109,7 +109,7 @@ def main(argv=None) -> int:
     parser.add_argument("--rebuild", action="store_true", help="re-export the solver")
     options = parser.parse_args(argv)
 
-    sys.path.insert(0, str(PACKAGE / "scripts" / "trials"))
+    sys.path.insert(0, str(PACKAGE / "scripts" / "wire_chain"))
     import harness
 
     record = dump.load(options.file)

@@ -1,29 +1,7 @@
-# Trial harness — issue 161
+# Trials
 
-Scoring an MPC arm on final goal error does not work: identical configuration
-gives 145.5, 1010.0 and 3288.3 mrad, because the end state of an exponentially
-growing mode depends on *when* it saturates. Three "fixes" were accepted and
-then withdrawn on that metric. Score on the growth rate instead.
+Live-arm captures and lab-day tools. The offline chain is `../wire_chain/`.
 
-- `wire_chain.py --goal out [--latency S]` — the node's `Cycle` closed through
-  the published `JointTrajectory` and a `trajectory.cpp` playback (cubic pos/vel,
-  linear effort, PI at the tick, feedforward a tick later) into MuJoCo (issue
-  171); settings, solver, plan and plant are `harness.py`'s. Deterministic: a
-  repeat matches to the digit except `solve_time_s`. Stable at 0/20/40 ms.
-  Regression check, each must exit 1: `--wire 161 --set command_state=false --set weights.du=10` (old encoding on C3, hunts; under C4 it is nearly harmless) and `--cadence-phase 0.02`
-  (once-anchored grid, diverges). ~10 s a run; a script, not a pytest, because
-  the test session exports its own solver.
-- `wire_chain.py --goal out --viewer [--realtime 0]` — the same run in MuJoCo's
-  viewer; past the plan it keeps cycling, unscored, so the settling sway shows.
-  Space ends that, closing the window ends the run. `--realtime 0` is as fast as
-  it computes.
-- `wire_chain.py --random [N] --viewer [--seed S]` — chain N random moves (no N:
-  until the window closes), each from where the last ended; space releases the
-  next. Headless, `--random N` runs the N moves back to back.
-- `sweep_robust.py` — `wire_chain` over moves x plant samples x levers; the worst
-  cell per setting, `--by-plant` for one row per sample. The plant-mismatch map
-  it was run for, and the settings that came out of it, are `robustness.md`
-  (issue 190).
 - `trial.sh <outdir>` — one live arm, isolated via `ralph/sim_env.sh` and the sim lock: launch headless,
   activate `trajectory_controller_a2b`, call `/a2b_movement`, capture.
   `CTRL=pid MOVE=<script>` swaps the arm. ~3 min.
@@ -182,7 +160,7 @@ sim lock, PRD §14 as amended 2026-10-08). The measurement after it is offline.
 
     ./scripts/trials/trial.sh /tmp/a2b-loaded     # one live A2B move, ~3 min
     ./scripts/trials/looptiming.py /tmp/a2b-loaded/cap.json
-    ./scripts/trials/wire_chain.py --goal out --latency <L>
+    ./scripts/wire_chain/wire_chain.py --goal out --latency <L>
     ./scripts/trials/steptest.py /tmp/step.json     # open loop, for the lag
     ./scripts/trials/plant_step.py /tmp/step.json   # Gazebo / MuJoCo / OCP
 

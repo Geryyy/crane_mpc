@@ -5,7 +5,7 @@ block weighed 80 kg and the behaviour tree had declared 800 kg. That is one
 point of a map nobody had drawn. This is the map: **which plant mismatch breaks
 the loop, and which knob widens the region that holds.**
 
-Everything here is offline, `trials/wire_chain.py` through `trials/sweep_robust.py`,
+Everything here is offline, `wire_chain/wire_chain.py` through `wire_chain/sweep_robust.py`,
 MuJoCo under C3 and the JTC's velocity loop. Nothing was launched.
 
 ## Read this before you use a number
@@ -96,7 +96,7 @@ MuJoCo under C3 and the JTC's velocity loop. Nothing was launched.
 
 ## 1. One mismatch at a time, at the shipped settings
 
-    ./scripts/trials/sweep_robust.py --latency 0.06 --payload-mass 800 \
+    ./scripts/wire_chain/sweep_robust.py --latency 0.06 --payload-mass 800 \
         --samples 0 --jobs 7 --by-plant --band <family>=<values>
 
 OCP payload 800 kg throughout; the band is what the *plant* got. Three moves per
@@ -186,7 +186,7 @@ Same three moves, against the eight corners of payload x{800, 80} kg,
 C3 `k` x{1, 2} and Psi gain x{1, 1.3} — one at a time and paired — plus the
 nominal plant. 27 runs per setting.
 
-    ./scripts/trials/sweep_robust.py --latency 0.06 --payload-mass 800 \
+    ./scripts/wire_chain/sweep_robust.py --latency 0.06 --payload-mass 800 \
         --samples 0 --jobs 7 --by-plant \
         --band payload=800,80 --band k=1,2 --band psi=1,1.3 --lever <knob>=<v>
 
@@ -273,7 +273,7 @@ and `weights.du=10` — are taken back to §1's one-at-a-time families here, alo
 and together, to see whether the win is a property of that grid or of the
 mismatch. "both" is `--set weights.du=10 --lever horizon_length=20`.
 
-    ./scripts/trials/sweep_robust.py --latency 0.06 --payload-mass 800 \
+    ./scripts/wire_chain/sweep_robust.py --latency 0.06 --payload-mass 800 \
         --samples 0 --jobs 7 --by-plant --band <family>=<values> \
         --set weights.du=10 --lever horizon_length=20
 
@@ -514,7 +514,7 @@ merely unset.
 
 ### 1. Latency x detuning
 
-    ./scripts/trials/sweep_robust.py --latency <0.026|0.030|0.060> \
+    ./scripts/wire_chain/sweep_robust.py --latency <0.026|0.030|0.060> \
         --payload-mass 800 --samples 0 --jobs 7 --by-plant \
         --band payload=800,80 --band k=1,2 --band psi=1,1.3 \
         --lever "weights.q_a=[20.0,20.0,20.0,20.0,5.0,5.0],[80.0,...,20.0,20.0]" \
@@ -604,7 +604,7 @@ and against nothing else.
 
 ### 2. The mismatch envelope at the measured latency, three variants
 
-    ./scripts/trials/sweep_robust.py --latency 0.026 --payload-mass 800 \
+    ./scripts/wire_chain/sweep_robust.py --latency 0.026 --payload-mass 800 \
         --jobs 7 --by-plant --samples 0 <variant> --band <family>=<values>
     # variants: (none) | --set command_state=false --set weights.du=10
     #                  | --set weights.du=10 --set horizon_length=20
@@ -738,7 +738,7 @@ Two things 211 should weigh against it, neither new:
 SPEED_ABS, `qp_solver_iter_max` 50 -> 35. Those came out of a cost-and-damping
 sweep, not out of this study, so the gate was §5.2's envelope re-run on both:
 
-    ./scripts/trials/sweep_robust.py --latency 0.026 --payload-mass 800 \
+    ./scripts/wire_chain/sweep_robust.py --latency 0.026 --payload-mass 800 \
         --samples 0 --jobs 7 --by-plant --band <family>=<values>
     # new: as shipped.  old: CRANE_MPC_OCP_OPTIONS='{"hpipm_mode":"BALANCE",
     #      "qp_solver_iter_max":50}' --set horizon_length=40 --set weights.dq_u=256.0
@@ -777,7 +777,7 @@ the swing; this section is the sweep that then priced `q_u`.
 226's eight cells (A2B, `--goal out`, two random moves, each empty and at
 800 kg), `--latency 0.026`, worst cell per setting:
 
-    ./scripts/trials/wire_chain.py <cell> --latency 0.026 \
+    ./scripts/wire_chain/wire_chain.py <cell> --latency 0.026 \
         --set weights.q_u=<q> --set weights.dq_u=<dq>
 
 | q_u | dq_u | late tip/tilt rate | peak sway | final err | ms p50/p90/max | capped | refused |
@@ -871,7 +871,7 @@ evidence.
 
 Same seven families, shipped against the one lever that moved:
 
-    ./scripts/trials/sweep_robust.py --latency 0.026 --payload-mass 800 \
+    ./scripts/wire_chain/sweep_robust.py --latency 0.026 --payload-mass 800 \
         --samples 0 --jobs 7 --by-plant --lever weights.q_u=0.0 --band <family>=<values>
 
 **New 0/102, old 0/102** — no cell fails at either setting, so the envelope is
@@ -1142,7 +1142,7 @@ inert — `lag`, `progress_rate`+`progress_accel`, constraint 6 (cylinder force)
 constraint 7 (pump flow), and the `q_u`/`dq_u` soft state box — and the
 envelope gate of §6/§7 was re-run on the five removed together:
 
-    ./scripts/trials/sweep_robust.py --latency 0.026 --payload-mass 800 \
+    ./scripts/wire_chain/sweep_robust.py --latency 0.026 --payload-mass 800 \
         --samples 0 --jobs 7 --by-plant --band <family>=<values> \
         --set weights.lag=0.0 --set weights.progress_rate=0.0 \
         --set weights.progress_accel=0.0 --set limits.q_sway_max=1000.0 \

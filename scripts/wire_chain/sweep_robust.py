@@ -2,7 +2,7 @@
 """
 Sweep MPC levers over moves x plant samples on wire_chain; report the worst cell.
 
-    ./scripts/trials/sweep_robust.py --band k=0.7,1.4 --band payload=0,800 \
+    ./scripts/wire_chain/sweep_robust.py --band k=0.7,1.4 --band payload=0,800 \
         --lever weights.du=0,10,30 --lever pi-scale=1,2 --samples 4 --jobs 3
 
 Plant samples: the nominal plant, every band corner, then `--samples` random

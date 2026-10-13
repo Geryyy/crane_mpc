@@ -9,11 +9,11 @@ interpolation, its one-tick feedforward lookahead, delivery latency and cadence
 phase included -- the five faults behind the 2026-09-25 Gazebo divergence
 (issue 171). Nothing is published.
 
-    ./scripts/trials/wire_chain.py --goal out --latency 0.02
-    ./scripts/trials/wire_chain.py --goal out --wire 161         # must diverge
-    ./scripts/trials/wire_chain.py --goal out --cadence-phase 0.03  # must diverge
-    ./scripts/trials/wire_chain.py --goal out --viewer --realtime 0
-    ./scripts/trials/wire_chain.py --random --viewer   # space: next move
+    ./scripts/wire_chain/wire_chain.py --goal out --latency 0.02
+    ./scripts/wire_chain/wire_chain.py --goal out --wire 161         # must diverge
+    ./scripts/wire_chain/wire_chain.py --goal out --cadence-phase 0.03  # must diverge
+    ./scripts/wire_chain/wire_chain.py --goal out --viewer --realtime 0
+    ./scripts/wire_chain/wire_chain.py --random --viewer   # space: next move
 
 `--viewer` keeps the chain running past the plan, unscored, until space or the
 window closes. `--random N` chains N moves, each from where the last ended.
@@ -35,7 +35,12 @@ and unlocked, so run that setting once before a parallel sweep. `Ts` moves
 `harness.create_solver` refuses before the export rather than after it. Payload: `--payload-mass` is what the OCP believes, `--plant-payload`
 what MuJoCo carries (default: the same), both at `--payload-com` in K8.
 
-Not the machine: measurement is exact at the cycle instant, the solve takes no
+Joint readings, the MPC's and the JTC's, carry the Gazebo description's noise and
+bias (`--noise-scale 0`: exact); scoring reads the true state. `--viewer` draws the
+plan (green) and the published horizon (orange); on a terminal a status line runs;
+`--pj` streams each cycle to PlotJuggler (`plotjuggler.py`).
+
+Not the machine: measurement is taken at the cycle instant, the solve takes no
 time (latency is delivery only; budget off), the tool axis is not driven, and
 the JTC's tolerance checks, goal handling and angle wraparound are skipped.
 """
@@ -55,7 +60,7 @@ from crane_model.mismatch import perturb_fit
 from crane_model.model import Payload
 from crane_model.mujoco_plant import MujocoPlant, leave
 from crane_model.symbolic import PAYLOAD_MOUNT_LINK
-from crane_model.viewing import SpaceGate
+from crane_model.viewing import Markers, SpaceGate, canonical_rows
 from crane_mpc import cycle as cy
 from crane_mpc import horizon as hz
 from crane_mpc import problem as ocp_problem
@@ -64,6 +69,7 @@ from crane_mpc.solver import SLACK_NOTICEABLE
 from growth import growth
 from harness import ACTUATED, PASSIVE, PLANNED, cs, tune_planner
 from hunting import REVERSAL_FRACTION, reversal_fraction
+from plotjuggler import PORT, PlotJuggler
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 
 ROTATOR = 4
@@ -92,6 +98,92 @@ COST_DECIMATION = 10
 #: every quality column unmoved, i.e. an artifact of the number and not of the
 #: constraint (issue 248).
 RELAXED = 10.0
+PLAN_RGBA = (0.15, 0.85, 0.45, 0.6)
+HORIZON_RGBA = (1.0, 0.45, 0.05, 0.9)
+#: `<param>`s of `gz_system_actuators`' measurement model, in `Sensor`'s order.
+NOISE_KEYS = (
+    "position_noise_std",
+    "position_noise_tau",
+    "velocity_noise_std",
+    "velocity_noise_tau",
+    "position_bias",
+    "velocity_bias",
+    "sample_rate",
+)
+
+
+def sensor_noise() -> np.ndarray:
+    """(8, 7) noise params per canonical joint, off the Gazebo description; 0 if absent."""
+    import xml.etree.ElementTree as ET
+
+    import xacro
+    from ament_index_python.packages import get_package_share_directory
+    from crane_model.conventions import canonical_joints
+
+    source = Path(get_package_share_directory("epsilon_crane_description"))
+    document = xacro.process_file(
+        str(source / "urdf" / "timber_loader_AIT.urdf.xacro"),
+        mappings={
+            "gazebo": "true",
+            "rigid": "true",
+            "sim_hydraulics": "true",
+            "tool": "pzs100_description",  # = problem.DESCRIPTION
+        },
+    )
+    joints = {
+        j.get("name"): {p.get("name"): p.text for p in j.iter("param")}
+        for system in ET.fromstring(document.toxml()).iter("ros2_control")
+        for j in system.iter("joint")
+    }
+    return np.array(
+        [
+            [float(joints.get(name, {}).get(key) or 0.0) for key in NOISE_KEYS]
+            for name in canonical_joints()
+        ]
+    )
+
+
+def mrad(values) -> str:
+    return " ".join(f"{1e3 * v:+5.0f}" for v in values)
+
+
+class Sensor:
+    """`gz_system_actuators`' measurement model: Gauss-Markov noise, bias, sample-hold."""
+
+    def __init__(self, plant, noise, scale: float, dt: float, seed: int = 0) -> None:
+        self.plant, self.dt = plant, dt
+        q_std, q_tau, v_std, v_tau, self.q_bias, self.v_bias, rate = noise.T * [
+            [scale],
+            [1],
+            [scale],
+            [1],
+            [scale],
+            [scale],
+            [1],
+        ]
+        self.q_a, self.q_k = self._gm(q_std, q_tau)
+        self.v_a, self.v_k = self._gm(v_std, v_tau)
+        rate = np.where(rate > 0, rate, 1.0 / dt)  # 0 Hz = every tick
+        self.every = np.round(1.0 / (rate * dt)).astype(int)
+        self.rng = np.random.default_rng(seed)
+        self.q_noise = self.v_noise = np.zeros(len(noise))
+        self.ticks = 0
+        self.q, self.dq = plant.q, plant.dq
+
+    def _gm(self, std, tau):
+        a = np.where(tau > 0, np.exp(-self.dt / np.where(tau > 0, tau, 1)), 0.0)
+        return a, std * np.sqrt(1 - a**2)
+
+    def tick(self) -> None:
+        """One controller read: advance the noise, resample where due."""
+        n = len(self.q_bias)
+        self.q_noise = self.q_a * self.q_noise + self.q_k * self.rng.standard_normal(n)
+        self.v_noise = self.v_a * self.v_noise + self.v_k * self.rng.standard_normal(n)
+        due = self.ticks % self.every == 0
+        self.ticks += 1
+        q = self.plant.q + self.q_bias + self.q_noise
+        dq = self.plant.dq + self.v_bias + self.v_noise
+        self.q, self.dq = np.where(due, q, self.q), np.where(due, dq, self.dq)
 
 
 def envelope_tau(t, rate):
@@ -390,6 +482,21 @@ def main(argv=None) -> int:
     )
     parser.add_argument("--viewer", action="store_true", help="MuJoCo passive viewer")
     parser.add_argument(
+        "--pj",
+        type=int,
+        nargs="?",
+        const=PORT,
+        default=None,
+        metavar="PORT",
+        help=f"stream each cycle to PlotJuggler's UDP server (JSON); default {PORT}",
+    )
+    parser.add_argument(
+        "--noise-scale",
+        type=float,
+        default=1.0,
+        help="x the Gazebo description's joint noise and bias; 0 = exact",
+    )
+    parser.add_argument(
         "--start",
         type=float,
         nargs=10,
@@ -466,6 +573,8 @@ def main(argv=None) -> int:
     if options.viewer:
         plant.set_state(start.q)  # planning takes seconds; show the start meanwhile
         plant.open_viewer(options.realtime, key_callback=gate)
+    markers = Markers(plant) if options.viewer else None
+    noise = sensor_noise() if options.noise_scale else np.zeros((cs.GENERALIZED_DOF, 7))
     said = False
 
     def coast():
@@ -493,8 +602,20 @@ def main(argv=None) -> int:
         swing = (
             None if options.start is None or moves else (start.q[PASSIVE], start.dq_u)
         )
+        if markers is not None:
+            markers.path("plan", plan.q, PLAN_RGBA, width=0.02)
         reason, score = fly(
-            options, parameters, ocp, chain, equilibrium, plan, coast, swing, hanging
+            options,
+            parameters,
+            ocp,
+            chain,
+            equilibrium,
+            plan,
+            coast,
+            swing,
+            hanging,
+            Sensor(plant, noise, options.noise_scale, chain.step_s),
+            markers,
         )
         failed, moves = failed or bool(reason), moves + 1
         scores.append(score)
@@ -514,7 +635,17 @@ def main(argv=None) -> int:
 
 
 def fly(
-    options, parameters, ocp, chain, equilibrium, plan, coast, swing=None, hanging=None
+    options,
+    parameters,
+    ocp,
+    chain,
+    equilibrium,
+    plan,
+    coast,
+    swing=None,
+    hanging=None,
+    sensor=None,
+    markers=None,
 ):
     """One move through the wire; `(failure reasons, scores)`. Coast cycles unscored."""
     plant = chain.plant
@@ -562,6 +693,9 @@ def fly(
     if swing is not None:
         x_init[cs.X_PASSIVE_VELOCITY : cs.X_PASSIVE_VELOCITY + 2] = swing[1]
     chain.seed(x_init)
+    sensor.tick()
+    status_line = sys.stderr.isatty()
+    pj = None if options.pj is None else PlotJuggler(options.pj)
 
     joints = [f"j{i}" for i in range(cs.GENERALIZED_DOF)]
     h, ff = chain.step_s, chain.ff_scale
@@ -602,7 +736,7 @@ def fly(
     def cycles():
         """Run the node's cycle then the JTC's ticks, once per `next`; `(solution, u0)`."""
         clock = EPOCH
-        live = Playback.hold(clock, plant.q[PLANNED])
+        live = Playback.hold(clock, sensor.q[PLANNED])
         last_receipt = clock
         flight = []  # (arrival, message)
         h_ns = int(round(h * 1e9))
@@ -638,10 +772,11 @@ def fly(
         for k in itertools.count():
             now_ns = epoch_ns + k * int(round(Ts * 1e9))
             cycle.begin()
-            q, dq = plant.q, plant.dq
+            sensor.tick()  # the cycle instant is the JTC's tick 0
+            q, dq = sensor.q, sensor.dq
             u0 = np.full(cs.PLANNED_DOF, np.nan)
             started = time.perf_counter()
-            # Measurement is exact at the cycle instant here, so it is its own stamp.
+            # Measured at the cycle instant, so it is its own stamp.
             step = cycle.step(
                 now_ns,
                 now_ns,
@@ -659,6 +794,48 @@ def fly(
                 # the parameter vector and path that solve was written with.
                 if len(riders) % COST_DECIMATION == 1:
                     costs.append(ocp.cost_terms(step.solution, cycle.q_eq))
+            if markers is not None and cycle.horizon is not None:
+                rows = canonical_rows(
+                    cycle.horizon.q_a_ref[:, : cs.PLANNED_DOF],
+                    cycle.horizon.q_u_ref,
+                    chain.q_tool,
+                )
+                markers.path("horizon", rows, HORIZON_RGBA, width=0.05, samples=12)
+            t = (now_ns - epoch_ns) / 1e9
+            sway = plant.q[PASSIVE] - equilibrium(plant.q[ACTUATED])
+            if pj is not None:
+                dq_ref = (
+                    cycle.horizon.dq_a_ref[0, : cs.PLANNED_DOF]
+                    if cycle.horizon is not None
+                    else np.full(cs.PLANNED_DOF, np.nan)
+                )
+                pj.cycle(
+                    t,
+                    plant,
+                    sensor,
+                    sway,
+                    step.solution,
+                    u0,
+                    dq_ref,
+                    (PLANNED, PASSIVE),
+                )
+            if status_line:
+                solved = step.solution
+                print(
+                    f"\r{'move' if t < plan.duration else 'hold'} t {t:6.2f}/"
+                    f"{plan.duration:.1f} s  sway {mrad(sway)} mrad"
+                    f"  rate {mrad(plant.dq[PASSIVE])} mrad/s"
+                    + (
+                        "  no solve"
+                        if solved is None
+                        else f"  solve {1e3 * solved.solve_time_s:4.0f} ms"
+                        f"  qp {solved.qp_iterations:3d}  status {solved.status}"
+                    )
+                    + "   ",
+                    end="",
+                    file=sys.stderr,
+                    flush=True,
+                )
             if step.silence is not None:
                 events["silence"] += 1
             elif step.verdict is None or not step.verdict.published:
@@ -666,20 +843,22 @@ def fly(
 
             for tick in range(ticks):
                 # JTC update: take the newest arrived message, then sample at t and t + h.
+                if tick:
+                    sensor.tick()
                 while flight and flight[0][0] <= clock + 1e-9:
                     live = Playback(
-                        flight.pop(0)[1], clock, plant.q[PLANNED], plant.dq[PLANNED]
+                        flight.pop(0)[1], clock, sensor.q[PLANNED], sensor.dq[PLANNED]
                     )
                     last_receipt = clock
                 if clock - last_receipt > TOPIC_TIMEOUT:
-                    live, last_receipt = Playback.hold(clock, plant.q[PLANNED]), np.inf
+                    live, last_receipt = Playback.hold(clock, sensor.q[PLANNED]), np.inf
                 q_ref, dq_ref, _ = live.sample(clock)
                 _, dq_next, effort_next = live.sample(clock + h)
                 command = chain.loop.step(
                     q_ref,
                     dq_ref,
-                    plant.q[PLANNED],
-                    plant.dq[PLANNED],
+                    sensor.q[PLANNED],
+                    sensor.dq[PLANNED],
                     feedforward=ff * (dq_next - dq_ref) + effort_next,
                 )
                 # Stamped off `now_ns`, not the float `clock`: these are the ticks
@@ -709,10 +888,12 @@ def fly(
             ]
         )
         if not np.all(np.isfinite(q)) or np.abs(sway).max() > DIVERGED_SWAY:
-            print(f"DIVERGED at t = {(k + 1) * Ts:.2f} s")
+            print(f"\nDIVERGED at t = {(k + 1) * Ts:.2f} s")
             diverged = True
             break
 
+    if status_line:
+        print(file=sys.stderr)
     log = np.array(log)
     nq = cs.PLANNED_DOF
     sway = log[:, 2 + nq : 4 + nq]
@@ -907,6 +1088,8 @@ def fly(
     # The viewer's coast: same chain, past the plan, unscored.
     while not diverged and coast() and np.all(np.isfinite(plant.q)):
         next(run)
+    if status_line and plant.viewer is not None:
+        print(file=sys.stderr)
     return reason, scores
 
 

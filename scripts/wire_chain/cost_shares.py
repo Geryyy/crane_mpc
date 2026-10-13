@@ -8,7 +8,7 @@ left is the part every cost change needs: the gate's quality columns straight
 off `wire_chain`, and the split of the cost by row, so "no single row dominates
 by construction" is a measurement and not a hope.
 
-    ./scripts/trials/cost_shares.py --goal out --payload-mass 800 \
+    ./scripts/wire_chain/cost_shares.py --goal out --payload-mass 800 \
         --plant-payload 800 --report build/277_ship_out_800.json
 
 Calls `wire_chain.main` -- the node's own `Cycle` through the wire -- under

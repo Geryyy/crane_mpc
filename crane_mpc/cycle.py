@@ -1,7 +1,7 @@
 """
 One MPC cycle, without ROS.
 
-`Cycle.step` owns the call order; `node.update()` and `scripts/trials/wire_chain`
+`Cycle.step` owns the call order; `node.update()` and `scripts/wire_chain/wire_chain`
 both run it rather than each copying it. `Timing` owns every instant that order
 turns on. Nanosecond ints, not `rclpy.time.Time`, keep it testable without a
 node. Wire names live here, not in `node.py`, because refusals quote them and
