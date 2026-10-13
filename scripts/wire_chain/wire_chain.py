@@ -2,47 +2,19 @@
 """
 The node's own `Cycle`, closed through the wire: horizon message -> JTC -> MuJoCo.
 
-Runs `Cycle.step` -- the node's own call order, not a copy of it -- writes each
-horizon with `hz.horizon_to_message` and plays it as `trajectory.cpp` does into
-the velocity loop, C3 actuator and MuJoCo plant of `harness.py`: horizon encoding, JTC
-interpolation, its one-tick feedforward lookahead, delivery latency and cadence
-phase included -- the five faults behind the 2026-09-25 Gazebo divergence
-(issue 171). Nothing is published.
-
     ./scripts/wire_chain/wire_chain.py --goal out --latency 0.02
-    ./scripts/wire_chain/wire_chain.py --goal out --wire 161         # must diverge
+    ./scripts/wire_chain/wire_chain.py --goal out --wire 161            # must diverge
     ./scripts/wire_chain/wire_chain.py --goal out --cadence-phase 0.03  # must diverge
     ./scripts/wire_chain/wire_chain.py --goal out --viewer --realtime 0
-    ./scripts/wire_chain/wire_chain.py --random --viewer   # space: next move
+    ./scripts/wire_chain/wire_chain.py --random --viewer                # space: next move
+    ./scripts/wire_chain/wire_chain.py --goal out --set weights.du=30   # override crane_mpc.yaml
 
-`--viewer` keeps the chain running past the plan, unscored, until space or the
-window closes. `--random N` chains N moves, each from where the last ended.
+Plan, plant mismatch and solver flags: `harness.add_arguments`. A `solver.export_key`
+setting (Ts, horizon_length, ...) re-exports the solver: minutes, unlocked.
+Exit 1 on divergence, hunting (`hunting.py`) or a JTC command outside `u_clamp_*`.
 
-Plant against OCP, i.e. the mismatch: `--plant-payload`/`--plant-payload-com`
-against `--payload-mass`/`--payload-com`, `--k-scale`/`--d-scale`,
-`--tau-v-scale`/`--tau-v-offset`, `--dead-time`, `--psi-gain-*`. The robustness
-map they were cut for is `robustness.md`.
-
-Plan, plant mismatch and solver flags are `harness.add_arguments`'. Exit 1 on
-divergence, hunting (`hunting.py`: u0 reversing on half the cycles) or a JTC
-command outside `u_clamp_*`, Psi's fitted domain (`past_clamp`).
-
-Levers: `--set weights.du=30 --set dq_a_feedback=false` overrides crane_mpc.yaml
-(yaml value; a scalar on a list key fills every axis). A key in
-`solver.export_key` (Ts, horizon_length, ...) re-exports the solver: minutes,
-and unlocked, so run that setting once before a parallel sweep. `Ts` moves
-`sensor_to_valve_delay` with it -- `check_settings` refuses any other pair, and
-`harness.create_solver` refuses before the export rather than after it. Payload: `--payload-mass` is what the OCP believes, `--plant-payload`
-what MuJoCo carries (default: the same), both at `--payload-com` in K8.
-
-Joint readings, the MPC's and the JTC's, carry the Gazebo description's noise and
-bias (`--noise-scale 0`: exact); scoring reads the true state. `--viewer` draws the
-plan (green) and the published horizon (orange); on a terminal a status line runs;
-`--pj` streams each cycle to PlotJuggler (`plotjuggler.py`).
-
-Not the machine: measurement is taken at the cycle instant, the solve takes no
-time (latency is delivery only; budget off), the tool axis is not driven, and
-the JTC's tolerance checks, goal handling and angle wraparound are skipped.
+Not the machine: measured at the cycle instant, solve takes no time (latency is delivery
+only), tool axis not driven, JTC tolerance checks, goal handling and wraparound skipped.
 """
 
 import argparse
@@ -73,34 +45,17 @@ from plotjuggler import PORT, PlotJuggler
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 
 ROTATOR = 4
-#: `topic_timeout` of the a2b JTC yaml (pzs100 sim); past it the JTC holds position.
-TOPIC_TIMEOUT = 0.24
-#: Sim clock origin; trajectory.cpp reads a zero stamp as "start on receipt".
-EPOCH = 1.0
-#: |sway| past this is a diverged run, not a bad one.
-DIVERGED_SWAY = 1.2
-#: The sway period `limits.du_max` is derived from; an envelope is read over one.
-SWAY_PERIOD_S = 2.34
-#: Where "2 s after arrival" is read: +-0.5 s, ~a fifth of a sway period either
-#: side, so the number is the mode's local envelope and not whichever phase one
-#: cycle happened to fall on.
-AFTER_ARRIVAL_S = (1.5, 2.5)
-#: A box row counts as riding its bound within this fraction of it. Not equality:
-#: the QP stops at its own tolerance and `du_max` is reached by a ramp.
-ACTIVE_MARGIN = 0.99
-#: Every cycle would cost N+1 residual evaluations of the solve's own latency.
-COST_DECIMATION = 10
-#: What `--relax-h` widens a row to. `h` is a fraction of its own allowance, so
-#: ten is already ~11x the worst draw anything here reaches (`wiki/mpc.md` puts a
-#: resting boom+arm at 0.91 of `F_max`, and the planner's peak pump draw is 0.76).
-#: Not 1e6, which is out of reach the same way and costs HPIPM its conditioning:
-#: at 1e6 the same runs read QP iterations p90 8 -> 12-14 and max 12 -> 60 with
-#: every quality column unmoved, i.e. an artifact of the number and not of the
-#: constraint (issue 248).
-RELAXED = 10.0
+TOPIC_TIMEOUT = 0.24  # a2b JTC yaml topic_timeout, pzs100 sim
+EPOCH = 1.0  # sim clock origin; zero stamp reads as "start on receipt"
+DIVERGED_SWAY = 1.2  # rad
+SWAY_PERIOD_S = 2.34  # `limits.du_max` is derived from it
+AFTER_ARRIVAL_S = (1.5, 2.5)  # "2 s after arrival" +-0.5 s, ~1/5 sway period
+ACTIVE_MARGIN = 0.99  # not equality: QP tolerance, du_max reached by a ramp
+COST_DECIMATION = 10  # each cost split costs N+1 residual evaluations
+RELAXED = 10.0  # --relax-h widening; 1e6 hurts HPIPM conditioning (issue 248)
 PLAN_RGBA = (0.15, 0.85, 0.45, 0.6)
 HORIZON_RGBA = (1.0, 0.45, 0.05, 0.9)
-#: `<param>`s of `gz_system_actuators`' measurement model, in `Sensor`'s order.
+#: `gz_system_actuators` measurement params, in `Sensor`'s order
 NOISE_KEYS = (
     "position_noise_std",
     "position_noise_tau",
@@ -175,7 +130,7 @@ class Sensor:
         return a, std * np.sqrt(1 - a**2)
 
     def tick(self) -> None:
-        """One controller read: advance the noise, resample where due."""
+        """Advance the noise, resample where due."""
         n = len(self.q_bias)
         self.q_noise = self.q_a * self.q_noise + self.q_k * self.rng.standard_normal(n)
         self.v_noise = self.v_a * self.v_noise + self.v_k * self.rng.standard_normal(n)
@@ -187,14 +142,7 @@ class Sensor:
 
 
 def envelope_tau(t, rate):
-    """
-    Decay time constant of `|rate|`'s one-period rolling max, per column.
-
-    `inf` where the envelope does not decay, `nan` where it is already at zero.
-    Fitted on the envelope and not on the signal: the rate oscillates, so a fit
-    on it reads whichever phase the window ends on, and "damped within one sway
-    period" is a claim about the envelope.
-    """
+    """Per-column decay tau of |rate|'s rolling-max envelope; inf no decay, nan at zero."""
     width = max(2, int(round(SWAY_PERIOD_S / (t[1] - t[0]))))
     taus = []
     for column in np.abs(rate).T:
@@ -211,23 +159,7 @@ def envelope_tau(t, rate):
 
 
 def scale_h(ocp, rows, factor):
-    """
-    Multiply constraint 6 (cylinder force) and/or 7 (pump flow)'s allowance.
-
-    `factor` past one removes the row -- `h` is a fraction of its own allowance,
-    so nothing a move does reaches ten. Under one it *tightens*, which is how the
-    headroom gets measured: lower it until slack appears and the row's distance
-    from binding is the factor it binds at.
-
-    Not a `--set`: `problem.constraint_scale` divides each row by its own
-    allowance, so `lh`/`uh` come out in `[-1, 1]` and `[0, 1]` whatever the
-    hydraulics yaml says, and no number in either yaml can move them. Written
-    straight onto the solver, which holds because `configure_fixed_data` writes
-    the pair once at construction and no cycle rewrites it.
-
-    `nh` and the two rows' slack columns stay in the QP either way, so this
-    measures what the constraint *does*, not what dropping it would save.
-    """
+    """Scale constraint 6 (cylinder force) and/or 7 (pump flow) allowance; <1 tightens."""
     force = slice(0, cs.PLANNED_DOF)
     for stage in range(ocp.intervals):
         lower = np.asarray(ocp.solver.constraints_get(stage, "lh"), float)
@@ -242,16 +174,7 @@ def scale_h(ocp, rows, factor):
 
 
 def riding(solution, limits):
-    """
-    Which of the OCP's bounds this cycle's horizon rides, and what it slacked.
-
-    The hard boxes (`du_max`, constraint 5's `u^+`, the sway-rate bound) are read
-    as proximity over the horizon; the softened rows are read as slack taken,
-    which is a *violation* and so a stricter test than being active -- a soft
-    bound can bind exactly with no slack and not be counted here. Against
-    `SLACK_NOTICEABLE`, not zero: HPIPM leaves every slack a positive 1e-11 or so,
-    which read as "every softened row violated on every cycle".
-    """
+    """Bounds this horizon rides: hard boxes by proximity, soft rows by slack taken."""
     du_max = np.asarray(limits["du_max"][: cs.PLANNED_DOF], float)
     u_max = np.asarray(limits["u_max"][: cs.PLANNED_DOF], float)
     rate = np.abs(solution.inputs[:, : cs.PLANNED_DOF]).max(0) / du_max
@@ -290,7 +213,7 @@ class Playback:
             np.array([np.asarray(getattr(p, field))[PLANNED] for p in points])
             for field in ("positions", "velocities", "effort")
         )
-        # `set_point_before_trajectory_msg`: measured state at receipt, effort 0.
+        # before-trajectory point: measured state at receipt, effort 0
         self.before = (received, q, dq, np.zeros_like(q))
 
     @staticmethod
@@ -350,15 +273,7 @@ def carry_payload(plant, mass, com):
 
 
 def scale_tau_v(fit, scale):
-    """
-    Plant `tau_v` under a per-axis multiplier; the OCP keeps the shipped fit.
-
-    Not `perturb_fit`'s `lag_shift_s`, which moves `tau_v` and the dead time at
-    constant sum: the shipped arm sits at `tau_v = 0`, so every shift is refused
-    (`mismatch.py`). A multiplier keeps 0 at 0, so `lag_axes` -- hence NX and the
-    export key -- does not move, and what it changes is the dead time + lag
-    *sum*, which is the half the staircase campaign never separated.
-    """
+    """Plant tau_v times a per-axis multiplier, 0 stays 0; OCP keeps the shipped fit."""
     scale = np.asarray(scale, float)
     if not np.all(np.isfinite(scale) & (scale > 0.0)):
         raise SystemExit(f"--tau-v-scale wants positive finite multipliers: {scale}")
@@ -366,23 +281,7 @@ def scale_tau_v(fit, scale):
 
 
 def offset_tau_v(fit, offset):
-    """
-    Plant `tau_v` under a per-axis *additive* offset, floored at zero.
-
-    `scale_tau_v` cannot move an axis fitted at zero and the arm is
-    (`tau_v = [0.1, 0.025, 0.0, 0.05, 0.125]`), so every multiplicative lag
-    family leaves the axis carrying the payload moment arm untouched --
-    `robustness.md` §1 says so and §4 asks for this knob. An offset moves it.
-    Still not `perturb_fit`'s `lag_shift_s`, which holds dead time + `tau_v`
-    constant and is refused at that same zero: here the *sum* moves, which is
-    the half the staircase campaign never separated anyway.
-
-    Floored, not refused, below zero: `C3Actuator` reads `tau_v < 0` as
-    alpha = 1, i.e. no lag at all, so a negative would silently clip. Zero is
-    what "no lag" means and the axes already there cannot get faster.
-    `LAG_AXES` moves with the floor, but only on the plant's fit -- the export
-    key digests `c3_full_model.json`, not this.
-    """
+    """Plant tau_v plus a per-axis offset, floored at 0 (negative reads as no lag)."""
     offset = np.asarray(offset, float)
     if not np.all(np.isfinite(offset)):
         raise SystemExit(f"--tau-v-offset wants finite seconds: {offset}")
@@ -391,7 +290,7 @@ def offset_tau_v(fit, offset):
 
 
 def wire_161(horizon, joints, stamp, lead, in_flight):
-    """Issue 161's encoding: knot i at lead + t_i, the in-flight knot at 0, u - dq per knot."""
+    """Issue 161's encoding: knot i at lead + t_i, in-flight knot at 0, u - dq per knot."""
     message = hz.horizon_to_message(horizon, joints, stamp)
     for point in message.points:
         point.time_from_start = hz.seconds_duration(
@@ -425,7 +324,7 @@ def main(argv=None) -> int:
     parser.add_argument(
         "--csv", type=Path, default=None, help="per-cycle log, last move's"
     )
-    # Regression checks: each reverts one fix of issue 171 and must diverge.
+    # regression checks: each reverts a fix and must diverge
     parser.add_argument("--wire", choices=("today", "161"), default="today")
     parser.add_argument(
         "--cadence-phase",
@@ -543,8 +442,9 @@ def main(argv=None) -> int:
     ocp = harness.create_solver(
         parameters, hydraulics, options.rebuild, options.verbose_build
     )
-    # Offline wall time is not the machine's; `--latency` stands for it.
-    ocp.solve_budget_s = 10.0
+    ocp.solve_budget_s = (
+        10.0  # offline wall time is not the machine's; --latency stands in
+    )
     if options.relax_h:
         scale_h(ocp, options.relax_h, options.h_factor)
     ocp.set_payload(options.payload_mass, options.payload_com)
@@ -552,8 +452,7 @@ def main(argv=None) -> int:
     carried = (
         options.payload_mass if options.plant_payload is None else options.plant_payload
     )
-    # The plant's COM, not the OCP's: `equilibrium` scores sway against where the
-    # load actually hangs, so a COM mismatch must not move the reference too.
+    # plant's COM, not the OCP's: sway is scored where the load hangs
     carried_com = np.asarray(
         options.payload_com
         if options.plant_payload_com is None
@@ -566,8 +465,7 @@ def main(argv=None) -> int:
     def equilibrium(q_a):
         return planner.model.passive_equilibrium(q_a, payload)
 
-    # The OCP's payload this time, not the plant's: this is the sway centre the
-    # node's own `Cycle` solves against, so a COM mismatch must move it.
+    # OCP's payload: the sway centre the node's `Cycle` solves against
     hanging = Equilibrium(
         planner.model, Payload(ocp.payload_mass_kg, ocp.payload_com_m, valid=True)
     )
@@ -610,7 +508,7 @@ def main(argv=None) -> int:
             continue
         gate.pressed, said = False, False
         chain = harness.Chain(plant, start.q_tool, options, fit=plant_fit)
-        # Only the first move starts swinging; later ones start where the last ended.
+        # only the first move starts swinging
         swing = (
             None if options.start is None or moves else (start.q[PASSIVE], start.dq_u)
         )
@@ -683,9 +581,7 @@ def fly(
         plan.dq_a,
     )
     cycle.adopt_reference(reference, epoch_ns)
-    # Duration sets `PathCycle.nominal_rate` and the law's own time grid; the
-    # curve and the `dq_a_ref` knots are untouched, so `--pace` compresses the
-    # progress reference in time and nothing else.
+    # --pace compresses the progress reference in time only (curve and knots untouched)
     cycle.adopt_path(
         harness.path_control(plan),
         plan.duration / options.pace,
@@ -715,32 +611,17 @@ def fly(
     events = {"silence": 0, "handback": 0, "dropped": 0}
     loss = np.random.default_rng(1)
     log = []
-    # The JTC's total command `forward + correction` per tick -- `u`, i.e. Psi's
-    # input, which is the signal `u_clamp_*` is the fitted domain of. Not a bound
-    # the loop enforces: it clamps the PI branch alone, so the total is free to
-    # leave the domain, which is the whole point of scoring it. Per tick, because
-    # every tick is a separate command; `log` is per cycle, so `dq` beside it is
-    # sampled 1-in-`ticks` and the two clamp ratios are not on one grid.
+    # per-tick JTC command (u, Psi's input); scored against u_clamp_*, not enforced
     u_tick = []
     solve_times = []
-    # Per cycle, beside the milliseconds: solve time is ~linear in this and the
-    # ms are the machine's, so a regression reads off iterations first (issue 223).
+    # per cycle; solve ms are ~linear in it
     qp_iterations = []
-    # Which bound each solved cycle's horizon rides, and the cost split that says
-    # whether the goal rows outweigh the sway rows (issue 244 (d)).
+    # bound ridden per cycle; cost split (goal vs sway rows)
     riders, costs = [], []
     iteration_cap = int(ocp_problem.solver_tuning()["qp_solver_iter_max"])
-    # Wall seconds from the cycle instant to the horizon on the wire -- the
-    # margin the timer callback has left, solve included. Offline wall time is
-    # not the machine's, but what is Python here is Python there (issue 187).
+    # wall s from cycle instant to horizon on the wire, solve included
     tick_to_publish = []
-    # What the MPC *asks* for, per published horizon, against the plan's peak
-    # further down. Live the two separate -- the horizon peaked at 0.74 of plan
-    # on both lagging axes with nothing bound (issue 250) -- so the ask has to
-    # be read beside the achieved speed. Two readings, because they answer
-    # different questions: knot 0 is what the JTC plays next and is therefore
-    # the pace the MPC drives at, the whole-horizon max says whether the ask is
-    # capped anywhere.
+    # MPC ask per horizon: knot 0 (JTC plays next) and whole-horizon max
     asked_now, asked_any = [], []
     seconds = options.seconds or float(plan.duration) + 5.0
     diverged = False
@@ -793,7 +674,7 @@ def fly(
             q, dq = sensor.q, sensor.dq
             u0 = np.full(cs.PLANNED_DOF, np.nan)
             started = time.perf_counter()
-            # Measured at the cycle instant, so it is its own stamp.
+            # measured at the cycle instant: stamp = now
             step = cycle.step(
                 now_ns,
                 now_ns,
@@ -807,8 +688,7 @@ def fly(
                 solve_times.append(step.solution.solve_time_s)
                 qp_iterations.append(step.solution.qp_iterations)
                 riders.append(riding(step.solution, parameters["limits"]))
-                # Right after the solve or not at all: `cost_terms` scores against
-                # the parameter vector and path that solve was written with.
+                # right after the solve: cost_terms needs that solve's parameters and path
                 if len(riders) % COST_DECIMATION == 1:
                     costs.append(ocp.cost_terms(step.solution, cycle.q_eq))
             if markers is not None and cycle.horizon is not None:
@@ -859,7 +739,7 @@ def fly(
                 events["handback"] += 1
 
             for tick in range(ticks):
-                # JTC update: take the newest arrived message, then sample at t and t + h.
+                # JTC update: newest arrived message, sample at t and t + h
                 if tick:
                     sensor.tick()
                 while flight and flight[0][0] <= clock + 1e-9:
@@ -878,9 +758,7 @@ def fly(
                     sensor.dq[PLANNED],
                     feedforward=ff * (dq_next - dq_ref) + effort_next,
                 )
-                # Stamped off `now_ns`, not the float `clock`: these are the ticks
-                # `Timing.jtc_output` averages over `[measured - Ts, measured)` next
-                # cycle, and an accumulated float would drop the one on the edge.
+                # off now_ns, not float clock: Timing.jtc_output averages the edge tick
                 timing.record_output(now_ns + tick * h_ns, command)
                 u_tick.append(command)
                 plant.drive(chain.actuator, chain.psi.apply(command), h)
@@ -915,13 +793,9 @@ def fly(
     nq = cs.PLANNED_DOF
     sway = log[:, 2 + nq : 4 + nq]
     late = sway[-int(round(3.0 / Ts)) :]
-    # The damping half of issue 223 is scored on the *rate*, not the angle: the
-    # published angle carries an uncalibrated offset and `dq_u_settled` is the
-    # limit the tree gates on. Same window as `late`.
+    # damping scored on rate, not angle: published angle has an uncalibrated offset
     rate_late = log[-int(round(3.0 / Ts)) :, 4 + 2 * nq : 6 + 2 * nq]
-    # Issue 244's window: the plan's own end is arrival, and everything after it
-    # is the hold the damping is scored in. `sway_rate_late` above is the tail of
-    # whatever `--seconds` was, which is a different question once the hold is long.
+    # arrival = plan end; damping is scored in the hold after it
     rate_u = log[:, 4 + 2 * nq : 6 + 2 * nq]
     arrival = float(plan.duration)
     after = log[:, 0] >= arrival
@@ -934,22 +808,15 @@ def fly(
         if after.sum() > int(round(SWAY_PERIOD_S / Ts)) + 4
         else [float("nan")] * 2
     )
-    # 214's hunting metric: what the actuated axes are still doing in the hold.
+    # hunting metric: what the actuated axes still do in the hold
     dq_a_hold = float(np.sqrt(np.mean(log[after, 2 + nq + 2 : 2 + 2 * nq + 2] ** 2)))
     u0 = log[:, -nq:]
     u0 = u0[np.all(np.isfinite(u0), axis=1)]
-    # Ticks of the coast loop land in `u_tick` too, but only after this scoring.
+    # coast ticks land in u_tick after this
     u = np.array(u_tick)
-    # Issue 250: did the chain run the plan at the pace it was planned at? Peak
-    # speed per axis, the plan's own against what the MPC asked and what the
-    # joint did. Over the whole log and not up to arrival: a lagging move is
-    # still moving past plan end, so a window that stops there flatters it.
-    # `plan.dq_a` is the actuated six; the planned five lead it, as in `dq_a_ref`.
-    plan_peak = np.abs(plan.dq_a[:, :nq]).max(0)
-    # How much faster than its own mean the plan's `s(t)` runs in the middle.
-    # Under `--mean-pace` the progress row is priced against the mean, so this
-    # ratio is the ceiling on `achieved / plan` before any weight or bound is
-    # involved (issue 250); with the law in hand it is priced point by point.
+    # peak speed per axis over the whole log; lagging moves run past plan end
+    plan_peak = np.abs(plan.dq_a[:, :nq]).max(0)  # planned five lead the six
+    # peak/mean of s(t) speed; ceiling on achieved/plan under --mean-pace
     plan_pace = float(np.abs(plan.timing.speed).max() * plan.duration)
     dq_peak = np.abs(log[:, 2 + nq + 2 : 2 + 2 * nq + 2]).max(0)
 
@@ -1000,15 +867,10 @@ def fly(
         names += [f"dq{i}" for i in range(nq)] + ["dq_u0", "dq_u1", "status"]
         names += [f"u0_{i}" for i in range(nq)]
         np.savetxt(options.csv, log, delimiter=",", header=",".join(names), comments="")
-    # A command past `u_clamp_*` is out of Psi's fitted domain, so the compensator
-    # extrapolates a spline past its data: an exit, and one the reversal gate does
-    # not catch (a hunting run at 1/3 reversals, PI x4, issue 173, passed that
-    # alone). Scored on `u`, not on the achieved `dq`: `u != dq`, the clamp is on
-    # u, and `velocity_loop` applies it to the PI branch only. The `dq` test it
-    # replaces (issue 190 scored it, and 149 of 166 failures were this gate) is an
-    # overspeed check with no clamp of its own -- kept as a column, not an exit.
+    # u past u_clamp_* leaves Psi's fitted domain; scored on u, not dq
     dq = log[:, 2 + nq + 2 : 2 + 2 * nq + 2]
     past_clamp = bool(np.any(u > chain.high + 1e-3) or np.any(u < chain.low - 1e-3))
+    # dq check is the overspeed column only, not an exit
     overspeed = bool(np.any(dq > chain.high + 1e-3) or np.any(dq < chain.low - 1e-3))
     hunting = reversal_fraction(u0).max() >= REVERSAL_FRACTION
     reason = [
@@ -1036,9 +898,7 @@ def fly(
             "sway_rate_after_2s": rate_2s.tolist(),
             "sway_rate_tau_s": tau_u,
             "dq_a_rms_hold": dq_a_hold,
-            # Issue 250's oracle: peak speed per planned axis, plan against
-            # horizon ask against joint. The two ratios are nan on an axis the
-            # plan holds still.
+            # peak per planned axis; ratios nan on a held axis
             "plan_dq_peak": plan_peak.tolist(),
             "plan_pace_peak_over_mean": plan_pace,
             "asked_now_dq_peak": now_peak.tolist(),
@@ -1047,16 +907,12 @@ def fly(
             "asked_now_plan_ratio": now_ratio.tolist(),
             "asked_any_plan_ratio": any_ratio.tolist(),
             "dq_plan_ratio": ratio.tolist(),
-            # The gate: |u| over u_clamp on its side, per axis. > 1 is outside
-            # Psi's fitted domain, i.e. `past_clamp`.
+            # |u| over u_clamp per axis; > 1 is past_clamp
             "u_clamp_ratio": np.maximum(
                 u.max(0) / chain.high, u.min(0) / chain.low
             ).tolist(),
             "u_peak": np.abs(u).max(0).tolist(),
-            # The achieved joint velocity over the *command* clamp, per axis: an
-            # overspeed ratio. `u_clamp_*` bounds u, not dq, so > 1 here says the
-            # joint ran faster than u is allowed to ask, not that Psi was
-            # extrapolated. `overspeed` is that test as a bool.
+            # dq over the command clamp; > 1 is overspeed, not Psi extrapolation
             "dq_clamp_ratio": np.maximum(
                 dq.max(0) / chain.high, dq.min(0) / chain.low
             ).tolist(),
@@ -1076,11 +932,7 @@ def fly(
                 if qp_iterations
                 else []
             ),
-            # Share of cycles that stopped at `qp_solver_iter_max` rather than
-            # converging. Not the same as `nonzero_status`: a capped QP answers
-            # `ACADOS_MAXITER`, which the NLP accepts, so it publishes its own
-            # truncated step and reads as healthy -- the only way to see the
-            # cap being hit is to count it (issue 226).
+            # share of cycles stopped at qp_solver_iter_max; status stays healthy
             "qp_iter_capped": (
                 float(np.mean(np.asarray(qp_iterations) >= iteration_cap))
                 if qp_iterations
@@ -1092,8 +944,7 @@ def fly(
                 if tick_to_publish
                 else []
             ),
-            # Issue 244 (d): the share of solved cycles each bound was ridden on,
-            # and the cost split averaged over `COST_DECIMATION`-th cycles.
+            # share of solved cycles per bound ridden; mean cost split
             "active": {
                 name: float(np.mean([r[name] for r in riders]))
                 for name in (riders[0] if riders else {})
@@ -1103,7 +954,7 @@ def fly(
                 for name in (dataclasses.asdict(costs[0]) if costs else {})
             },
         }
-    # The viewer's coast: same chain, past the plan, unscored.
+    # viewer coast: past the plan, unscored
     while not diverged and coast() and np.all(np.isfinite(plant.q)):
         next(run)
     if status_line and plant.viewer is not None:
