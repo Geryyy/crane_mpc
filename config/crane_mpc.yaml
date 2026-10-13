@@ -1,457 +1,58 @@
-# The MPC's values, and the only place they live: `crane_mpc_parameters.yaml`
-# carries type, validation and one line of description, no defaults. A key left
-# out here is a startup refusal naming it, not a silent default (issue 183).
-#
-# Every number's provenance -- the sweeps, the measured tables -- is in the notes
-# of the issue that picked it: 119, 121, 137, 156, 174.
 crane_mpc:
   ros__parameters:
     mode: shadow
-    # Empty is no gate: /crane/reference arriving is the go signal. The launch
-    # passes its own argument over this.
-    start_signal_action: ""
+    start_signal_action: ""  # empty: /crane/reference is the go signal
     jtc_name: trajectory_controller_a2b
 
-    # 39 * 0.12 = 4.68 s of reach, 1.5 periods of the *loaded* sway mode --
-    # 0.317 Hz measured in Gazebo under 800 kg (234's 0.350 Hz is the same mode).
-    # The reach is what damps (issue 240: 3.54 s left a carried block ringing,
-    # 4.74 s did not), and it is held here while the knot doubles.
-    #
-    # 0.12/40 from 0.06/80 (issue 247), and the reason is the late cycle, not the
-    # sway. At 0.06 the node applied the previous horizon on 21-31 % of live
-    # cycles (240) and 33.9 % of 246's run, because `solve_budget` is `Ts` and is
-    # measured end to end from the state's own stamp. Doubling `Ts` doubles that
-    # budget. What it costs, offline (`wire_chain`, 30 s, three cells, du_max x4):
-    #
-    #   grid   solve ms 50/90/max   empty tip rate+2s   loaded     hand-off
-    #   0.06    9.1 / 11.7 / 25.0     0.0085 rad/s       0.0147     0.0047
-    #   0.12    4.3 /  5.5 /  8.3     0.0199             0.0154     0.0045
-    #
-    # i.e. the empty cell's tip rate ~2.3x -- 0.12 s is 20 samples of the empty
-    # mode's 2.34 s period, still enough to shape it, where 244 measured 0.18 s
-    # (13 samples) as the step that breaks. Loaded and hand-off are flat, peak
-    # sway is 0.007-0.012 rad worse, the hold is quieter (dq_a RMS 0.0106 ->
-    # 0.0100 loaded) and `du_max` activity rises 0.18-0.25 -> 0.25-0.34.
-    #
-    # Live, two headless `basic_pick_and_place` runs on the launch defaults, load
-    # 2.2-2.5 -> 16.4-21.8, against 240's four runs and 242's three:
-    #
-    #            late cycles   solve ms 50/90/max   worst sway 2 s after arrival
-    #   240/242   21-31 %       18.9-28.6 / - / 126  0.028-0.085 loaded
-    #   246 0.06  33.9 %        26.9 / 35.1 / 70.5   0.0074/0.0087 empty
-    #   247 run 1  0.36 %       14 / 18 / 28         0.0247 over 9 arrivals
-    #   247 run 2  0.36 %       14 / 17 / 35         0.0568 over 13 arrivals
-    #
-    # **The late share is what moved; the sway did not.** 0.0247 and 0.0568 is the
-    # run-to-run spread of this quantity, and the second is 242's own worst number
-    # (0.057) -- so "no worse than 240/242", not better, and nobody should read a
-    # damping improvement into this change. What did move besides the late share is
-    # completion: both runs placed block_0 (TASK_PLACED, 136-138 s, 49-50 mm out
-    # horizontally against 240's acc3 37 mm, the one column that got worse), where
-    # 240 finished 1 of 4 and 242 1 of 3. The horizon stream is a clean 8.3 Hz:
-    # 0.18-0.36 % of consecutive horizons repeat a measurement stamp against 31 %
-    # at 0.06 s, and the worst inter-horizon gap *while driving* is 168-176 ms,
-    # which is what `topic_timeout` is now sized on.
-    #
-    # Ts must equal `sensor_to_valve_delay` and be a whole number of
-    # velocity_loop.yaml ticks (`config.check_settings`), so 0.12 is 12 ticks and
-    # the modelled dead time moves with it. 244 measured that coupling as the
-    # *cheap* half of a coarser grid (overstating the dead time by 60 ms costs the
-    # loaded tip row less than the resolution does), so decoupling it buys nothing.
-    # `max_clock_skew` and `concrete_block_behavior_tree`'s kHorizonMaxAge are
-    # both derived from this pair; both moved with it.
-    # 60 from 40 was issue 223's and 80 from 60 was 240's -- the *reach* is what
-    # damps, and an older note read "80 cost 2x the solve for no measured gain";
-    # that was at `qp_solver_iter_max: 50`, where the solve was dominated by
-    # cycles wandering to MINSTEP rather than by N. Publishes at 8.3 Hz against a
-    # 25 Hz interface; own issue.
-    Ts: 0.12
-    horizon_length: 40
+    Ts: 0.12  # = sensor_to_valve_delay, whole velocity_loop ticks
+    horizon_length: 40  # 4.68 s reach, ~1.5 loaded sway periods
 
-    # Transport dead time D, common to all six axes, modelled in the predictor
-    # only -- symbolic.py carries no delay, so a second one double-counts.
-    # Pinned to `Ts` by `config.check_settings`, which is what picks the number:
-    # crane_model's actuator fit measures `dead_time_s` 0.06, so at the 0.12 knot
-    # the predictor deliberately **overstates** the dead time by one knot. 244
-    # measured that as the cheap direction (overstating costs the loaded tip row
-    # ~a third; the plant's dead time outrunning the model's cost 4x), and a test
-    # pins the direction and the multiple rather than equality.
-    sensor_to_valve_delay: 0.12
+    sensor_to_valve_delay: 0.12  # dead time in predictor; pinned to Ts
     max_state_age: 0.2
-    # A fixed constant added to every Hessian **diagonal** -- it damps the
-    # Newton step, it does not move the minimiser. It is the entirety of the
-    # regularisation on the command-lag rows **and, since 277 deleted the
-    # effort row, on the four force rows too** -- neither appears in a residual
-    # any more, so neither has Gauss-Newton curvature of its own. Not swept.
-    # Measured after the deletion: solve p100 and `qp_iter_capped` unmoved, so
-    # the force rows did not need the cost that used to condition them.
-    levenberg_marquardt: 1.0e-6
-    # C4: command a state, `u` its rate. `du: 10` and false is C3.
-    command_state: true
+    levenberg_marquardt: 1.0e-6  # Hessian diag damping; only curvature on force rows
+    command_state: true  # C4; false is C3
+    dq_a_feedback: [true, true, true, true, true, true]  # measured velocity into x0
+    dq_a_divergence_max: [0.19, 0.06, 0.08, 0.10, 0.53, 0.13]  # report only
 
-    # Actuated order: slew, boom, arm, telescope, rotator, tool. All-true
-    # generalizes Marc's slewing-only velocity feedback to every axis, which
-    # carries his noise exposure with it -- dq_a_divergence_max watches for it
-    # and reports, a quarter of dq_a_max per axis.
-    # dq_a_feedback: [true, true, true, true, true, true]
-    # Lab 2026-10-12: rotator off -- MPC drove a 0.3 Hz rotator swing (0.43 rad range,
-    # err 0.29 rad) off its noisy measured velocity; bag 2026-10-12_12-20-16-record.
-    # dq_a_feedback: [true, true, true, true, false, true]  # lab step 1
-    # Lab step 2: measured velocity only on slewing (Marc's original); boom/arm/telescope
-    # carried the 1.6 Hz mode into x0. Positions stay measured; divergence_max reports drift.
-    # dq_a_feedback: [true, false, false, false, false, true]  # lab step 2: run 12-51-52 was
-    # confounded by 35 JTC topic-watchdog holds (horizons lost to the IPC), not judged.
-    # Lab step 3: full feedback again (rotator included).
-    dq_a_feedback: [true, true, true, true, true, true]
-    dq_a_divergence_max: [0.19, 0.06, 0.08, 0.10, 0.53, 0.13]
-
-    # Lab 2026-10-12: the full 81-point horizon is 18.4 kB, above Cyclone's 14720 B, so it
-    # went out fragmented and a lost fragment dropped it: the IPC JTC hit its 0.24 s
-    # topic_timeout 35x in run 12-51-52. 1.2 s is ~21 points, ~4.8 kB.
-    horizon_publish_s: 1.2
-
-    # = Ts: the horizon is stamped at the sample and knot 0 sits one Ts into it,
-    # behind the in-flight prepend, so Ts is the deadline and not a margin --
-    # `command_delay` being 2 Ts is the dead time to the joint, not slack for
-    # the message (issue 230). Live sim, tick to arrival 30 ms median, solve 10
-    # ms median, 44 ms max.
-    # **It is not the solve that spends this.** 246's run: 322 health messages,
-    # end-to-end latency uncorrelated with solver time (r = 0.005) and the late
-    # cycles' solve distribution identical to the on-time ones' (p50 26.5 vs
-    # 27 ms). The latency is the *age of the state stamp* -- the node's sim clock
-    # only advances between callbacks, so what this measures is how stale
-    # /joint_states was when the timer fired: p50 10 ms with a tail at 80-98 ms.
-    # Against that same measured tail, 60 ms caught 32.9 % of cycles and 120 ms
-    # catches 0.3 %, which is what issue 247 bought and the solve's 2x was not.
-    # 247's own two runs then read latency p50/p90 10/10 ms with 1 of 281 and 2 of
-    # 551 cycles past the budget -- the tail went away as well as fitting, because
-    # a 14 ms solve in a 120 ms period never backs the executor up behind
-    # /joint_states.
-    solve_budget: 0.12
-    # 1 from 2 with `Ts` (issue 247): what the consumers are sized against is the
-    # publication *rate*, not the factor. This knob also gates /crane/sway_settled
-    # (`node.report_settled` reuses it deliberately), and that is the stream
-    # `concrete_block_behavior_tree`'s kSettledMaxAge (1000 ms) and its 2700 ms
-    # descent dwell are both counted on. At 8.3 Hz a factor of 2 would halve the
-    # verdict rate to 4.2 Hz and the dwell's sample count with it; 1 holds the
-    # 8.3 Hz the 0.06 grid shipped, which is the rate 239/240/242 measured those
-    # constants at. Still well under the 20 Hz consumer the old rule was against.
-    solver_health_decimation: 1
-    # 600 ms of fallback horizon against a 4.68 s one.
-    max_consecutive_failures: 5
-    # One escalation's worth: the five solves it takes to escalate, and nothing
-    # from the cycles after it -- the fault repeats and each file is ~130 kB.
-    # Written on a non-zero NLP *or* QP status since issue 233 -- gating on the
-    # QP's alone dumped none of 227's live refusals, which were all NLP status 4
-    # with `qp_status` 0.
-    max_failing_tick_dumps: 5
+    horizon_publish_s: 1.2  # ~21 pts, stays under Cyclone fragment size
+    solve_budget: 0.12  # = Ts, from state stamp
+    solver_health_decimation: 1  # also rate of /crane/sway_settled
+    max_consecutive_failures: 5  # 600 ms fallback
+    max_failing_tick_dumps: 5  # one escalation, ~130 kB each
 
     sway:
-      # A still machine reads 0.0046 rad/s RMS, max 0.039, over 406 s of
-      # quiescence in the control_recordings bags. 0.02, not 0.04: 0.04 passed a
-      # ~0.02 rad swing, 4 cm at the block, into the descent (sim). Untested on the
-      # machine, whose 0.039 spikes reset the tree's 1 s hold.
-      dq_u_settled: [0.02, 0.02]
+      dq_u_settled: [0.02, 0.02]  # rad/s; still machine 0.0046 RMS
 
-    weights:
-      # Every row below carries `tol=`, the residual a good move is allowed on
-      # it: Bryson's `w = 1/tol^2`, so a weight is a sentence in physical units
-      # and a dominating row is a wrong tolerance or a real problem (issue 278).
-      # The tolerances are *written from* the weights the sweeps picked, not the
-      # other way round -- 278 screened a set derived tolerance-first (one tol
-      # per row, every row at once) and it lost on peak tip, the late sway rate
-      # and the final error, 11x on the worst arm. Only the tool row's
-      # tolerance moved. 278's notes have the screening table; the two
-      # tolerances that still read as accidents are named on `dq_a` and
-      # `progress_accel`.
-      #
-      # tol = 0.158 rad, and 0.158 m on the telescope: 0.92/0.98/0.69/0.32 m of
-      # TCP at the start-pose lever arm [5.84 6.18 4.35 2.0], i.e. posture only.
-      # Loose by construction -- the tool row owns the TCP and this row pins the
-      # one redundant DOF left over. Rotator/tool tol 0.316 rad; the rotator's
-      # lever is zero, so no TCP reading derives it.
-      # 10x from 4.0/1.0: at the old row the machine parked ~0.2 rad off the
-      # plan and nothing integrates a standing error away. 0.202 -> 0.068 rad
-      # on the full chain. Not zero, and no weight makes it zero -- that wants
-      # an estimator.
-      # **Tightening it is inert**, which 278 measured because 277's critic
-      # expected the opposite: the deleted effort row's `tau_a - g(q)` did put
-      # `w_tau (dg/dq)^T(dg/dq)` on this diagonal -- 124/171/195 empty and
-      # 149/603/1085 at 800 kg on boom/arm/telescope, against the 40 here, which
-      # is why 277's TCP loss was worst on the loaded arms. But raising this row
-      # 4-40x to match moves no gate column (p95 -1 %, tip +2 %): the lost block
-      # carries off-diagonals of 164/678 that a diagonal weight cannot stand in
-      # for. The curvature was real, the lever is not this row.
-      q_a: [40.0, 40.0, 40.0, 40.0, 10.0, 10.0]
-      # tol = [0.133, 0.0060, 0.0213, 0.0075, 3.16] rad/s, m/s on the telescope
-      # = [17.4, 2.5, 6.5, 1.9, 149] % of the planner's own `dq_max`
-      # [0.764 0.239 0.326 0.400 2.122]. **This is the outlier of the set**: the
-      # same quantity is allowed 17 % of its axis' top planned speed on slew and
-      # 1.9 % on the telescope, a 9x spread nobody decided -- it is `1e-6 D^2`
-      # (below), and `sa`'s own `d` is pinned only to a factor of 20. A set at a
-      # flat 5 % of `dq_max` is 278's `C_dqa` and is much worse (final error
-      # 15x, TCP p50 +94 %), and 10 % is worse again (166x), so the spread is
-      # load-bearing as it stands; what is missing is a reason for it.
-      # The velocity price, and since 277 the only one on `dq_a`. The row is
-      # `dq_a - tangent*v_s`, i.e. deviation from the plan's own velocity, so on
-      # an axis the plan *moves* it does not make standing still cheap the way
-      # the effort row it deleted did. **On an axis the plan holds it does**:
-      # a constant column fits to a zero tangent, and the row is then the same
-      # absolute velocity price at the same weight. That is 276's behaviour
-      # exactly, so it is not a regression. **278 measured that case** on a
-      # slew-only traverse (`--goal-pose -1.5091 5.6401 1.0098 1.8322`: slew
-      # travels 1.047 rad, boom/arm/telescope 1.7e-3 rad / 5.7e-3 rad /
-      # 6.4e-3 m): the ~4.8e4 of absolute damping on the held luffing pair costs
-      # nothing, because the price is on velocity and a held axis has none --
-      # the row's whole share is 0.1-0.3 % there, and no gate column moves.
-      # The planned four are the effort row's weight carried over: it charged
-      # `w_tau*(tau_a - g(q))^2` with `tau_a - g(q)` 96-100 % C3's damping
-      # `D dq_a` (inertia 0.5-3.5 %, Coulomb 0 on these axes), so at `w_tau`
-      # 1e-6 it was an absolute velocity price of `1e-6 D^2`, with `D` =
-      # `c3_full_model.json`'s `axes.<a>.d`. These four are that product; the
-      # rotator keeps the 0.1 it always had (its own product is 0.23).
-      # The fit is **provenance and not a live link**, by design: nothing
-      # re-derives these four, so a C3 refit moves the plant and leaves the cost
-      # where it is, and whoever refits decides this row again.
-      # dq_a: [56.5, 27431.0, 2208.7, 17933.4, 0.1, 0.1]
-      # Lab 2026-10-12: boom/telescope /4 (tol 0.006->0.012 rad/s, 0.0075->0.015 m/s). Live
-      # boom rode a 1.6 Hz mode at 0.009-0.022 rad/s rms, 1.5-3.6 tol: a stiff velocity loop
-      # through 0.24 s of delay. 278: flat 5 % on all axes cost 15x final error (sim).
-      # dq_a: [56.5, 6858.0, 2208.7, 4483.0, 0.1, 0.1]  # lab step 1: improved
-      # Lab step 2: boom/arm/telescope /4 again (tol 0.024 rad/s, 0.043 rad/s, 0.030 m/s =
-      # 10/13/7.5 % of dq_max). Watch arrival: 278 measured flat 10 % at 166x final error (sim).
-      # dq_a: [56.5, 1714.5, 552.2, 1120.8, 0.1, 0.1]  # lab step 2
-      # dq_a: [5.65, 171.45, 55.22, 112.08, 0.01, 0.01]  # lab step 3: smooth moving, but
-      # oscillated at standstill -- on a held axis this row is the only velocity price.
-      # Lab step 4: back to step 2, with dq_a_feedback off on boom/arm/telescope.
-      dq_a: [56.5, 1714.5, 552.2, 1120.8, 0.1, 0.1]
-      # tol = 0.0125 rad, 6.25 % of `limits.q_sway_max`. 278 tried 0.02 (10 % of
-      # the bound, 2500) and 0.01 (10000) on top of the tool row below and both
-      # are worse on peak tip and the late rate, so the sweep's own tolerance
-      # stands and this pair is not where a cost change is left to make.
-      # 6400 from 0 (issue 229), and affordable only because `q_eq` is now a
-      # per-stage table along the plan (`equilibrium.py`): frozen at the
-      # measurement this row priced the hanging pose's own travel, ~0.9 rad of
-      # boom+arm over an A2B move, which is why 20.0 measured worse than 0.0.
-      # With the centre carried, both sway rates fall with this weight on every
-      # offline cell that does not refuse -- A2B empty 0.027/0.024 ->
-      # 0.019/0.018 rad/s, at 800 kg 0.027/0.019 -> 0.024/0.016, worst-of-eight
-      # late tilt rate 0.047 -> 0.029 -- and 6400 is where that stops being
-      # free: 12800 costs the final joint error (worst 0.0048 -> 0.0085 rad) and
-      # 25600 costs it on cells that were clean (A2B 800 kg 0.0002 -> 0.0019).
-      # Swept with `dq_u`, which stays at 1024: 512 and 2048 both trade the two
-      # axes, 4096 moves the swing onto the tip. Ratio 6.25 against the sway's
-      # own omega^2 ~ 10 (2 s period), i.e. this prices roughly the pendulum's
-      # total energy rather than its kinetic half -- a consistency check, not a
-      # derivation.
-      # **Live this weight does not separate, and 0.02 rad/s is not reached.**
-      # Seven Gazebo runs at this setting span 0.014-0.045 rad/s late, one of
-      # them under 0.02 on both rows, against 0.034-0.040 at q_u 0 -- the spread
-      # between identical runs is wider than the on/off difference and does not
-      # track load. 0.02 is not a noise floor either: the passive rows read
-      # exactly 0 before the move. So the offline sweep is what picked 6400, and
-      # what live says is only that it costs nothing (0/3277 cycles refused,
-      # solve p50 13-14 ms). `trials/robustness.md` §7 has both halves.
-      # **Loaded and live the price is worse than neutral in both directions**
-      # (issue 240, §10, one pp run per setting at the 60-knot horizon). The
-      # MPC's own arm command at the loaded mode's 0.31 Hz tracks the price --
-      # 0.001 rad/s at q_u/dq_u 0, 0.019 shipped, 0.032 at dq_u 4096, 0.060 with
-      # dq_sway_max pulled to 0.05 so the soft bound binds (481 slacked cycles)
-      # -- while the hold's tip rate envelope is U-shaped with the shipped pair
-      # at the bottom: 0.10 rad/s against 0.33-0.43 at zero and 0.23-0.33 at the
-      # binding bound. Pricing sway harder buys command ripple at the mode's own
-      # frequency and the plant rides it. `horizon_length` is what moved it.
-      # q_u: [6400.0, 6400.0]
-      # Lab 2026-10-12: tol 0.0125->0.05 rad. Live tip/tilt sit +0.034/-0.010 rad off
-      # passive_equilibrium at standstill (calibration, before any MPC); priced at 6400 it
-      # was 26-28 % of hold cost the MPC can only "fix" by accelerating. Fix the zero, then revisit.
-      # q_u: [400.0, 400.0]  # lab step 1
-      # Lab step 2: tol 0.2 rad (= limits.q_sway_max, which still bounds deflection softly).
-      # Hanging pose is set by gravity, not by u; only accelerating moves it.
-      q_u: [25.0, 25.0]
-      # tol = 0.03125 rad/s, 1.6x `sway.dq_u_settled` -- i.e. this row is
-      # content a little short of where the tree calls the load settled.
-      # Tightening it to the 0.02 itself (2500) is **the single worst tolerance
-      # in 278's whole screen**: on its own it costs 11x the final error and
-      # half of a 26 % peak-tip regression. The sway rate is not a quantity to
-      # price at the threshold it is judged by.
-      # 16x from 4.0, which had never moved while q_a, tcp, progress and
-      # terminal_scale rose around it: 4x less residual swing at the end of the
-      # move and the path improves with it.
-      # 256 from 64: the residual swing at the goal is what the descent places with.
-      # wire_chain --goal out, latency 26 ms: end sway 0.017 -> 0.008 rad, peak
-      # 0.156 -> 0.121, final error 1.9 -> 2.3 mm, no failed solve.
-      # 1024 from 256 (issue 223), and only together with `horizon_length: 60`:
-      # alone at 40 knots it trades the two axes (worst late tilt rate
-      # 0.090 -> 0.074 rad/s, tip 0.066 -> 0.078) and above 1024 it breaks the
-      # solve (2048: 29 % non-zero status). With 60 knots both fall --
-      # tilt 0.056, tip 0.033, peak sway 0.163 -> 0.131 rad. Not the 0.02 rad/s
-      # the PID JTC reaches; no weight in the sweep got there.
-      dq_u: [1024.0, 1024.0]
-      # No `tau_a`: 277 deleted the effort row. The force state is priced
-      # nowhere now, so nothing in the cost resists a force step except the
-      # dynamics and constraint 6, and `levenberg_marquardt` is the only
-      # curvature left on those four QP directions (`problem.state_scale`).
-      # tol = 1.0 rad/s on the command state `c`, i.e. 1.3-4.2x `u^+`
-      # ([0.764 0.239 0.306 0.400 2.122 0.5], `config.command_domain`) -- a
-      # tolerance wider than the variable's own range, so **as a price this row
-      # cannot bite**, and its share is 0.0-0.1 %. It still earns its place:
-      # 278 ablated it to zero and every quality column came out identical
-      # while `qp_iter_capped` went 0.000 -> 0.010. It is curvature on the `c`
-      # rows written as a cost row -- exactly the position 277 left the force
-      # rows in, where `levenberg_marquardt` alone turned out to be enough.
-      u: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
-      # tol = 1.0 rad/s^2 on `dc`, 0.28-0.77x `limits.du_max`. C4's rate cost:
-      # 0.1 kicks, 3 is no better. **The one row nothing can do without**: 278
-      # ablated it to zero and the final error went 362x, TCP p50 +143 % and the
-      # late sway rate broke on 11 of 16 rows. Its 0.1-0.3 % share measures how
-      # little a well-behaved command costs, not how little the row matters.
-      # du: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
-      # Lab 2026-10-12: x4 (tol 0.5 rad/s^2) on the driven axes. The MPC fed back a
-      # 1.5-1.8 Hz machine mode its model lacks (tip rms 0.03->0.13 rad/s, IMUs
-      # id14-17); the rate cost weighs it ~13x the 0.44 Hz sway. Sim has no such mode.
-      du: [4.0, 4.0, 4.0, 4.0, 4.0, 1.0]
-      # tol = 0.025 m at the tool. **1600 from 1000 (0.0316 m) is 278's one
-      # weight change**, and the only Bryson tolerance that paid: on its own it
-      # takes TCP p95 down on all eight arms (44.6 -> 37.8, 73.2 -> 55.5,
-      # 35.0 -> 26.5 mm; -14 to -25 %) and p50 down on all eight, for +1 % peak
-      # tip and +3 % peak tilt. Tighter is monotonically more of both -- 0.020 m
-      # is -24 % p95, 0.015 m is -34 % -- and the price is the late tilt rate on
-      # the two arms that never settle inside 2 s anyway (r11_empty 0.056 ->
-      # 0.068 -> 0.094 -> 0.117 rad/s). 0.025 is where that is still 1.2x.
-      # None of the cost's own sway knobs buys it back: a tighter `q_u`, a
-      # tighter `dq_u` and 2x `terminal_scale` were all tried on top and all
-      # three are worse, which is 229's and 240's result again.
-      # Worth reading with the share table: the row's weight rose 1.6x and its
-      # share *fell* (7.4-15.7 % -> 5.3-14.1 %), because the residual it prices
-      # contracted further than the weight grew. That is the Bryson rule
-      # working, and it is why no row dominates here by units accident.
-      tcp: 1600.0
-      # tol = 0.00699 of the path. With the TCP row priced the pull to the end
-      # of the path has to rise with it: arrival keeps improving to 20480 at
-      # flat path error, and the cost is ~1% refused cycles. 278 tried 0.01
-      # (10000, looser) and 0.005 (40000): looser costs the final error 3x on
-      # its own, tighter moves nothing the tool row has not already moved.
-      progress: 20480.0
-      # tol = 0.0577 /s, 27 % of the nominal pace `1/(39*0.12)` = 0.2137 /s --
-      # the loosest tolerance in the set relative to its own quantity, which is
-      # the point: this row is a stall watch, not a tracker. 278 tried 10 % of
-      # the pace (2190) and 20 % (548) and neither moves a gate column offline,
-      # as the paragraph below predicts.
-      # Priced against the plan's own pace since 276, not against 0 -- a `yref` of
-      # 0 is a cost that prefers standing still, which is what 269's stall was.
-      # The row only bites where `v_s` is 0 and the reference is not, i.e. at a
-      # stall: offline `v_s` already tracks the pace, so every weight here is one
-      # table row on every gate column.
-      # 1e3 from 276, where it was the lowest weight that cleared 269's loaded
-      # lift at all (4 stalled cycles at 300, 15 at 100, 34 at 0.1) and cost
-      # +9 % peak tip to do it. **277 deleted the effort row and both halves of
-      # that changed**: the lift is stall-free at 1e3, 300 and 100 alike -- the
-      # absolute velocity price was what made standing cheap -- and peak tip
-      # offline now moves 2 points, not 5, across that whole range (+9/+8/+7 at
-      # 1e3/300/100 against 276's shipped cost). 300 of the three: the sway
-      # left to buy is 1 point, and the lift's arrival grows monotonically as
-      # the weight falls (boom to 0.002 rad at t0+15.5/16.4/16.9 s against
-      # 15.00 s nominal), which is lag against a 2.0 s `max_stall_time`.
-      progress_rate: 300.0
-      # tol = 10 /s^2, 5x `limits.progress_accel_max` -- **the second accident of
-      # the set**: a tolerance five times the variable's own hard bound cannot
-      # be reached, so the row is inert by construction and no `--set` on it
-      # measures anything. Left at 0.01 because 278 did not re-derive it and a
-      # weight that cannot bite is not where the next change belongs; whoever
-      # touches it should pick the bound as the tolerance (0.25) and screen it.
-      progress_accel: 0.01
-      # tol = the stage tolerance / sqrt(60), i.e. 0.129x it, since the scale
-      # multiplies the whole terminal prefix -- progress row included, which is
-      # what makes the machine arrive; scaling the tracking rows alone measured
-      # far worse. 20 and 60 are one number within noise, 60 refuses less.
-      # 278 ablated the prefix to zero: peak tilt +8 % against +3 % with it and
-      # the late tilt rate worse, for a slightly better final error. Its share
-      # is ~0 outside the cold-start cycle and it still earns the row.
-      # terminal_scale: 60.0
-      # Lab 2026-10-12: 20 ("20 and 60 are one number within noise", sim). Live the terminal
-      # share reached 49 % in a hold (sim: ~0): x60 on an end state predicted from noisy x0.
-      terminal_scale: 20.0
+    weights:  # Bryson w = 1/tol^2
+      q_a: [40.0, 40.0, 40.0, 40.0, 10.0, 10.0]  # posture, tol 0.158
+      dq_a: [56.5, 1714.5, 552.2, 1120.8, 0.1, 0.1]  # dev from plan vel; lab step 2
+      q_u: [25.0, 25.0]  # tol 0.2 rad = q_sway_max (lab)
+      dq_u: [1024.0, 1024.0]  # tol 0.031 rad/s
+      u: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]  # curvature on c rows, can't bite
+      du: [4.0, 4.0, 4.0, 4.0, 4.0, 1.0]  # tol 0.5 driven (lab: 1.6 Hz mode)
+      tcp: 1600.0  # tol 0.025 m
+      progress: 20480.0  # tol 0.007 of path
+      progress_rate: 300.0  # stall watch vs plan pace
+      progress_accel: 0.01  # inert, tol 5x its bound
+      terminal_scale: 20.0  # lab: 60 dominated hold cost
 
     limits:
-      # No q_a_lower/q_a_upper/q_a_margin/dq_a_max/u_max here: crane_model owns
-      # the control-safe box and `config.command_domain` derives u^+ from it.
-      # Same keys and same numbers as crane_planner.yaml's -- two copies, by hand.
-      q_sway_max: [0.2, 0.2]
+      q_sway_max: [0.2, 0.2]  # same as crane_planner.yaml, by hand
       dq_sway_max: [1.0, 0.5]
-      # 50% catch-up on the fastest pace the plan asks for (`JointPath.s_profile`'s
-      # peak; its mean only where a plan carries no law), and it stays 50% if the
-      # grid changes. Against the mean this bound *was* the lag: the A2B profile
-      # peaks at 1.76x its own average, so 1.5x the average capped the machine at
-      # 0.85 of the plan's peak even where the cost asked for it (issues 250, 253).
-      progress_rate_headroom: 1.5
+      progress_rate_headroom: 1.5  # x peak plan pace
       progress_accel_max: 2.0
-      # `u_max / 0.585 s` = 4x `u_max / 2.34 s`. Still a control bound, like
-      # `u_clamp_*`, and still nowhere near a physical one: the valve's own slew
-      # ceiling (0.058/10 ms normalised x end-to-end gain, which is where
-      # [5.2, 1.7, 1.8, 3.5, 14.0] came from) is another 4x up and lets `u`
-      # cross its whole range inside one 60 ms knot, which is what the
-      # single-iteration SQP spent reversing the command every other cycle --
-      # 214's hunt, empty hold sway rate 0.26 -> 0.007 rad/s with the bound on.
-      # The 2.34 s was the sway period, measured at `horizon_length` 40 and
-      # before 226's state scaling. Both have moved and **the hunt no longer
-      # reproduces offline at any setting**: at the valve ceiling, and at 214's
-      # own N=40 / q_u=0 / dq_u=256 / tau_a=1e-8, `u0` reversals stay <= 0.004
-      # and the telescope's settled-hold ptp <= 1.2 mm (wire_chain, 17 runs,
-      # issue 246). The scaling is compiled in, so the harness has no hunt
-      # oracle left -- 4x rests on the gains instead, monotone and saturating
-      # by ~10x: loaded peak sway 0.098 -> 0.096 rad, hand-off 0.080 -> 0.076,
-      # hold dq_a 0.0117 -> 0.0106 rad/s RMS, final error never worse, refusals
-      # and QP iterations flat. 4x is also the largest factor at which the bound
-      # is still ridden on every cell (0.18-0.25 of solved cycles); at 10x it is
-      # 0.00 empty, i.e. off, and off is what 214 shipped away from.
-      # Live at 4x, one empty Gazebo A2B (246, load 1.6-10.8): telescope hold
-      # ptp 0.47 mm against 214's pre-fix 15 mm and post-fix <= 1.5, hold dq_a
-      # max 0.0100 rad/s against 0.078-0.131 / 0.002-0.017, sway rate 2 s after
-      # arrival 0.0074/0.0087 against 214's 0.011-0.019 / 0.042-0.112. One run,
-      # so it clears the hunt and does not resolve the 0.02 rad/s gate.
-      du_max: [1.304, 0.408, 0.524, 0.684, 3.628]
+      du_max: [1.304, 0.408, 0.524, 0.684, 3.628]  # 4x u_max/2.34 s, anti-hunt
 
     slack:
-      # The stage cost runs to order 1e2 at these weights, so 1e3 is the decade
-      # above that makes the penalty exact; force and flow a decade dearer.
-      q_u: [1.0e3, 1.0e3]
+      q_u: [1.0e3, 1.0e3]  # decade above stage cost
       dq_u: [1.0e3, 1.0e3]
       cylinder_force: [1.0e4, 1.0e4, 1.0e4, 1.0e4, 1.0e4, 1.0e4]
       pump_flow: 1.0e4
 
-    # This pair is the move's whole overrun budget, not just this node's: on
-    # `cbs_mpc_active` the BT's WaitForMoveComplete watches /crane/mpc/horizon and
-    # fails the move as soon as this hold ends, because the JTC then holds the last
-    # horizon point and the arrival and sway gates freeze where they stand (issue
-    # 239). So a move has the plan plus this long to arrive, and nothing downstream
-    # waits past it -- there is no second constant to keep in step.
-    #
-    # 20 s, not 4: the machine lags the plan and the JTC played the last horizon
-    # open-loop, a stop nobody damped (live: 0.06 rad left at every goal). 4 s was
-    # the cap on the *empty* hold because it grew the swing 0.03 -> 0.49 rad at 9 m
-    # reach -- that was the `du_max` hunt above, and with the hunt gone the empty
-    # hold damps: 0.054 -> 0.019 rad over 20 s at 8.4 m, 0.021 -> 0.001 rad on this
-    # A2B move (wire_chain, issue 214). The tree deactivating the JTC ends the hold
-    # sooner; that drops the plan.
-    max_reference_age: 20.0
-    # Carrying: 20 s too, and now for one reason only -- a loaded move needs at
-    # least as long as an empty one to reach its goal. The old reason, that falling
-    # silent sooner left a lifted block swinging undamped through the BT's 120 s
-    # settle wait, is gone with that wait: 239 ends the move at this bound instead.
-    # It does not *earn* the 20 s either. Issue 234 measured the loaded hold as a
-    # pump for the 0.35 Hz tip mode, and issue 238 saw the sway grow right through
-    # it (0.199 -> 0.587 rad/s), so no length of hold settles a carried load; that
-    # is issue 240's, and changing this number does not touch it.
+    max_reference_age: 20.0  # whole move overrun budget; BT fails move after
     max_reference_age_loaded: 20.0
 
-    # Liveness pair, wall clock. 0.1 is a third of the lowest legitimate
-    # over-ask measured; 2.0 s is a horizon spent without moving through the
-    # plan.
-    min_progress_rate: 0.1
-    max_stall_time: 2.0
+    min_progress_rate: 0.1  # liveness, wall clock
+    max_stall_time: 2.0  # one horizon without progress
 
-    # Two thirds of a T_s, and derived from it rather than carried: 0.08 at
-    # Ts 0.12 (issue 247). Not tied to `Ts` in code, and nothing refuses a
-    # mismatch at startup.
-    max_clock_skew: 0.08
+    max_clock_skew: 0.08  # 2/3 Ts, not enforced
