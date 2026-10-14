@@ -25,16 +25,22 @@ crane_mpc:
 
     weights:  # axis order slew, boom, arm, telescope, rotator, tool; up = that row matters more
       q_a: [40.0, 40.0, 40.0, 40.0, 10.0, 10.0]  # joint position vs path point (posture)
-      dq_a: [56.5, 1714.5, 552.2, 1120.8, 0.1, 0.1]  # joint velocity vs plan velocity at the current pace
-      q_u: [25.0, 25.0]  # sway angle vs hanging equilibrium
-      dq_u: [128.0, 128.0]  # sway rate: damping; too high chases sensor noise
+      dq_a: [819.0, 34.3, 34.3, 819.0, 10.0, 10.0]  # joint velocity vs plan velocity at the current pace
+      # dq_a: [941.0, 16.3, 16.3, 941.0, 10.0, 10.0]  # alt set: faster sway decay, more path deviation
+      q_u: [86.9, 86.9]  # sway angle vs hanging equilibrium
+      # q_u: [237.0, 237.0]  # alt set
+      dq_u: [32.5, 32.5]  # sway rate: damping; too high chases sensor noise
+      # dq_u: [24.7, 24.7]  # alt set
       u: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]  # command magnitude (regulariser)
-      du: [64.0, 64.0, 64.0, 64.0, 64.0, 64.0]  # command rate: smoothness; up = calmer, slower reaction
-      tcp: 1600.0  # TCP distance from the path point, sway excluded
+      du: [4.1, 4.1, 4.1, 4.1, 4.1, 4.1]  # command rate: smoothness; up = calmer, slower reaction
+      # du: [8.8, 8.8, 8.8, 8.8, 8.8, 8.8]  # alt set
+      tcp: 589.0  # TCP distance from the path point, sway excluded
+      # tcp: 403.0  # alt set
       progress: 20480.0  # pull along the path; down = the crane lags the plan
       progress_rate: 300.0  # progress speed vs plan pace; keeps the crane from stalling
       progress_accel: 0.01  # progress acceleration (regulariser)
-      terminal_scale: 20.0  # end-of-horizon weights over stage weights
+      terminal_scale: 12.6  # end-of-horizon weights over stage weights
+      # terminal_scale: 15.2  # alt set
 
     limits:
       q_sway_max: [0.2, 0.2]  # rad, sway angle allowed from equilibrium (soft)
