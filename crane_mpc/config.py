@@ -341,7 +341,7 @@ def check_settings(parameters: dict, hydraulics: dict) -> None:
     )
 
 
-def check_payload(mass_kg: float, com_m) -> None:
+def check_payload(mass_kg: float, com_m, inertia=None) -> None:
     """
     Refuse a payload the dynamics cannot carry.
 
@@ -361,4 +361,17 @@ def check_payload(mass_kg: float, com_m) -> None:
         raise MpcConfigError(
             f"the payload's centre of mass is {com.tolist()} and must be three finite "
             "numbers; it is the moment arm the dynamics carry"
+        )
+    if inertia is None:
+        return
+    inertia = np.asarray(inertia, dtype=float)
+    if (
+        inertia.shape != (3, 3)
+        or not np.all(np.isfinite(inertia))
+        or not np.allclose(inertia, inertia.T)
+        or np.any(np.linalg.eigvalsh(inertia) < 0.0)
+    ):
+        raise MpcConfigError(
+            f"the payload's inertia {inertia.tolist()} must be a finite, symmetric, "
+            "positive semi-definite 3x3 about its centre of mass"
         )

@@ -930,7 +930,9 @@ class MpcNode(Node):
             self.get_logger().warn(f"{SET_PAYLOAD_SERVICE} refused a payload: {why}.")
             return response
 
-        changed = self._ocp.set_payload(payload.mass_kg, payload.center_of_mass_k8_m)
+        changed = self._ocp.set_payload(
+            payload.mass_kg, payload.center_of_mass_k8_m, payload.inertia_k8_kg_m2
+        )
         self._payload = payload
         response.success = True
         response.active_mass = payload.mass_kg

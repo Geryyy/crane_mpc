@@ -448,7 +448,7 @@ def tcp_path(cycle: Cycle, model):
 
 
 def payload_from_message(message):
-    """Read `crane_msgs/Payload` as the model's own: a point mass, no inertia."""
+    """Read `crane_msgs/Payload` as the model's own: a uniform box, else a point mass."""
     payload = Payload()
     payload.valid = True
     if message.shape == message.SHAPE_NONE:
@@ -467,6 +467,13 @@ def payload_from_message(message):
         )
     payload.mass_kg = float(message.mass)
     payload.center_of_mass_k8_m = com
+    size = np.array([message.dimensions.x, message.dimensions.y, message.dimensions.z])
+    if message.shape == message.SHAPE_BOX and np.all(np.isfinite(size) & (size > 0.0)):
+        # Box edges along K8's axes; a cylinder or no size stays a point mass.
+        squared = size**2
+        payload.inertia_k8_kg_m2 = np.diag(
+            payload.mass_kg / 12.0 * (squared.sum() - squared)
+        )
     return payload, ""
 
 

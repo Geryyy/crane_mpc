@@ -18,7 +18,7 @@ Move
   --margin-interp          planner (tune_planner)
 MPC / OCP
   --set KEY=VALUE          crane_mpc.yaml override; scalar fills a list
-  --payload-mass KG --payload-com M M M    what the OCP believes
+  --payload-mass KG --payload-com M M M --payload-box A B C    what the OCP believes
   --pace F | --mean-pace   progress reference compressed / plan's mean pace
   --relax-h {force,pump,both} --h-factor F    scale constraint 6/7 allowance
   --rebuild --verbose-build                re-export the solver
@@ -30,6 +30,7 @@ Wire and JTC
   --control-rate HZ --pi-rung {full,no-integral,feedforward} --pi-scale F
 Plant (MuJoCo + C3), mismatch against the OCP
   --plant-payload KG --plant-payload-com M M M    default the OCP's
+  --plant-payload-box A B C                     MuJoCo payload inertia; default near-point
   --noise-scale F          joint noise + bias off the Gazebo xacro; 0 = exact
   --k-scale --d-scale --lag-shift --tau-v-scale --tau-v-offset --dead-time
   --psi-gain-positive --psi-gain-negative --no-clamp --timestep
@@ -61,16 +62,17 @@ from crane_model.model import Payload
 from crane_model.mujoco_plant import MujocoPlant, leave
 from crane_model.symbolic import PAYLOAD_MOUNT_LINK
 from crane_model.viewing import TCP_BODY, Markers, SpaceGate, canonical_rows
-from crane_mpc import cycle as cy
-from crane_mpc import horizon as hz
-from crane_mpc import problem as ocp_problem
-from crane_mpc.equilibrium import Equilibrium
-from crane_mpc.solver import SLACK_NOTICEABLE
 from growth import growth
 from harness import ACTUATED, PASSIVE, PLANNED, cs, tune_planner
 from hunting import REVERSAL_FRACTION, reversal_fraction
 from plotjuggler import PORT, PlotJuggler
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
+
+from crane_mpc import cycle as cy
+from crane_mpc import horizon as hz
+from crane_mpc import problem as ocp_problem
+from crane_mpc.equilibrium import Equilibrium
+from crane_mpc.solver import SLACK_NOTICEABLE
 
 ROTATOR = 4
 TOPIC_TIMEOUT = 0.24  # s without a horizon before the JTC holds position
@@ -284,8 +286,14 @@ def stamp_of(seconds):
     return Time(sec=ns // 1_000_000_000, nanosec=ns % 1_000_000_000)
 
 
-def carry_payload(plant, mass, com):
-    """Put a point mass on MuJoCo's payload mount, where the OCP's sits."""
+def box_inertia(mass, size):
+    """Principal moments of a uniform box, edges along K8's axes."""
+    squared = np.asarray(size, float) ** 2
+    return mass / 12.0 * (squared.sum() - squared)
+
+
+def carry_payload(plant, mass, com, size=None):
+    """Put the payload on MuJoCo's mount, where the OCP's sits; near-point without size."""
     if not mass:
         return
     mj, model = plant._mj, plant.model
@@ -295,7 +303,9 @@ def carry_payload(plant, mass, com):
     model.body_mass[body] = mass
     model.body_ipos[body] = com
     model.body_iquat[body] = (1.0, 0.0, 0.0, 0.0)
-    model.body_inertia[body] = 1e-4 * mass  # near-point; MuJoCo wants > 0
+    model.body_inertia[body] = (
+        1e-4 * mass if size is None else box_inertia(mass, size)
+    )  # near-point: MuJoCo wants > 0
     mj.mj_setConst(model, plant.data)
     plant.forward()
 
@@ -381,6 +391,14 @@ def main(argv=None) -> int:
         default=None,
         metavar="M",
         help="m in K8, what MuJoCo hangs; default --payload-com",
+    )
+    parser.add_argument(
+        "--plant-payload-box",
+        type=float,
+        nargs=3,
+        default=None,
+        metavar="M",
+        help="m along K8's axes, MuJoCo's payload inertia; default near-point",
     )
     parser.add_argument(
         "--tau-v-scale",
@@ -479,7 +497,13 @@ def main(argv=None) -> int:
     )
     if options.relax_h:
         scale_h(ocp, options.relax_h, options.h_factor)
-    ocp.set_payload(options.payload_mass, options.payload_com)
+    ocp.set_payload(
+        options.payload_mass,
+        options.payload_com,
+        None
+        if options.payload_box is None
+        else np.diag(box_inertia(options.payload_mass, options.payload_box)),
+    )
     plant = MujocoPlant(description, timestep=options.timestep)
     carried = (
         options.payload_mass if options.plant_payload is None else options.plant_payload
@@ -491,7 +515,7 @@ def main(argv=None) -> int:
         else options.plant_payload_com,
         float,
     )
-    carry_payload(plant, carried, carried_com)
+    carry_payload(plant, carried, carried_com, options.plant_payload_box)
     payload = Payload(carried, carried_com, valid=True)
 
     def equilibrium(q_a):

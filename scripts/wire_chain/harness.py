@@ -46,9 +46,10 @@ from crane_model.mujoco_plant import (  # noqa: E402
 )
 from crane_model.symbolic import ACTUATOR_FIT  # noqa: E402
 from crane_model.velocity_loop import VelocityLoop, load_velocity_loop  # noqa: E402
+from crane_planning.ocp import evaluate  # noqa: E402
+
 from crane_mpc import solver as ocp_runtime  # noqa: E402
 from crane_mpc.problem import PATH_POINTS  # noqa: E402
-from crane_planning.ocp import evaluate  # noqa: E402
 
 ox, cs = export_ocp.ox, export_ocp.cs
 PLANNED = list(PLANNED_INDICES)
@@ -106,6 +107,14 @@ def add_arguments(parser) -> None:
     parser.add_argument("--payload-mass", type=float, default=0.0, help="kg, the OCP's")
     parser.add_argument(
         "--payload-com", type=float, nargs=3, default=(0.0, 0.0, 0.0), help="m, in K8"
+    )
+    parser.add_argument(
+        "--payload-box",
+        type=float,
+        nargs=3,
+        default=None,
+        metavar="M",
+        help="m along K8's axes; the OCP's inertia, else a point mass",
     )
     parser.add_argument(
         "--set", action="append", default=[], metavar="KEY=VALUE", help="yaml lever"

@@ -11,6 +11,7 @@ from ament_index_python.packages import get_package_share_directory
 from conftest import export_for, window_path
 from crane_model import hydraulic_limits
 from crane_model import symbolic as cs
+
 from crane_mpc import bspline, problem
 from crane_mpc.config import machine_limits
 from crane_mpc.horizon import Grid, Knots, resample
@@ -465,6 +466,26 @@ def test_a_payload_step_drops_the_warm_start_whatever_the_caller_passes(ocp, sta
     assert not solved(ocp, state, horizon, q_eq, guess).warm_started
     # And only the step: the cycle after it is warm again.
     assert solved(ocp, state, horizon, q_eq, guess).warm_started
+    ocp.set_payload(0.0, np.zeros(3))
+
+
+def test_a_declared_box_reaches_the_model_as_its_inertia(ocp):
+    from crane_msgs.msg import Payload as PayloadMessage
+
+    from crane_mpc.reports import payload_from_message
+
+    message = PayloadMessage(shape=PayloadMessage.SHAPE_BOX, mass=880.0)
+    message.com.z = -0.55
+    message.dimensions.x, message.dimensions.y, message.dimensions.z = 0.9, 0.6, 0.6
+    payload, why = payload_from_message(message)
+    assert why == ""
+    assert np.diag(payload.inertia_k8_kg_m2) == pytest.approx([52.8, 85.8, 85.8])
+
+    ocp.set_payload(880.0, [0.0, 0.0, -0.55])
+    # Same mass and centre, only the inertia: still a new model.
+    assert ocp.set_payload(880.0, [0.0, 0.0, -0.55], payload.inertia_k8_kg_m2)
+    rows = ocp._model_parameter()[cs.P_PAYLOAD_INERTIA : cs.P_PAYLOAD_INERTIA + 6]
+    assert rows == pytest.approx([52.8, 0.0, 0.0, 85.8, 0.0, 85.8])
     ocp.set_payload(0.0, np.zeros(3))
 
 

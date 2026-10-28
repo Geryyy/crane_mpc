@@ -746,6 +746,7 @@ class Ocp:
         self._base_parameter = np.zeros(cs.NP)
         self.payload_mass_kg = 0.0
         self.payload_com_m = np.zeros(3)
+        self.payload_inertia = np.zeros((3, 3))
         self._payload_changed = False
         #: The parameter vector the last written problem carried, path included,
         #: and the `PathCycle` it was built from -- what `_read_solution` and
@@ -806,7 +807,9 @@ class Ocp:
 
     # -- the model, asked the two questions the solver does not answer ----------
 
-    def set_payload(self, mass_kg: float, com_m, *, cold: bool = True) -> bool:
+    def set_payload(
+        self, mass_kg: float, com_m, inertia=None, *, cold: bool = True
+    ) -> bool:
         """
         Bind a payload into `p`. Returns whether it changed the model.
 
@@ -815,10 +818,13 @@ class Ocp:
         dump off a loaded move would read as a payload step and throw away the
         recorded seed -- and the seed is the suspect.
         """
-        config.check_payload(mass_kg, com_m)
+        inertia = np.zeros((3, 3)) if inertia is None else np.asarray(inertia, float)
+        config.check_payload(mass_kg, com_m, inertia)
         com = np.asarray(com_m, dtype=float)
-        changed = mass_kg != self.payload_mass_kg or not np.array_equal(
-            com, self.payload_com_m
+        changed = (
+            mass_kg != self.payload_mass_kg
+            or not np.array_equal(com, self.payload_com_m)
+            or not np.array_equal(inertia, self.payload_inertia)
         )
         # Tracked here, not via caller's `guess=None`: `h_eff` jumps at a grasp.
         self._payload_changed = self._payload_changed or (changed and cold)
@@ -826,7 +832,9 @@ class Ocp:
         self.payload_com_m = com
         self._base_parameter[cs.P_PAYLOAD_MASS] = float(mass_kg)
         self._base_parameter[cs.P_PAYLOAD_COM : cs.P_PAYLOAD_COM + 3] = com
-        # `crane_msgs/Payload` carries no inertia: a point mass.
+        self.payload_inertia = inertia
+        for entry, (row, column) in enumerate(cs.INERTIA_ENTRIES):
+            self._base_parameter[cs.P_PAYLOAD_INERTIA + entry] = inertia[row, column]
         return changed
 
     def pin_tool(self, position: float) -> None:

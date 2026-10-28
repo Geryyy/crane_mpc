@@ -19,6 +19,7 @@ import sys
 from pathlib import Path
 
 import numpy as np
+
 from crane_mpc import dump
 from crane_mpc.solver import Guess, PathCycle, status_word
 
@@ -78,7 +79,10 @@ def replay(ocp, record):
     """
     ocp.pin_tool(float(record["tool_position"]))
     ocp.set_payload(
-        float(record["payload_mass_kg"]), record["payload_com_m"], cold=False
+        float(record["payload_mass_kg"]),
+        record["payload_com_m"],
+        record.get("payload_inertia"),  # absent in dumps before box inertia
+        cold=False,
     )
     in_flight = np.asarray(record["in_flight"], dtype=float)
     arguments = (
