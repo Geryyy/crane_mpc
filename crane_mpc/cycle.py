@@ -873,13 +873,20 @@ class Cycle:
         and not a silence.
         """
         measured = x0[cs.X_PASSIVE_POSITION : cs.X_PASSIVE_POSITION + PASSIVE_DOF]
-        if self.equilibrium is None or self.horizon is None:
+        if self.equilibrium is None or self.horizon is None or self.path is None:
             return measured.copy()
         planned = x0[cs.X_PLANNED_POSITION : cs.X_PLANNED_POSITION + PLANNED_DOF]
+        # On the curve at the progress the cost asks each stage for: the reference's own
+        # resample sits at `reference_progress`, i.e. the mean pace, ~10 % of path behind
+        # mid-move.
+        stages = bspline.value(
+            self.path.progress_at(np.arange(len(self.horizon)) * self.Ts),
+            self.path.control,
+            problem.PATH_KNOTS,
+        )
         try:
             return self.equilibrium.table(
-                np.append(planned, self.tool_position),
-                self.horizon.q_a_ref[:, :PLANNED_DOF],
+                np.append(planned, self.tool_position), stages
             )
         except Exception as error:
             self.timing.say_once(
