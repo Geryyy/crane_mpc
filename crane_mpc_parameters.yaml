@@ -260,24 +260,6 @@ crane_mpc:
     # keeps narrowing when either factor narrows. A declaration here would be the second
     # copy issue 128 had to repair. Same for `hydraulics.*`: `crane_model.hydraulic_limits()`
     # is the only reader (issue 183 deleted the overrides, which made the export stale).
-    q_sway_max:
-      type: double_array
-      read_only: true
-      description: "Constraint 3, |q_u - q_eq| <= q_u^+ -- tool swing clearance, drawn around
-        the **equilibrium** and never around zero: the hanging pose moves with the arm. Same
-        number, same key as the planner's `q_sway_max`, which clears the path for it."
-      validation:
-        fixed_size<>: [2]
-        lower_element_bounds<>: [0.0]
-    dq_sway_max:
-      type: double_array
-      read_only: true
-      description: "Constraint 4, |dq_u| <= dq_u^+. **Hand-set controller bounds, not physical
-        limits** -- the joints are unactuated and these express how much sway is tolerated.
-        Same key as the planner's `dq_sway_max`."
-      validation:
-        fixed_size<>: [2]
-        lower_element_bounds<>: [0.0]
     progress_rate_headroom:
       type: double
       read_only: true

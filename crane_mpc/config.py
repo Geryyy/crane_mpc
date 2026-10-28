@@ -22,6 +22,7 @@ from crane_model.conventions import (
     CONTROL_SAFE_AXES,
     canonical_joints,
     control_safe_limits,
+    sway_limits,
 )
 from crane_model.velocity_loop import load_velocity_loop
 
@@ -90,8 +91,6 @@ DERIVED = ("u_max",)
 
 #: Declared limits, i.e. the ones a deployment still writes.
 LIMITS = (
-    "q_sway_max",
-    "dq_sway_max",
     "progress_rate_headroom",
     "progress_accel_max",
     "du_max",
@@ -122,7 +121,7 @@ def parameter_dict(values) -> dict:
 def machine_limits() -> dict:
     """Every limit row crane_model owns, in this problem's actuated order."""
     box = control_safe_box()
-    return box | {"u_max": command_domain(box["dq_a_max"])}
+    return box | sway_limits() | {"u_max": command_domain(box["dq_a_max"])}
 
 
 def control_safe_box() -> dict:

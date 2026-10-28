@@ -43,8 +43,6 @@ crane_mpc:
       # terminal_scale: 15.2  # alt set
 
     limits:
-      q_sway_max: [0.2, 0.2]  # rad, sway angle allowed from equilibrium (soft)
-      dq_sway_max: [1.0, 0.5]  # rad/s, sway rate allowed (soft)
       progress_rate_headroom: 1.5  # x plan peak pace the MPC may run at
       progress_accel_max: 2.0  # how fast the pace may change
       du_max: [1.304, 0.408, 0.524, 0.684, 3.628]  # rad/s^2, command rate per axis; down = smoother, slower reaction
