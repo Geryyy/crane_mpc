@@ -83,9 +83,9 @@ def value(s, control, knots: np.ndarray, order: int = ORDER) -> np.ndarray:
     De Boor, vectorised over `s`, rather than the `_basis` sum over every
     control point: only `order + 1` basis functions are nonzero at any `s`, so
     the sum spends 30 recursions per row to add 26 zeros. That is not a
-    micro-optimisation here -- this runs once per published cycle over all 80
+    micro-optimisation here -- this runs once per published cycle over all
     knots, on the path between the measurement and the command, and the sum
-    measured 47.8 ms against a 60 ms period. This is 0.4 ms, and the same
+    measured 47.8 ms per cycle. This is 0.4 ms, and the same
     curve to 2e-16 (`test_de_boor_agrees_with_the_basis_sum`).
     """
     place = np.clip(np.atleast_1d(np.asarray(s, dtype=float)), 0.0, 1.0)
@@ -145,7 +145,7 @@ def _design(samples: int, control_points: int, order: int):
     Give the basis at each sample, and the pseudo-inverse of its interior columns.
 
     Cached: the basis is a recursion in Python and the shape never changes, but
-    the path behind it is refitted every cycle.
+    the path behind it is refitted once per plan.
     """
     knots = knot_vector(control_points, order)
     places = np.linspace(0.0, 1.0, samples)

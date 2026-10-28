@@ -1,7 +1,7 @@
 # crane_mpc
 
 The producer of `/crane/mpc/horizon`. Runs beside the controller manager and
-solves the crane OCP with acados once per 60 ms cycle. It **ships in shadow**
+solves the crane OCP with acados once per `Ts` (120 ms as shipped). It **ships in shadow**
 and publishes no horizon until `mode: active`.
 
 ## Where the code is
@@ -60,7 +60,7 @@ package can read it from.
 The state is the C3-extended one `crane_model.symbolic` defines: the five
 planned joint coordinates and the two passive sway coordinates with their
 velocities, then C3's lagged command `u_f`, the progress pair `(s, v_s)` and the
-actuated force `tau_a` — 25 rows. **The input is a joint velocity command**, five
+actuated force `tau_a` — 25 rows, 30 with C4's command `c` (what ships). **The input is a joint velocity command**, five
 of them, plus the progress acceleration; it is not an acceleration and is never
 differenced into one. The tool axis is not planned: it rides in `p` pinned at its
 measurement, which is why six actuated joints leave this node and five are solved
@@ -69,7 +69,7 @@ for.
 The continuous dynamics and the actuated-force output come directly from
 `crane_model.symbolic`'s CasADi graph; this package contains no second
 rigid-body dynamics implementation. acados integrates that graph with an
-**implicit** Runge-Kutta step (two Gauss stages) per shooting interval and runs
+**implicit** Runge-Kutta step (two Radau IIA stages) per shooting interval and runs
 `SQP_RTI`, exactly one iteration per cycle. The integrator is implicit because
 C3 is stiff at `T_s`: the fastest eigenvalue of the linearised plant gives
 `|lambda| T_s = 8.5` against an explicit stability limit near 2.8, so an
@@ -114,8 +114,8 @@ velocity price of `w_tau D^2` whose size came out of a hydraulic fit and which
 made standing still cheap (issue 269's stall). 277 deleted it and carried
 `1e-6 D^2` onto the planned axes' `weights.dq_a`; the history of the five
 passes that tried to make the row mean its inertia is in the 265–276 notes.
-Sway offset and sway rate are independent terms, and **only the rate is
-priced** — see below. The terminal cost omits the input block and raises the
+Sway offset and sway rate are independent terms, both priced (`weights.q_u`,
+`weights.dq_u`) — see below. The terminal cost omits the input block and raises the
 remaining weights by `terminal_scale`; it is a cost, not a hard terminal set.
 
 **`q_eq` is a table, one hanging pose per stage, carried along the plan**
@@ -125,7 +125,7 @@ rows, which is not sway: the hanging pose moves 1:1 with `-(q_boom + q_arm)`,
 about 0.9 rad over an A2B move against a 0.2 rad clearance box, so **a weight on
 it priced luffing and not swinging** and `weights.q_u` had to ship at zero.
 
-One numeric equilibrium costs ~4 ms, so 60 of them do not fit in a 60 ms cycle.
+One numeric equilibrium costs ~4 ms, so one per knot, 40 of them, would cost 160 ms of a 120 ms cycle.
 They are not needed, because `passive_equilibrium` factors — to 1e-13 at every
 pose probed, empty and at 800 kg on and off the rotator axis:
 
@@ -243,7 +243,7 @@ stands at that cycle's measurement instant. `T_s` must also be a whole number of
 model, so the command in flight reaches `ddq` through the rows it actually
 reaches it through.
 
-The configured solve budget is one `T_s`, 60 ms; the solve is not
+The configured solve budget is one `T_s`; the solve is not
 interrupted at it, and what it decides is whether the finished step is applied
 (see the next section). The offline performance test prints the measured median
 rather than asserting wall-clock timing on whichever machine runs CI.
