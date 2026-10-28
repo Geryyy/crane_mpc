@@ -758,8 +758,10 @@ class MpcNode(Node):
     def measurement(self, now_ns: int) -> Measurement:
         """Collect the two joint groups and the age of each, as the cycle reads them."""
 
-        def age(stamp):
-            return None if stamp is None else (now_ns - stamp.nanoseconds) / 1e9
+        def age(*stamps):
+            if any(stamp is None for stamp in stamps):
+                return None
+            return max((now_ns - stamp.nanoseconds) / 1e9 for stamp in stamps)
 
         return Measurement(
             self._q_a,
@@ -767,7 +769,8 @@ class MpcNode(Node):
             self._q_u,
             self._dq_u,
             age(self._actuated_stamp),
-            age(self._passive_stamp),
+            # Sway rate is a separate field and can lag the angle; x_0 carries both.
+            age(self._passive_stamp, self._passive_velocity_stamp),
         )
 
     def follower_command(self, now_ns: int) -> FollowerCommand:

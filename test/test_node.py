@@ -14,9 +14,6 @@ from control_msgs.msg import JointTrajectoryControllerState
 from controller_manager_msgs.msg import ControllerManagerActivity, NamedLifecycleState
 from crane_model import canonical_joints, hydraulic_limits
 from crane_model import symbolic as cs
-from crane_mpc import config, problem
-from crane_mpc.cycle import Timing
-from crane_mpc.node import MpcNode, StartGate
 from crane_msgs.msg import JointPath, SolverHealth
 from rcl_interfaces.msg import ParameterValue
 from rcl_interfaces.srv import GetParameters
@@ -25,6 +22,10 @@ from rclpy.time import Time
 from sensor_msgs.msg import JointState
 from std_msgs.msg import String
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
+
+from crane_mpc import config, problem
+from crane_mpc.cycle import Timing
+from crane_mpc.node import MpcNode, StartGate
 
 NAMES = canonical_joints()
 ACTUATED = [NAMES[row] for row in cs.ACTUATED_INDICES]
@@ -266,6 +267,15 @@ def test_a_stale_measurement_stops_the_publisher(node):
     stale = joint_state(node)
     stale.header.stamp.sec -= 5
     node.on_joint_state(stale)
+    node.update()
+    assert node.published == {}
+    assert "max_state_age" in node._last_silence
+
+
+def test_a_stale_sway_rate_stops_the_publisher_under_a_fresh_angle(node):
+    configured(node)
+    old = node._passive_velocity_stamp
+    node._passive_velocity_stamp = Time(nanoseconds=old.nanoseconds - 5 * 10**9)
     node.update()
     assert node.published == {}
     assert "max_state_age" in node._last_silence
