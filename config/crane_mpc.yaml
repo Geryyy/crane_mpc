@@ -51,8 +51,8 @@ crane_mpc:
       cylinder_force: [1.0e4, 1.0e4, 1.0e4, 1.0e4, 1.0e4, 1.0e4]  # price for exceeding the cylinder force limit (soft)
       pump_flow: 1.0e4  # price for exceeding the pump flow limit (soft)
 
-    max_reference_age: 20.0  # s the MPC holds the goal after the plan ends, then goes silent
-    max_reference_age_loaded: 20.0  # same, with a payload set
+    max_reference_age: 60.0  # s the MPC holds the goal after the plan ends, then goes silent
+    max_reference_age_loaded: 60.0  # same, with a payload set
 
     min_progress_rate: 0.1  # fraction of plan pace below which the move counts as stalled
     max_stall_time: 2.0  # s stalled before it is reported; no recovery
