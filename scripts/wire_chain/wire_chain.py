@@ -621,7 +621,7 @@ def fly(
     Ts, N = float(parameters["Ts"]), int(parameters["horizon_length"])
     delay = float(parameters["sensor_to_valve_delay"])
     timing = cy.Timing(Ts, delay, jtc_period=chain.step_s)
-    cycle = cy.Cycle(timing, hz.Grid(Ts, N), "active", parameters["dq_a_feedback"])
+    cycle = cy.Cycle(timing, hz.Grid(Ts, N), "active")
     cycle.ocp = ocp
     cycle.equilibrium = hanging
     bounds = cy.Bounds(

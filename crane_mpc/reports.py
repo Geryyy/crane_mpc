@@ -317,15 +317,6 @@ def shadow_comparison(cycle: Cycle, verdict: str, solution, joints, budget, stam
                 f"{joint}.follower_velocity_error",
                 _text(follower.velocity_error[axis]),
             )
-        # Machine-readable divergence, open-loop-velocity axes: OCP state vs machine state.
-        if cycle.velocity_carry.carried[axis]:
-            put(
-                f"{joint}.dq_a_divergence", _text(cycle.velocity_carry.divergence[axis])
-            )
-            put(
-                f"{joint}.dq_a_diverged",
-                "true" if cycle.velocity_carry.diverged[axis] else "false",
-            )
     put("difference.axes_compared", str(compared))
     if compared > 0:
         put("difference.largest_absolute", _text(largest))

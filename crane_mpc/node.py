@@ -209,8 +209,6 @@ class MpcNode(Node):
             self._timing,
             self.grid,
             str(self._values.mode),
-            list(self._values.dq_a_feedback),
-            list(self._values.dq_a_divergence_max),
         )
         self._cycle.failing_ticks = dump.Sink(
             # `pathlib`, spelled out: `Path` here is `nav_msgs/Path`.
@@ -265,44 +263,10 @@ class MpcNode(Node):
             f"{self.Ts} s, {self._timing.delay} s of transport delay, a "
             f"{self._values.solve_budget} s budget."
         )
-        self.warn_open_loop_axes()
 
     @property
     def mode(self) -> str:
         return self._cycle.mode
-
-    def warn_open_loop_axes(self) -> None:
-        """Say once, at startup, which axes do not close the velocity loop."""
-        open_loop = [
-            self._canonical_joints[ACTUATED_INDICES[axis]]
-            for axis in range(PLANNED_DOF)
-            if not self._cycle.dq_a_feedback[axis]
-        ]
-        if not open_loop:
-            return
-        self.get_logger().warn(
-            f"{', '.join(open_loop)} take dq in x_0 from the model, not from "
-            f"{JOINT_STATE_TOPIC} (dq_a_feedback); the state can walk away from the "
-            f"machine. dq_a_divergence_max watches it, on {SHADOW_COMPARISON_TOPIC}, "
-            "and nothing corrects it."
-        )
-
-    def warn_divergence(self) -> None:
-        """Report a carried velocity that has walked away from the measured one."""
-        carry = self._cycle.velocity_carry
-        if not carry.any_diverged:
-            return
-        for axis, joint in enumerate(self._joints):
-            if not carry.diverged[axis]:
-                continue
-            # Own call site: rclpy throttles by caller, not shared with `self.warn`.
-            self.get_logger().warn(
-                f"the model-carried velocity of {joint} has walked "
-                f"{carry.divergence[axis]:g} from the measured one, past "
-                f"dq_a_divergence_max {self._cycle.dq_a_divergence_max[axis]:g}; this "
-                "axis runs open-loop (dq_a_feedback), so it is reported, not corrected.",
-                throttle_duration_sec=WARN_PERIOD,
-            )
 
     @property
     def _last_silence(self) -> str:
@@ -633,7 +597,6 @@ class MpcNode(Node):
             self.say_silence(step.silence)
             return
         self._silent_why = None
-        self.warn_divergence()
 
         if step.refusal:
             self.report(None, step.refusal)

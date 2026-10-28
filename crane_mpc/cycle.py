@@ -274,42 +274,6 @@ class FollowerCommand:
 
 
 @dataclass
-class VelocityCarry:
-    """What `carry_actuated_velocity` did to `x_0`, per actuated axis."""
-
-    #: True where this axis' velocity was taken from the model, not measured.
-    carried: list = field(default_factory=lambda: [False] * ACTUATED_DOF)
-    #: Model-carried minus measured. Zero on an axis that was not carried.
-    divergence: np.ndarray = field(default_factory=lambda: np.zeros(ACTUATED_DOF))
-    #: True where `|divergence|` crossed that axis' `dq_a_divergence_max`.
-    diverged: list = field(default_factory=lambda: [False] * ACTUATED_DOF)
-    any_diverged: bool = False
-
-
-def carry_actuated_velocity(
-    x: np.ndarray, carried, from_measurement, divergence_max
-) -> VelocityCarry:
-    """
-    Put the model's own velocity into `x` on axes that opt out of feedback.
-
-    `from_measurement[axis]` false uses `carried[axis]` instead; non-finite
-    falls back to measurement. All-true (default) makes this a no-op.
-    """
-    report = VelocityCarry()
-    for axis in range(PLANNED_DOF):
-        if from_measurement[axis] or not np.isfinite(carried[axis]):
-            continue
-        row = cs.X_PLANNED_VELOCITY + axis
-        difference = float(carried[axis]) - float(x[row])
-        x[row] = carried[axis]
-        report.carried[axis] = True
-        report.divergence[axis] = difference
-        report.diverged[axis] = abs(difference) > float(divergence_max[axis])
-    report.any_diverged = any(report.diverged)
-    return report
-
-
-@dataclass
 class Measurement:
     """What `/joint_states` last carried; `None` age means nothing arrived, not stale."""
 
@@ -364,23 +328,12 @@ class Cycle:
         timing: Timing,
         grid: hz.Grid,
         mode: str,
-        dq_a_feedback=None,
-        dq_a_divergence_max=None,
     ) -> None:
         self.timing = timing
         self.grid = grid
         self.mode = mode
         #: `x` rolled to the next measurement instant; the next cycle's C3 rows.
         self.x_next = None
-        #: Per axis, whether x_0's velocity is measured or model-carried.
-        self.dq_a_feedback = (
-            [True] * ACTUATED_DOF if dq_a_feedback is None else list(dq_a_feedback)
-        )
-        self.dq_a_divergence_max = (
-            np.full(ACTUATED_DOF, np.inf)
-            if dq_a_divergence_max is None
-            else np.asarray(dq_a_divergence_max, dtype=float)
-        )
         #: Set once the description has arrived and the problem is posed.
         self.ocp = None
         #: Where a tick the QP failed on is written, or `None` to write none.
@@ -424,10 +377,6 @@ class Cycle:
         # Path parameter now, so rest is where a fresh cycle starts from.
         self.carried[cs.X_PROGRESS_RATE] = 0.0
         self.seed_force = True
-        # Previous cycle's propagated velocity, read back as the carry -- not a
-        # second integrator. `None` until propagated once.
-        self.dq_a_carried: np.ndarray | None = None
-        self.velocity_carry = VelocityCarry()
         self.last_input = np.zeros(cs.NU_PROGRESS)
         #: C4: `c` where `last_input`'s ramp starts (`last_input` is then `dc`).
         self.last_start = np.zeros(PLANNED_DOF)
@@ -780,16 +729,6 @@ class Cycle:
             )
             self.carried = x.copy()
             self.seed_force = False
-        # `dq_a_feedback[axis]` false: velocity is the model's, not the row just
-        # written. All-true ships, so this is inert by default -- and it runs
-        # after the seed so that it overrules the row written above.
-        self.velocity_carry = (
-            VelocityCarry()
-            if self.dq_a_carried is None
-            else carry_actuated_velocity(
-                x, self.dq_a_carried, self.dq_a_feedback, self.dq_a_divergence_max
-            )
-        )
         self.measured = x
         return None
 
@@ -846,11 +785,6 @@ class Cycle:
                 f"nothing is published on {HORIZON_TOPIC}: {error}.",
             )
         self.q_eq = self.equilibrium_table(x0)
-        # Next cycle's carry on an opted-out axis: this propagation's velocity,
-        # one cycle old -- inside what dq_a_divergence_max watches.
-        self.dq_a_carried = x0[
-            cs.X_PLANNED_VELOCITY : cs.X_PLANNED_VELOCITY + PLANNED_DOF
-        ].copy()
         self.x0 = x0
         return None
 
@@ -1287,8 +1221,6 @@ class Cycle:
         # `static_hold_force` at the measured pose, which after §6's escalation
         # released the arm claim is the only pose still known to hold.
         self.seed_force = True
-        self.dq_a_carried = None
-        self.velocity_carry = VelocityCarry()
         self.last_horizon = None
         self.tcp_states = None
         self.last_tcp_states = None

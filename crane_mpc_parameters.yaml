@@ -50,24 +50,6 @@ crane_mpc:
     validation:
       gt<>: [0.0]
 
-  dq_a_feedback:
-    type: bool_array
-    read_only: true
-    description: "Per actuated axis: true takes x_0's velocity row from /joint_states, false
-      from the model's own propagation. Positions and both passive rows are always measured;
-      the tool row is inert. read_only -- flipping mid-move steps that row of x_0."
-    validation:
-      fixed_size<>: [6]
-
-  dq_a_divergence_max:
-    type: double_array
-    read_only: true
-    description: "Model-carried vs measured velocity gap that gets reported, per axis, rad/s
-      (m/s telescope): warned and published on ~/shadow_comparison. **Nothing is corrected.**"
-    validation:
-      fixed_size<>: [6]
-      lower_element_bounds<>: [0.0]
-
   horizon_publish_s:
     type: double
     read_only: true
