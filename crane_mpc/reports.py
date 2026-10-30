@@ -459,12 +459,8 @@ def payload_from_message(message):
     payload.mass_kg = float(message.mass)
     payload.center_of_mass_k8_m = com
     size = np.array([message.dimensions.x, message.dimensions.y, message.dimensions.z])
-    if message.shape == message.SHAPE_BOX and np.all(np.isfinite(size) & (size > 0.0)):
-        # Box edges along K8's axes; a cylinder or no size stays a point mass.
-        squared = size**2
-        payload.inertia_k8_kg_m2 = np.diag(
-            payload.mass_kg / 12.0 * (squared.sum() - squared)
-        )
+    if message.shape == message.SHAPE_BOX:  # a cylinder stays a point mass
+        payload.inertia_k8_kg_m2 = Payload.box_inertia(payload.mass_kg, size)
     return payload, ""
 
 

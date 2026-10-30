@@ -62,14 +62,14 @@ SOLVER_TUNING = {
     "qp_solver": "PARTIAL_CONDENSING_HPIPM",
     # Never swept until issue 223, and it was the whole cost: against BALANCE,
     # p50 9.6 -> 5.8 ms, p90 14.1 -> 10.4, max 30.3 -> 24.5 over 4 moves x
-    # {empty, 800 kg}, with sway peak, late sway rate and final error identical
+    # {empty, 880 kg}, with sway peak, late sway rate and final error identical
     # to four decimals -- the box, not the controller. ROBUST is 1.6x BALANCE.
     # It costs 0.9 % of cycles a QP that stops at its cap instead of converging.
     "hpipm_mode": "SPEED_ABS",
     # None is acados' default, `N`; smaller blocks measured worse.
     "qp_solver_cond_N": None,
     # What this bounds is the **tail**: at the 0.06/80 grid, max solve 54.1 ->
-    # 28.4 ms over 4 moves x {empty, 800 kg}, p50/p90 and every quality column
+    # 28.4 ms over 4 moves x {empty, 880 kg}, p50/p90 and every quality column
     # unmoved. Hitting the cap is **not** a truncated step that goes out: the QP
     # returns `ACADOS_MAXITER`, `solver._read_solution` turns any non-zero
     # `qp_status` into `Outcome.FAILED`, and the ladder publishes the *previous*

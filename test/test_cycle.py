@@ -12,9 +12,6 @@ import numpy as np
 import pytest
 from crane_model import CraneModel, Payload, Tool
 from crane_model import symbolic as cs
-from crane_msgs.msg import SolverHealth, SupervisorStatus
-from rclpy.time import Time
-
 from crane_mpc import horizon as hz
 from crane_mpc import problem, reports
 from crane_mpc.cycle import (
@@ -31,6 +28,8 @@ from crane_mpc.cycle import (
 from crane_mpc.equilibrium import RO, Equilibrium
 from crane_mpc.solver import CostTerms, Outcome, PathCycle, Solution, Violation
 from crane_mpc.solver import path_control as ocp_path_control
+from crane_msgs.msg import SolverHealth, SupervisorStatus
+from rclpy.time import Time
 
 KNOTS = 5
 Ts = 0.04
@@ -946,7 +945,7 @@ def test_the_centre_follows_an_off_axis_payload_around_the_rotator():
     payable while the centre is right.
     """
     model = CraneModel(problem.default_description().read_text(), Tool(problem.TOOL))
-    payload = Payload(800.0, np.array([0.5, 0.0, 0.0]), valid=True)
+    payload = Payload(880.0, np.array([0.5, 0.0, 0.0]), valid=True)
     q_a = np.zeros(cs.ACTUATED_DOF)
     stages = np.zeros((KNOTS, PLANNED_DOF))
     stages[:, RO] = np.linspace(0.0, 2.0, KNOTS)

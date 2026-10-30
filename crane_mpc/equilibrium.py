@@ -1,10 +1,10 @@
 """
 Where the tool hangs along a plan: `crane_model`'s equilibrium, in closed form.
 
-One numeric solve costs ~4 ms (measured, 200 calls, empty and 800 kg), so a
+One numeric solve costs ~4 ms (measured, 200 calls, empty and 880 kg), so a
 60-knot horizon cannot have one per stage. It does not need them.
 `passive_equilibrium` factors exactly -- to 1e-13 at every pose probed, empty
-and at 800 kg on and off the rotator axis:
+and at 880 kg on and off the rotator axis:
 
     tip_eq  = h_tip(q_ro) - (q_ha + q_ka)
     tilt_eq = h_tilt(q_ro)

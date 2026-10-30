@@ -41,7 +41,7 @@ KICK_POSES = {
     "far": (0.03, 0.55, 0.60, 1.90, 6.25),
 }
 MOVE_SEEDS = (1, 2)
-PAYLOADS = (0.0, 800.0)
+PAYLOADS = (0.0, 880.0)
 MOVES_PER_RUN = 4
 KICK_SECONDS = 30.0
 SWAY_PERIOD_S = 2.34  # s, envelope window for the kick decay

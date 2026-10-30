@@ -229,10 +229,11 @@ read 0 % throughout.
 
 `T_s` and the horizon length have one parameter source. The shipped grid is 40
 knots at 120 ms (39 shooting intervals, 4.68 s from first to last knot). The
-length remains a design value. The linearised passive periods, over random poses
-(the pose barely moves them): empty gripper 2.15-2.35 s; 880 kg block as a box
-2.0-2.1 s with its CoM 0.55 m below K8, 2.3-2.8 s at 0.85 m. So the horizon is
-1.7-2.3 periods; the CoM depth, not the pose, sets the period.
+length remains a design value. The linearised passive periods (the pose moves
+them by < 0.02 s): empty gripper tip 2.25-2.27 s, tilt 2.08-2.10 s (measured tip
+2.26-2.28 s, tilt ~2.05 s); 880 kg block as a box with its CoM 1.08 m below K8,
+tip 2.77 s, tilt 2.62 s. So the horizon is 1.7-2.3 periods; the load, not the
+pose, sets the period.
 
 The state pinned as `x_0` is the measured state propagated under the command
 already applied by `sensor_to_valve_delay`, 60 ms — C3's transport dead time,

@@ -147,9 +147,10 @@ def command_domain(dq_a_max) -> list:
     one magnitude here, so the smaller side is taken. The tool carries no clamp,
     so its row is the speed bound alone.
 
-    **This bounds what the MPC asks for, not what reaches Psi.** The deployed
-    clamp is on the inner loop's PI term alone and the feedforward is added
-    outside it, so a stalled axis can still hand Psi more than its domain.
+    This bounds what the MPC asks for. What reaches Psi is bounded separately:
+    the inner loop clamps its summed command (feedforward + PI) to the same
+    `u_clamp_*`, so a stalled axis saturates at the domain edge instead of
+    extrapolating past it.
     """
     gains, _rate_hz = load_velocity_loop()
     joints = canonical_joints()
