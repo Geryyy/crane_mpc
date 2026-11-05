@@ -49,8 +49,11 @@ def test_the_shipped_configuration_is_accepted(shipped):
     check_settings(shipped, shipped["hydraulics"])
     # Guard on weights is non-negativity. The sway offset weight is payable only
     # because `q_eq` is a per-stage table (issue 229); zero is what it shipped at
-    # while the centre was frozen, and the guard covers either.
-    assert list(shipped["weights"]["q_u"]) == [6400.0, 6400.0]
+    # while the centre was frozen, and the guard covers either. The tuned value
+    # itself is not pinned here -- it moved 6400 -> 25 -> 86.9 and only rotted.
+    assert min(shipped["weights"]["q_u"]) >= 0.0
+    shipped["weights"]["q_u"] = [0.0, 0.0]
+    check_settings(shipped, shipped["hydraulics"])
 
 
 def test_the_command_may_not_slew_faster_than_the_sway_it_shapes(shipped):

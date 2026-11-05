@@ -8,6 +8,7 @@ from crane_mpc.horizon import (
     Grid,
     Knots,
     Rejection,
+    duration_seconds,
     horizon_to_message,
     path_from_message,
     reference_from_message,
@@ -128,6 +129,56 @@ def test_the_wire_form_names_the_canonical_eight_and_carries_the_sway():
     # The actuated six keep their canonical rows around the sway pair.
     assert point.positions[0] == pytest.approx(0.3 * 0.04)
     assert point.positions[6] == pytest.approx(0.0)
+
+
+#: Shipped grid (`config/crane_mpc.yaml`), and an offset that puts every knot
+#: strictly inside a reference interval -- on a knot the resample is a copy and
+#: the interpolation that could lose a turn never runs.
+LIVE_Ts, LIVE_OFFSET = 0.12, 0.06
+ROTATOR_SLOPE = 0.5  # rad/s, under dq_a_max.rotator = 2.122
+
+
+@pytest.mark.parametrize(("lead", "period"), [(0.0, 0.0), (LIVE_Ts, 0.01)])
+def test_an_unwrapped_rotator_goes_in_and_comes_out_on_the_same_turn(lead, period):
+    """
+    The machine reports theta8 unwrapped (lab 2026-11-04, issue 293).
+
+    Fold it anywhere on the wire and the horizon aims the rotator a whole turn
+    off the pose the crane is in, which is the turn the JTC then undoes. Gazebo,
+    issue 293: a run started at 2pi + 0.25 kept every target on that turn.
+    Both writers: `lead > 0` is the live one, and its `np.gradient` over the
+    positions turns a seam in the turn count into a rotator velocity, not a
+    position error.
+    """
+    from builtin_interfaces.msg import Time
+
+    turned = 2.0 * np.pi + 0.25
+    times = [0.0, 2.0 * LIVE_Ts, 4.0 * LIVE_Ts]
+    message = JointTrajectory()
+    message.joint_names = JOINTS
+    for when in times:
+        point = JointTrajectoryPoint()
+        point.positions = [0.0] * len(JOINTS)
+        point.velocities = [0.0] * len(JOINTS)
+        point.positions[JOINTS.index("ro")] = turned + ROTATOR_SLOPE * when
+        point.velocities[JOINTS.index("ro")] = ROTATOR_SLOPE
+        point.time_from_start = Duration(sec=0, nanosec=int(when * 1e9))
+        message.points.append(point)
+
+    reference, why = reference_from_message(message, JOINTS)
+    assert why == ""
+    rejection, horizon = resample(reference, LIVE_OFFSET, Grid(LIVE_Ts, 3))
+    assert rejection is None
+
+    out = horizon_to_message(
+        horizon, CANONICAL, Time(sec=0, nanosec=0), lead=lead, period=period
+    )
+    # A line sampled with its own slopes is reproduced by the cubic exactly, so
+    # every point is the ramp -- on the start's turn, 2pi away from the fold.
+    at = np.array([duration_seconds(p.time_from_start) for p in out.points])
+    assert [p.positions[6] for p in out.points] == pytest.approx(
+        turned + ROTATOR_SLOPE * (LIVE_OFFSET + at)
+    )
 
 
 def test_the_effort_field_is_the_feedforward_velocity_not_a_torque():
