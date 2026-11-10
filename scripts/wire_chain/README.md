@@ -49,5 +49,9 @@ then withdrawn on that metric. Score on the growth rate instead.
         --k-scale 1 6 6 1 1 --d-scale 1 6 6 1 1
 
   Arm rings at ~1.3 Hz with command reversals; `--k-scale 1 1 1 1 1` is the calm baseline. Loaded on
-  the machine the arm passes ~0.73 of u at 1.1 Hz, the fitted C3 ~0.35 (resonance at 0.5 Hz);
-  x6-x12 matches the machine's phase. The JTC alone on the same plant stays calm.
+  the machine the arm passes ~1.0 of u with a ~0.15 s pure delay and no mode in 0.3-2 Hz (instrument
+  estimate, 11-09 880 kg PID bags); the fitted C3 passes ~0.35 at 1.1 Hz and has a resonance at
+  0.5 Hz, so k and d scaled together -- a velocity source, tau = d/k -- is what matches the machine.
+  `--jtc-only` plays the plan through the JTC alone, no MPC, on the same plant: calm on x1/x6/x12,
+  which is what makes those plants admissible (loaded, the machine's PID is stable). k x12 with
+  d x1 is not admissible -- the JTC alone holds a 1.65 Hz ring there (issue 308).

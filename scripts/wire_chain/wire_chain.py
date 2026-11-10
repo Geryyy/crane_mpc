@@ -28,6 +28,7 @@ Wire and JTC
   --topic-timeout S        JTC hold after silence; default 0.24 = sim yaml
   --cadence-phase S | --wire {today,161}   regression checks
   --control-rate HZ --pi-rung {full,no-integral,feedforward} --pi-scale F
+  --jtc-only               no MPC: the JTC plays the plan, u0 logs its own command
 Plant (MuJoCo + C3), mismatch against the OCP
   --plant-payload KG --plant-payload-com M M M    default the OCP's
   --plant-payload-box A B C                     MuJoCo payload inertia; default near-point
@@ -62,17 +63,16 @@ from crane_model.model import Payload
 from crane_model.mujoco_plant import MujocoPlant, leave
 from crane_model.symbolic import PAYLOAD_MOUNT_LINK
 from crane_model.viewing import TCP_BODY, Markers, SpaceGate, canonical_rows
-from growth import growth
-from harness import ACTUATED, PASSIVE, PLANNED, cs, tune_planner
-from hunting import REVERSAL_FRACTION, reversal_fraction
-from plotjuggler import PORT, PlotJuggler
-from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
-
 from crane_mpc import cycle as cy
 from crane_mpc import horizon as hz
 from crane_mpc import problem as ocp_problem
 from crane_mpc.equilibrium import Equilibrium
 from crane_mpc.solver import SLACK_NOTICEABLE
+from growth import growth
+from harness import ACTUATED, PASSIVE, PLANNED, cs, tune_planner
+from hunting import REVERSAL_FRACTION, reversal_fraction
+from plotjuggler import PORT, PlotJuggler
+from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 
 ROTATOR = 4
 TOPIC_TIMEOUT = 0.24  # s without a horizon before the JTC holds position
@@ -281,6 +281,29 @@ class Playback:
         return q, dq, e0 + (e1 - e0) * (t - t0) / (t1 - t0)
 
 
+def plan_message(plan, stamp) -> JointTrajectory:
+    """
+    Pack the whole plan into one `JointTrajectory`, `effort` included.
+
+    What `--jtc-only` plays instead of a horizon: `crane_planning`'s own C3
+    inversion in the effort field. `accelerations` is left off, so `Playback`
+    reconstructs the knots cubic, as it does a horizon -- the machine, handed a
+    plan with accelerations, interpolates quintic (`planner.py` Ts 40 ms).
+    """
+    message = JointTrajectory()
+    message.header.stamp = stamp
+    message.points = [
+        JointTrajectoryPoint(
+            positions=plan.q[i].tolist(),
+            velocities=plan.dq[i].tolist(),
+            effort=np.asarray(plan.effort)[i].tolist(),
+            time_from_start=hz.seconds_duration(float(t)),
+        )
+        for i, t in enumerate(plan.time)
+    ]
+    return message
+
+
 def stamp_of(seconds):
     ns = int(round(seconds * 1e9))
     return Time(sec=ns // 1_000_000_000, nanosec=ns % 1_000_000_000)
@@ -364,6 +387,13 @@ def main(argv=None) -> int:
     )
     # regression checks: each reverts a fix and must diverge
     parser.add_argument("--wire", choices=("today", "161"), default="today")
+    parser.add_argument(
+        "--jtc-only",
+        action="store_true",
+        help="run the JTC on the plan alone, no MPC: the constraint the machine "
+        "sets is that the PID stays calm on whatever plant a cell uses. Nothing "
+        "is published, so every wire option above is inert in this mode",
+    )
     parser.add_argument(
         "--cadence-phase",
         type=float,
@@ -729,6 +759,15 @@ def fly(
         flight = []  # (arrival, message)
         h_ns = int(round(h * 1e9))
         u0 = np.full(cs.PLANNED_DOF, np.nan)
+        if options.jtc_only:
+            # the plan arrives once and nothing follows, so the timeout must not fire
+            live = Playback(
+                plan_message(plan, stamp_of(clock)),
+                clock,
+                sensor.q[PLANNED],
+                sensor.dq[PLANNED],
+            )
+            last_receipt = np.inf
 
         def send():
             """`Cycle.step`'s publisher: encode the horizon and put it on the wire."""
@@ -769,14 +808,18 @@ def fly(
             u0 = np.full(cs.PLANNED_DOF, np.nan)
             started = time.perf_counter()
             # measured at the cycle instant: stamp = now
-            step = cycle.step(
-                now_ns,
-                now_ns,
-                cy.Measurement(
-                    q[ACTUATED], dq[ACTUATED], q[PASSIVE], dq[PASSIVE], 0.0, 0.0
-                ),
-                bounds,
-                publish=send,
+            step = (
+                cy.Step()
+                if options.jtc_only
+                else cycle.step(
+                    now_ns,
+                    now_ns,
+                    cy.Measurement(
+                        q[ACTUATED], dq[ACTUATED], q[PASSIVE], dq[PASSIVE], 0.0, 0.0
+                    ),
+                    bounds,
+                    publish=send,
+                )
             )
             terms = None
             if step.solution is not None:
@@ -835,7 +878,9 @@ def fly(
                 )
             if step.silence is not None:
                 events["silence"] += 1
-            elif step.verdict is None or not step.verdict.published:
+            elif not options.jtc_only and (
+                step.verdict is None or not step.verdict.published
+            ):
                 events["handback"] += 1
 
             for tick in range(ticks):
@@ -863,6 +908,8 @@ def fly(
                 u_tick.append(command)
                 plant.drive(chain.actuator, chain.psi.apply(command), h)
                 clock += h
+            if options.jtc_only:
+                u0 = u_tick[-ticks]  # no horizon: the JTC's own command at tick 0
             yield step.solution, u0
 
     run = cycles()
@@ -923,7 +970,9 @@ def fly(
     dq_peak = np.abs(log[:, 2 + nq + 2 : 2 + 2 * nq + 2]).max(0)
 
     def peak(rows):
-        return np.asarray(rows)[:, :nq].max(0) if rows else np.zeros(nq)
+        # nan, not 0: under --jtc-only nothing was ever asked, and a printed 0.0
+        # reads as "the MPC asked for nothing and the plant moved anyway"
+        return np.asarray(rows)[:, :nq].max(0) if rows else np.full(nq, np.nan)
 
     now_peak, any_peak = peak(asked_now), peak(asked_any)
     moving = plan_peak > 1e-6
