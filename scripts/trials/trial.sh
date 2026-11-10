@@ -4,7 +4,7 @@
 set +u
 S="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WS="$(cd "$S/../../../../.." && pwd)"
-OUT=$1; mkdir -p "$OUT"
+OUT=$1; mkdir -p "$OUT"; export OUT   # a MOVE script writes its own records beside cap.json
 
 # Isolated graph (own domain, Gazebo partition, lo-only DDS) and one sim at a time.
 # Only what this script starts is torn down -- never by name, another session may run a sim.
@@ -28,7 +28,7 @@ python3 "${CAP:-$S/capture.py}" 45 "$OUT/cap.json" > "$OUT/cap.log" 2>&1 &
 CAP=$!
 sleep 2
 if [ -n "${MOVE:-}" ]; then
-  timeout 180 python3 "$MOVE"
+  timeout 300 python3 -u "$MOVE"
 else
   timeout 90 ros2 service call /a2b_movement timber_crane_planning_interfaces/srv/CalcMovement \
     "{y_n: {x: 4.13, y: 4.127, z: 2.0}, phi_tool_n: 0.0, t_end: 0.0, carries_log: false, slow_down: 1.0}" \

@@ -75,6 +75,19 @@ Live-arm captures and lab-day tools. The offline chain is `../wire_chain/`.
   memory, the settings or the export instead. `qp_stat` is an **acados** status,
   not HPIPM's (`ocp_qp_hpipm.c` translates): 1 is `NAN_SOL`, 2 `MAX_ITER`, 3
   `MIN_STEP`, 9 `INCONS_EQ`.
+- `slew_loop.py <bag.mcap> [--t0 --t1 --freq]` — the 1.1 Hz loaded-slew loop of
+  issue 304, off an mcap: per-signal amplitude at the line, whether the tip
+  angle is the gyro rate's integral (it is: an accelerometer-fed angle would
+  carry the line without that tie), the band envelope's growth rate, and the
+  per-axis command-to-velocity lag at the line against C3's own. One oracle for
+  both arms — the machine bag and a sim run recorded on the same topics; without
+  `/cranedata` it reports what `/joint_states` alone can say. A lag at a single
+  line is only known mod 1/f, so it prints the phase too.
+- `slew_repro.py` — issue 304's reproduction arm, a `MOVE` script: the 11-09
+  stacking slew (start and goal from that bag's `/joint_states`, 880 kg, MPC
+  driving), bagged beside `cap.json` for `slew_loop.py`. Calm in Gazebo: its
+  boom/arm lack the stiffness that drives the loop; the reproduction is
+  `../wire_chain/`'s (README there).
 - `score.py` — cadence, command chatter, travel, arrival. Context, not the score.
 - `pid_move.py` — the same plan with the MPC off: the stable reference arm.
 

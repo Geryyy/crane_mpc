@@ -40,3 +40,14 @@ then withdrawn on that metric. Score on the growth rate instead.
   `--jobs 4`; more workers: start it again on the same `--storage`. Browse: `optuna-dashboard
   sqlite:///tune.db`. Prints the Pareto front as `--set` lines.
 - `--kick TIP TILT` — swing the load this far at the first move's start; the plan starts hanging.
+- Loaded-slew instability (issue 304) — the 11-09 stacking slew, 880 kg, plant boom/arm stiffer than C3:
+
+      ./scripts/wire_chain/wire_chain.py --seconds 20 --latency 0.06 \
+        --start -0.2568 0.6704 0.5493 1.0676 0.3863 1.5644 5.0444 0.40 0 0 \
+        --goal-pose 7.0276 2.2039 2.7452 1.5552 \
+        --payload-mass 880 --payload-com 0 0 1.05 --plant-payload-com 0 0 1.12 \
+        --k-scale 1 6 6 1 1 --d-scale 1 6 6 1 1
+
+  Arm rings at ~1.3 Hz with command reversals; `--k-scale 1 1 1 1 1` is the calm baseline. Loaded on
+  the machine the arm passes ~0.73 of u at 1.1 Hz, the fitted C3 ~0.35 (resonance at 0.5 Hz);
+  x6-x12 matches the machine's phase. The JTC alone on the same plant stays calm.

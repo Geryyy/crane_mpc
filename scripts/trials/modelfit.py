@@ -78,6 +78,7 @@ output, with no follower in between.
 
 import glob
 import json
+import os
 import sys
 
 import numpy as np
@@ -298,6 +299,9 @@ def main():
     ocp = Ocp(
         problem.default_description().read_text(), parameters, parameters["hydraulics"]
     )
+    if os.environ.get("PAYLOAD"):  # "kg,com_z_m": as /crane/mpc/set_payload binds it
+        mass, com = (float(v) for v in os.environ["PAYLOAD"].split(","))
+        ocp.set_payload(mass, [0.0, 0.0, com])
     if sys.argv[1] == "bag":
         count = int(sys.argv[3]) if len(sys.argv) > 3 else 3
         for pressure in (False, True):
