@@ -362,13 +362,21 @@ def constraint_scale(model: cs.CraneSymbolicModel, hydraulics: dict) -> tuple:
 # ------------------------------------------------------------------- assembly
 
 
-def build_ocp(description_xml: str, parameters: dict, hydraulics: dict) -> tuple:
+def build_ocp(
+    description_xml: str, parameters: dict, hydraulics: dict, actuator=None
+) -> tuple:
     """
     Assemble the OCP for the description, and return it with its scales.
 
     Every expression is a slice of `crane_symbolic`'s graph or an arithmetic
     combination of two; no equation of motion, transmission ratio or
     smoothing width is written here.
+
+    `actuator` is the C3 fit the dynamics are built on; the shipped one by
+    default. The fit's `d` is not in it -- it reaches the dynamics through
+    `description_xml`'s damping -- so a caller handing another fit has to hand
+    the matching description with it (`export_ocp.check_fit` is what refuses
+    the pair that drifted).
     """
     # C3 on every planned axis: PT1 command lag, force state, forward
     # dynamics, with fitted `k`/`tau_v` from file. `u` is joint velocity
@@ -376,7 +384,10 @@ def build_ocp(description_xml: str, parameters: dict, hydraulics: dict) -> tuple
     # Under C4 `u[:NU]` is the command's rate and the command a state.
     c4 = command_state(parameters)
     model = cs.CraneSymbolicModel(
-        description_xml, TOOL, actuator=cs.load_actuator_fit(), command_state=c4
+        description_xml,
+        TOOL,
+        actuator=cs.load_actuator_fit() if actuator is None else actuator,
+        command_state=c4,
     )
     scale, extend, retract = constraint_scale(model, hydraulics)
 

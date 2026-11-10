@@ -24,6 +24,11 @@ from crane_model.model import CraneModel
 from crane_mpc import problem
 
 LO, HI = 2e-3, 0.2
+#: Move-start ring scoring, the window the machine was read on
+#: (`records/analysis_304/critic2/onset.py`, issue 308's correction).
+RING_WINDOW_S = 0.8
+RING_SMOOTH = 9  # cycles of mean the ring is read against
+RING_FLOOR = 2e-3  # rad/s ptp; the sensor-noise floor, under the plan's own peak
 CANON = canonical_joints()
 ACT = [CANON[i] for i in ACTUATED_INDICES]
 PAS = [CANON[i] for i in PASSIVE_INDICES]
@@ -60,6 +65,53 @@ def growth(t, dev):
     if band.sum() < 10:
         return float("nan"), int(band.sum())
     return float(np.polyfit(t[band], np.log(dev[band]), 1)[0]), int(band.sum())
+
+
+def ring(t, dq, floor=RING_FLOOR):
+    """
+    One axis' ring from move start: `(ptp per window, growth per cycle, Hz)`.
+
+    The machine never arrived, so a window scored after arrival measures
+    nothing it has (issue 308's correction) -- this one starts where the move
+    does, which is what makes the bench comparable to
+    `records/2026-11-09_16-16-56-stacking_mpc` (arm 0.017 .. 0.243 rad/s
+    at 1.10 Hz).
+
+    `dq` is high-passed by subtracting a `RING_SMOOTH`-cycle mean, so the plan's
+    own motion drops out. Mind the shape: at `Ts` 0.12 s the mean nulls
+    0.93 Hz, so the high-pass *passes* 0.93 Hz at unity, overshoots to ~1.2x
+    around 1.3 Hz and attenuates 0.35 Hz to ~0.2 -- two cells at different
+    lines are read through different gains. The window is `round(0.8/Ts)`
+    cycles, i.e. 0.84 s at the shipped `Ts` and not 0.8.
+
+    `floor` is the amplitude below which there is no ring to score -- pass the
+    plan's own peak `|dq|` on this axis, because a window the size of the
+    planned motion is the planned motion. Under it the growth and the line come
+    back `nan` rather than fitting the plan's ramp to arrival and dividing it by
+    whatever bin the spectrum happens to peak in. Growth is the first rise only:
+    past the largest window the ring has saturated and fits a slope of its own.
+    """
+    step = float(np.median(np.diff(t)))
+    high = dq - np.convolve(dq, np.ones(RING_SMOOTH) / RING_SMOOTH, "same")
+    width = max(2, int(round(RING_WINDOW_S / step)))
+    starts = np.arange(0, len(high) - width + 1, width)
+    ptp = np.array([np.ptp(high[i : i + width]) for i in starts])
+    band = ptp > max(float(floor), RING_FLOOR)
+    peak = int(np.argmax(ptp))
+    rise = band.copy()
+    if band[: peak + 1].sum() >= 3:
+        rise[peak + 1 :] = False  # growing: past the peak it has saturated
+    if rise.sum() < 3:
+        return ptp.tolist(), float("nan"), float("nan")
+    live = np.zeros(len(high), bool)
+    for index in np.nonzero(band)[0]:
+        live[starts[index] : starts[index] + width] = True
+    spectrum = np.abs(np.fft.rfft(high * live * np.hanning(len(high))))
+    frequency = np.fft.rfftfreq(len(high), step)
+    keep = frequency > 0.2  # below that is the move's own settling, not a ring
+    line = float(frequency[keep][np.argmax(spectrum[keep])])
+    slope = np.polyfit(t[starts][rise] + 0.5 * RING_WINDOW_S, np.log(ptp[rise]), 1)[0]
+    return ptp.tolist(), float(np.exp(slope / line)), line
 
 
 def main():

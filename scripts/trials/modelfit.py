@@ -19,6 +19,10 @@ Two sources, one number:
     modelfit.py bag '<glob of HydraulicCalib bags>' [count]   two tables
     modelfit.py capture <cap.json from trial.sh>
 
+`PAYLOAD=kg,com_z_m` sets what the model carries; `C3_FIT=<path>` scores it
+against another C3 fit file instead of the shipped one (its solver has to exist
+already: one `wire_chain.py --ocp-fit <path>` run compiles it).
+
 Positions, velocities and both passive rows are re-seeded from the measurement
 every cycle, so they cannot compound. Only C3's force and command-lag rows carry
 forward, because nothing measures them -- exactly what `Cycle` does.
@@ -80,6 +84,7 @@ import glob
 import json
 import os
 import sys
+from pathlib import Path
 
 import numpy as np
 from crane_model import symbolic as cs
@@ -296,8 +301,19 @@ def from_capture(ocp, path):
 
 def main():
     parameters = shipped()
+    description = problem.default_description().read_text()
+    # another C3 fit file, old vs new on the same capture (issue 307). Its `d`
+    # has to go in through the description, so the two travel together.
+    fit = os.environ.get("C3_FIT")
+    if fit:
+        sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        import export_ocp
+
+        description = export_ocp.retuned_description(
+            description, export_ocp.read_fit(Path(fit))
+        )
     ocp = Ocp(
-        problem.default_description().read_text(), parameters, parameters["hydraulics"]
+        description, parameters, parameters["hydraulics"], actuator_fit=fit or None
     )
     if os.environ.get("PAYLOAD"):  # "kg,com_z_m": as /crane/mpc/set_payload binds it
         mass, com = (float(v) for v in os.environ["PAYLOAD"].split(","))

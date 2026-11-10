@@ -1,6 +1,7 @@
 """The solver wrapper: what it predicts, and what it plans."""
 
 import json
+from pathlib import Path
 
 import crane_ocp_export as ox
 import numpy as np
@@ -531,6 +532,23 @@ def test_a_model_change_moves_the_export_key(parameters):
     # Sub-step count is generated code too; the interval alone fixes it only
     # while `T_s` is held, so the label carries both.
     assert predictor_label(0.06, 0.04) != predictor_label(0.06, 0.02)
+
+
+def test_another_c3_fit_file_moves_the_export_key(parameters, tmp_path):
+    """
+    A bench OCP built from another fit must not open the shipped solver.
+
+    `--ocp-fit` compiles a different C3 -- `k` in generated code, `d` in the
+    description. Nothing in the binary says which fit it is, so the key is the
+    only thing standing between a stiffer OCP and the shipped `.so`.
+    """
+    hydraulics = parameters["hydraulics"]
+    description = problem.default_description().read_text()
+    other = tmp_path / "c3_scaled.json"
+    other.write_bytes(Path(cs.default_actuator_path()).read_bytes() + b"\n")
+    assert export_key(parameters, hydraulics, description) != export_key(
+        parameters, hydraulics, description, other
+    )
 
 
 def test_an_unexported_problem_is_refused_and_says_what_differs(parameters, tmp_path):

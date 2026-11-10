@@ -21,6 +21,7 @@ MPC / OCP
   --payload-mass KG --payload-com M M M --payload-box A B C    what the OCP believes
   --pace F | --mean-pace   progress reference compressed / plan's mean pace
   --relax-h {force,pump,both} --h-factor F    scale constraint 6/7 allowance
+  --ocp-fit PATH           C3 fit the OCP is exported from; default the shipped one
   --rebuild --verbose-build                re-export the solver
 Wire and JTC
   --latency S              measurement to JTC receipt
@@ -68,13 +69,14 @@ from crane_mpc import horizon as hz
 from crane_mpc import problem as ocp_problem
 from crane_mpc.equilibrium import Equilibrium
 from crane_mpc.solver import SLACK_NOTICEABLE
-from growth import growth
+from growth import RING_WINDOW_S, growth, ring
 from harness import ACTUATED, PASSIVE, PLANNED, cs, tune_planner
 from hunting import REVERSAL_FRACTION, reversal_fraction
 from plotjuggler import PORT, PlotJuggler
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 
 ROTATOR = 4
+ARM = 2  # planned order sw, ha, ka, sa, ro; the axis the machine's ring was read on
 TOPIC_TIMEOUT = 0.24  # s without a horizon before the JTC holds position
 EPOCH = 1.0  # sim clock origin; zero stamp reads as "start on receipt"
 DIVERGED_SWAY = 1.2  # rad
@@ -511,7 +513,7 @@ def main(argv=None) -> int:
     planner = tune_planner.Planner(
         description, tune_planner.plan_example.configure(options)
     )
-    parameters, hydraulics = harness.settings(options.set)
+    parameters, hydraulics = harness.settings(options.set, options.ocp_fit)
     plant_fit, damping_scale = perturb_fit(
         k=options.k_scale, d=options.d_scale, lag_shift_s=options.lag_shift
     )
@@ -520,7 +522,11 @@ def main(argv=None) -> int:
     if options.tau_v_offset is not None:
         plant_fit = offset_tau_v(plant_fit, options.tau_v_offset)
     ocp = harness.create_solver(
-        parameters, hydraulics, options.rebuild, options.verbose_build
+        parameters,
+        hydraulics,
+        options.rebuild,
+        options.verbose_build,
+        options.ocp_fit,
     )
     ocp.solve_budget_s = (
         10.0  # offline wall time is not the machine's; --latency stands in
@@ -968,6 +974,12 @@ def fly(
     # peak/mean of s(t) speed; ceiling on achieved/plan under --mean-pace
     plan_pace = float(np.abs(plan.timing.speed).max() * plan.duration)
     dq_peak = np.abs(log[:, 2 + nq + 2 : 2 + 2 * nq + 2]).max(0)
+    # the machine's own score: the arm's ring from move start, not after
+    # arrival. Floored at the plan's own peak on that axis -- a window the size
+    # of the planned motion is the planned motion, not a ring
+    ring_ptp, ring_growth, ring_hz = ring(
+        log[:, 0], log[:, 2 + nq + 2 + ARM], plan_peak[ARM]
+    )
 
     def peak(rows):
         # nan, not 0: under --jtc-only nothing was ever asked, and a printed 0.0
@@ -995,6 +1007,9 @@ def fly(
         f"  rate at +2 s     {np.round(rate_2s, 4)} rad/s (arrival {arrival:.2f} s)\n"
         f"  hold rate tau    {np.round(tau_u, 1)} s\n"
         f"  hold dq_a RMS    {dq_a_hold:.4f} rad/s\n"
+        f"  arm ring         {ring_hz:.2f} Hz, {ring_growth:.2f} /cycle, ptp "
+        + " ".join(f"{v:.3f}" for v in ring_ptp)
+        + f" rad/s per {RING_WINDOW_S:g} s\n"
         f"  plan peak |dq_a| {np.round(plan_peak, 3)} rad/s\n"
         f"  plan v_s pk/mean {plan_pace:.3f} ({plan.duration:.2f} s)\n"
         f"  asked now / plan {np.round(now_ratio, 3)}\n"
@@ -1051,6 +1066,11 @@ def fly(
             "sway_rate_after_2s": rate_2s.tolist(),
             "sway_rate_tau_s": tau_u,
             "dq_a_rms_hold": dq_a_hold,
+            # the arm's ring scored from move start, comparable to the machine
+            "ring_window_s": RING_WINDOW_S,
+            "ring_hz": ring_hz,
+            "ring_growth_per_cycle": ring_growth,
+            "ring_ptp": ring_ptp,
             # peak per planned axis; ratios nan on a held axis
             "plan_dq_peak": plan_peak.tolist(),
             "plan_pace_peak_over_mean": plan_pace,
@@ -1075,8 +1095,9 @@ def fly(
             **events,
             "growth_per_s": rate,
             "u0_first": u0[:10, 0].tolist(),
+            # p50/p90/p95/p100
             "solve_time_s": (
-                np.percentile(solve_times, [50, 90, 100]).tolist()
+                np.percentile(solve_times, [50, 90, 95, 100]).tolist()
                 if solve_times
                 else []
             ),

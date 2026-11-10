@@ -13,10 +13,12 @@ import copy
 import dataclasses
 import importlib.util
 import json
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 import numpy as np
 import pytest
+from crane_model.conventions import canonical_joints
 
 PACKAGE = Path(__file__).resolve().parent.parent
 
@@ -133,6 +135,67 @@ def test_the_two_copies_drifting_stops_generation(fit, tmp_path, monkeypatch):
     monkeypatch.setattr(eo, "SOURCE_FIT", tmp_path / "absent.json")
     with pytest.raises(ValueError, match=r"one identification in two files"):
         eo.check_fit_is_one_artifact(fit)
+
+
+def test_a_scaled_fit_keeps_d_with_k_through_the_description(fit):
+    """
+    The bench's stiffer OCP (issue 307): `k` and `d` have to move together.
+
+    `d` reaches the dynamics only through the description, so a fit file with
+    boom/arm `k, d` x2 exported against the *shipped* description is a
+    damping-ratio error nothing else would notice. `check_fit` is the guard, so
+    the rewrite has to satisfy it on all five planned axes, not the two that
+    moved.
+    """
+    scaled = copy.deepcopy(fit)
+    for key in ("ha", "ka"):
+        scaled["axes"][key]["k"] *= 2.0
+        scaled["axes"][key]["d"] *= 2.0
+    shipped = (eo.DEFAULT_DESCRIPTIONS / eo.DESCRIPTION).read_text()
+    tree = ET.fromstring(eo.retuned_description(shipped, scaled))
+    damped = {
+        joint.get("name"): float(joint.find("dynamics").get("damping"))
+        for joint in tree.iter("joint")
+        if joint.find("dynamics") is not None
+    }
+    names = canonical_joints()
+    damping = np.zeros(max(cs.PLANNED_INDICES) + 1)
+    for row in cs.PLANNED_INDICES:
+        damping[row] = damped[names[row]]
+    axes = [scaled["axes"][key] for key in cs.AXIS_KEYS]
+    model = Model(
+        actuator=cs.ActuatorFit(
+            k=tuple(float(entry["k"]) for entry in axes),
+            tau_v=tuple(float(entry["tau_v"]) for entry in axes),
+            dead_time_s=float(scaled["dead_time_common_ms"]) * 1.0e-3,
+        ),
+        description=Description(damping=damping),
+    )
+    eo.check_fit(model, scaled)
+    # and it is a different plant, not a no-op rewrite
+    assert damped[names[cs.PLANNED_INDICES[cs.AXIS_KEYS.index("ha")]]] == pytest.approx(
+        2.0 * float(fit["axes"]["ha"]["d"])
+    )
+
+
+def test_a_planned_joint_it_cannot_retune_is_refused(fit):
+    """
+    The bench path never runs `check_fit`, so the rewrite guards itself.
+
+    A planned joint this cannot reach keeps the *shipped* damping while the
+    OCP takes the new `k`, and nothing downstream reads the attribute again.
+    """
+    shipped = (eo.DEFAULT_DESCRIPTIONS / eo.DESCRIPTION).read_text()
+    arm = canonical_joints()[cs.PLANNED_INDICES[cs.AXIS_KEYS.index("ka")]]
+    without = shipped.replace('<dynamics damping="4.700e+04" friction="0"/>', "", 1)
+    assert f'name="{arm}"' in without and without != shipped
+    with pytest.raises(ValueError, match=rf"joint '{arm}' carries no <dynamics>"):
+        eo.retuned_description(without, fit)
+    # and the infinity `load_actuator_fit` lets through
+    infinite = copy.deepcopy(fit)
+    infinite["axes"]["sa"]["k"] = float("inf")
+    with pytest.raises(ValueError, match=r"axis 'sa' has k=inf"):
+        eo.retuned_description(shipped, infinite)
 
 
 def test_the_digest_is_over_the_numbers_and_not_the_bytes(fit):

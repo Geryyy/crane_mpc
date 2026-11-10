@@ -46,10 +46,9 @@ from crane_model.mujoco_plant import (  # noqa: E402
 )
 from crane_model.symbolic import ACTUATOR_FIT  # noqa: E402
 from crane_model.velocity_loop import VelocityLoop, load_velocity_loop  # noqa: E402
-from crane_planning.ocp import evaluate  # noqa: E402
-
 from crane_mpc import solver as ocp_runtime  # noqa: E402
 from crane_mpc.problem import PATH_POINTS  # noqa: E402
+from crane_planning.ocp import evaluate  # noqa: E402
 
 ox, cs = export_ocp.ox, export_ocp.cs
 PLANNED = list(PLANNED_INDICES)
@@ -119,12 +118,26 @@ def add_arguments(parser) -> None:
     parser.add_argument(
         "--set", action="append", default=[], metavar="KEY=VALUE", help="yaml lever"
     )
+    parser.add_argument(
+        "--ocp-fit",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help="C3 fit file the OCP is exported from; default the shipped "
+        "c3_full_model.json. The description's damping follows it, so this is "
+        "the whole model and not k alone -- minutes of code generation, once "
+        "per file",
+    )
     parser.add_argument("--rebuild", action="store_true", help="re-export the solver")
     parser.add_argument("--verbose-build", action="store_true")
 
 
-def description_xml() -> str:
-    return (export_ocp.DEFAULT_DESCRIPTIONS / export_ocp.DESCRIPTION).read_text()
+def description_xml(actuator_fit=None) -> str:
+    """Read the solver's description; `actuator_fit` retunes its damping to it."""
+    xml = (export_ocp.DEFAULT_DESCRIPTIONS / export_ocp.DESCRIPTION).read_text()
+    if actuator_fit is None:
+        return xml
+    return export_ocp.retuned_description(xml, export_ocp.read_fit(Path(actuator_fit)))
 
 
 def override(parameters: dict, assignment: str) -> None:
@@ -142,41 +155,46 @@ def override(parameters: dict, assignment: str) -> None:
     node[leaf] = value
 
 
-def settings(overrides=()) -> tuple[dict, dict]:
+def settings(overrides=(), actuator_fit=None) -> tuple[dict, dict]:
     """Read the shipped crane_mpc.yaml as the node does, plus `overrides`."""
     parameters = ox.read_ros_parameters(
         PACKAGE / "config" / "crane_mpc.yaml", "crane_mpc"
     )
     parameters["limits"].update(export_ocp.ocp_config.machine_limits())
     hydraulics = export_ocp.hydraulic_limits()
-    xml = description_xml()
-    shipped = ocp_runtime.export_key(parameters, hydraulics, xml)
+    xml = description_xml(actuator_fit)
+    shipped = ocp_runtime.export_key(parameters, hydraulics, xml, actuator_fit)
     for assignment in overrides:
         override(parameters, assignment)
-    moved = ocp_runtime.export_key(parameters, hydraulics, xml)
+    moved = ocp_runtime.export_key(parameters, hydraulics, xml, actuator_fit)
     moved = [key for key in shipped if moved[key] != shipped[key]]
     if moved:
         print(f"warning: --set moves compiled {moved}; re-exports", file=sys.stderr)
     return parameters, hydraulics
 
 
-def create_solver(parameters, hydraulics, rebuild=False, verbose=False):
+def create_solver(
+    parameters, hydraulics, rebuild=False, verbose=False, actuator_fit=None
+):
     """Open the node's `Ocp` for these settings, exporting first if none matches."""
     # Before the export, not after it: a `--set` the node would refuse otherwise
     # costs a minute of code generation to find out. `Ocp` checks again anyway.
     export_ocp.ocp_config.check_settings(parameters, hydraulics)
-    xml = description_xml()
-    key = ocp_runtime.export_key(parameters, hydraulics, xml)
+    xml = description_xml(actuator_fit)
+    fit = None if actuator_fit is None else cs.load_actuator_fit(actuator_fit)
+    key = ocp_runtime.export_key(parameters, hydraulics, xml, actuator_fit)
     base = ocp_runtime.export_base()
     if rebuild:
         shutil.rmtree(ox.solver_root(base, key), ignore_errors=True)
     try:
         ox.manifest(base, key, "the harness exports on demand")
     except ox.StaleExport:
-        acados_ocp, *_ = export_ocp.build_ocp(xml, parameters, hydraulics)
+        acados_ocp, *_ = export_ocp.build_ocp(xml, parameters, hydraulics, fit)
         sims = ocp_runtime.predictor_sims(acados_ocp, parameters)
         ox.export(acados_ocp, base, key, sims=sims, verbose=verbose)
-    return ocp_runtime.Ocp(xml, parameters, hydraulics, verbose=verbose)
+    return ocp_runtime.Ocp(
+        xml, parameters, hydraulics, actuator_fit=actuator_fit, verbose=verbose
+    )
 
 
 class Chain:

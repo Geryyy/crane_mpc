@@ -55,3 +55,13 @@ then withdrawn on that metric. Score on the growth rate instead.
   `--jtc-only` plays the plan through the JTC alone, no MPC, on the same plant: calm on x1/x6/x12,
   which is what makes those plants admissible (loaded, the machine's PID is stable). k x12 with
   d x1 is not admissible -- the JTC alone holds a 1.65 Hz ring there (issue 308).
+  Score it from **move start**, not after arrival: the machine never arrived, so the json's
+  `ring_ptp` / `ring_growth_per_cycle` / `ring_hz` (arm, 0.8 s windows) are what compares --
+  machine 0.017 .. 0.243 rad/s at 1.10 Hz, bench at plant x2 0.015 .. 0.248 at 0.95 Hz.
+- `--ocp-fit PATH` — export the OCP from another C3 fit file instead of the shipped
+  `c3_full_model.json`; the description's damping follows that file's `d`, so it is the whole
+  model and not `k` alone. Minutes of code generation the first time per file, then cached by
+  export key. Issue 307's gate ran it over boom/arm `k, d` x2/x4/x12 against plants x1..x12
+  (`records/analysis_307/`): **the OCP's own C3 is the lever** -- x2 and x4 are calm on every
+  plant, the shipped one rings on everything above x1, and x12 rings on x1 (too stiff a model
+  is as bad as too soft). Solve time is unchanged, p50 5-7 ms, p95 6-18 ms.

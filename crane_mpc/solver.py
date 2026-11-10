@@ -555,7 +555,9 @@ def _file_digest(path) -> str:
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()[:16]
 
 
-def export_key(parameters: dict, hydraulics: dict, description_xml: str) -> dict:
+def export_key(
+    parameters: dict, hydraulics: dict, description_xml: str, actuator_fit=None
+) -> dict:
     """
     Everything baked into generated code, field by field.
 
@@ -582,7 +584,8 @@ def export_key(parameters: dict, hydraulics: dict, description_xml: str) -> dict
         "description": hashlib.sha256(description_xml.encode()).hexdigest()[:16],
         "problem.py": _file_digest(problem.__file__),
         "symbolic.py": _file_digest(cs.__file__),
-        "actuator_fit": _file_digest(cs.default_actuator_path()),
+        # the fit this solver's k/tau_v came from; `None` is the shipped one
+        "actuator_fit": _file_digest(actuator_fit or cs.default_actuator_path()),
         # The whole file, not the three numbers `hydraulics` carries: the
         # chamber areas, `r_gear` and `V_m` live in it too, and since issue 226
         # they set `problem.state_scale` -- the **units of the force state
@@ -652,6 +655,7 @@ class Ocp:
         parameters: dict,
         hydraulics: dict,
         *,
+        actuator_fit=None,
         verbose: bool = False,
     ) -> None:
         # Refuse before building: a rejected config still costs a minute to compile.
@@ -662,8 +666,13 @@ class Ocp:
         self.intervals = problem.shooting_intervals(parameters)
         self.solve_budget_s = float(parameters["solve_budget"])
 
+        # `actuator_fit` is a C3 fit file other than the shipped one: a bench
+        # lever, never the node's. Its `d` has to be in `description_xml` too.
         self._ocp, self.scale, self.model, self._chamber = problem.build_ocp(
-            description_xml, parameters, hydraulics
+            description_xml,
+            parameters,
+            hydraulics,
+            cs.load_actuator_fit(actuator_fit) if actuator_fit else None,
         )
         #: C4: `c` rides at the end of `x` and the joint inputs are its rate.
         self.command_state = problem.command_state(parameters)
@@ -683,7 +692,7 @@ class Ocp:
         # the key beside it, and `ox.open_solver` refuses anything that is not
         # this problem rather than starting on another machine's dynamics.
         base = export_base()
-        key = export_key(parameters, hydraulics, description_xml)
+        key = export_key(parameters, hydraulics, description_xml, actuator_fit)
         self.solver, self._dims = ox.open_solver(
             self._ocp, base, key, EXPORT_COMMAND, verbose=verbose
         )

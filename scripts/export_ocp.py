@@ -47,6 +47,7 @@ import argparse
 import hashlib
 import json
 import sys
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 import numpy as np
@@ -68,6 +69,7 @@ import crane_ocp_export as ox  # noqa: E402
 cs = ox.import_crane_symbolic(PACKAGE)
 
 from crane_model import hydraulic_limits  # noqa: E402
+from crane_model.conventions import canonical_joints  # noqa: E402
 
 # problem lives in the installed package (node builds it at startup); a from-scratch
 # build runs this before crane_mpc is installed, so source tree is the fallback --
@@ -155,6 +157,58 @@ def check_fit_is_one_artifact(fit: dict) -> None:
             "other, rebuild `crane_model` so the install copy follows, and "
             "re-run this script."
         )
+
+
+def retuned_description(description_xml: str, fit: dict) -> str:
+    """
+    Return the description with every planned joint damped at `fit`'s own `d`.
+
+    What lets a bench export the OCP from another C3 fit file (`wire_chain`'s
+    `--ocp-fit`): `d` reaches the dynamics only through the description, so a
+    fit handed to `build_ocp` without this is `k` from one identification and
+    `d` from another -- a damping-ratio error `check_fit` exists to refuse.
+    Comments are lost in the round trip, which is why this builds a string for
+    a solver and is not how the checked-in description is written.
+
+    It carries its own guards because the bench path does not run `check_fit`:
+    a planned joint this cannot reach keeps the *shipped* damping and nothing
+    downstream reads the attribute to notice, and `inf` walks through
+    `load_actuator_fit` (`inf > 0` is true). Every planned axis has to be
+    returned, or this raises and names the one it could not.
+    """
+    axes = fit["axes"]
+    names = canonical_joints()
+    damping = {}
+    for axis, key in enumerate(cs.AXIS_KEYS[: cs.PLANNED_DOF]):
+        entry = axes[key]
+        for field in ("k", "tau_v", "d"):
+            if not np.isfinite(float(entry[field])):
+                raise ValueError(
+                    f"axis {key!r} has {field}={entry[field]}, which is not a "
+                    "number a solver can be built on"
+                )
+        damping[names[cs.PLANNED_INDICES[axis]]] = float(entry["d"])
+    tree = ET.fromstring(description_xml)
+    returned = set()
+    for joint in tree.iter("joint"):
+        name = joint.get("name")
+        if name not in damping:
+            continue
+        dynamics = joint.find("dynamics")
+        if dynamics is None:
+            raise ValueError(
+                f"joint {name!r} carries no <dynamics>, so this fit's d cannot "
+                "reach the OCP; it would get this fit's k with the "
+                "description's own damping"
+            )
+        dynamics.set("damping", repr(damping[name]))
+        returned.add(name)
+    if returned != set(damping):
+        raise ValueError(
+            f"the description has no joint {sorted(set(damping) - returned)}, so "
+            f"{FIT_LABEL}'s d for it cannot reach the OCP"
+        )
+    return ET.tostring(tree, encoding="unicode")
 
 
 def check_fit(model: cs.CraneSymbolicModel, fit: dict) -> None:
