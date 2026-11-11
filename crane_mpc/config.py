@@ -223,45 +223,6 @@ def actuator_fit_path(name):
     )
 
 
-def overlay_path(name):
-    """Locate a `config_overlay` parameter file by name in `config/`, as the launch does."""
-    directories = config_directories()
-    for directory in directories:
-        candidate = directory / str(name).strip()
-        if candidate.is_file():
-            return candidate
-    raise MpcConfigError(
-        f"config_overlay = {name!r} is in none of "
-        f"{[str(directory) for directory in directories]}; it names a parameter "
-        "file in this package's config/"
-    )
-
-
-def apply_overlay(parameters: dict, overlay: dict, label: str) -> None:
-    """
-    Merge a `config_overlay` document into `parameters`, in place, as ros2 would.
-
-    `crane_mpc.launch.py` stacks the overlay after `crane_mpc.yaml` and later
-    files win. `scripts/export_ocp.py` has to read the same pair: a variant that
-    moves `ocp_actuator_fit` has its own export key, and without this the only
-    way to export it would be editing the committed file.
-
-    A key the committed file does not declare is refused. ros2 would carry it as
-    an undeclared override and the node would apply none of it -- an overlay that
-    silently does nothing is the one failure this is for.
-    """
-    for key, value in overlay.items():
-        if key not in parameters:
-            raise MpcConfigError(
-                f"{label} sets {key!r}, which config/crane_mpc.yaml does not "
-                "declare, so nothing would apply it"
-            )
-        if isinstance(value, dict) and isinstance(parameters[key], dict):
-            apply_overlay(parameters[key], value, label)
-        else:
-            parameters[key] = value
-
-
 def retuned_description(description_xml: str, fit: dict) -> str:
     """
     Return the description with every planned joint damped at `fit`'s own `d`.

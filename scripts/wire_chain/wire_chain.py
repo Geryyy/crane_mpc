@@ -29,7 +29,6 @@ Wire and JTC
   --topic-timeout S        JTC hold after silence; default 0.24 = sim yaml
   --cadence-phase S | --wire {today,161}   regression checks
   --control-rate HZ --pi-rung {full,no-integral,feedforward} --pi-scale F
-  --pi-scale-axes F*5      per-axis p, i, d factor; 0 opens that axis' loop
   --jtc-only               no MPC: the JTC plays the plan, u0 logs its own command
 Plant (MuJoCo + C3), mismatch against the OCP
   --plant-payload KG --plant-payload-com M M M    default the OCP's

@@ -76,33 +76,3 @@ then withdrawn on that metric. Score on the growth rate instead.
   (`records/analysis_307/`): **the OCP's own C3 is the lever** -- x2 and x4 are calm on every
   plant, the shipped one rings on everything above x1, and x12 rings on x1 (too stiff a model
   is as bad as too soft). Solve time is unchanged, p50 5-7 ms, p95 6-18 ms.
-- `--pi-scale-axes F*5` — the JTC's `p, i, d` per axis, on top of `--pi-scale`; `0` opens that
-  axis' loop properly, which `--pi-rung no-integral` does not (it leaves `i`). Issue 310 swept
-  boom/arm 1.0 / 0.5 / 0.3 / 0 and all five axes at 0.3 under the x2 OCP design model, 69 moves
-  each (`records/analysis_310/`): **no scale rings** -- not one of 345 moves clears 1.05 /cycle on
-  `sw ha ka tip tilt`, the only finite growth in the family is 1.04 at scale 1.0 on plant x12, and
-  the shipped OCP on the same move rings at 1.37. So the PI is not the stability lever (313 found
-  the same over 587 cells, and on its velocity-source plant a *lower* PI was worse than the
-  deployed one). What the scale moves is the kick: on the nominal plant with a 0.1 rad tip kick,
-  the tip's sway rate 1.5-2.5 s after arrival (`sway_rate_after_2s`) is 58 / 47 / 42 / 33 mrad/s
-  at 1.0 / 0.5 / 0.3 / 0, and the residual at the end of a 20 s run 12.6 / 6.9 / 5.1 / 2.6; it
-  costs final error monotonically (+0.025 / +0.06 / +0.13 m) on the one move that already rides
-  the MPC's rate limit. Scaling the other three axes buys nothing. The JTC alone never rings at
-  any scale (worst ptp 0.124-0.125 rad/s on plants x1..x12), and only scale 0 is visible there at
-  all (6 mrad final error against 1).
-- Issue 305 closed the family for the three lab-day variants, 91 scored moves each
-  (`records/analysis_305/`; `config/labday_*.yaml` select them on the node). 310's family plus
-  the cells it did not run -- `--goal out`, a lift and a descend loaded and unloaded, and 304's
-  boom-only per-direction gain (`--psi-gain-positive 1 0.71 1 1 1 --psi-gain-negative 1 1.41 1 1 1`)
-  on x1..x4. **Ringing moves: candidate (x2 design model + boom/arm PI x0.5) 0, fallback a
-  (x3 design model, PI as deployed) 0, fallback b (shipped OCP, `--set weights.du=32`) 13,
-  shipped 30.** So the stiffer design model is as stable as the candidate on this family and
-  damps worse (worst late sway rate 157 against 41 mrad/s, 6 `tau` = inf against 0), and the
-  `du` weight is a reduction and not a fix: on the bare slew fallback b is calm at x1, x2 and
-  x12 and rings at x3 (1.23 /cycle) and x4 (1.18), which is 304's critic3 reproduced. **On the
-  nominal plant all four variants are the same run** (worst ptp 0.139-0.147 rad/s, late sway
-  0-1 mrad/s, `u_clamp_ratio` 0.14, 0.3 mm final error) -- they separate only where the plant is
-  stiffer than the OCP's model. Two things worth carrying: every ring in the 364 moves lies
-  between 0.90 and 1.48 Hz, and the boom-only gain split is a *harder* cell than the symmetric
-  Psi ones (shipped rings on 3 of 4 `boom` cells against 1 of 2 `asym`). `u_clamp_ratio` peaks
-  at 0.75, so 308's total-command clamp gap is still inert on this bench.

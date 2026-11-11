@@ -96,17 +96,6 @@ MuJoCo under C3 and the JTC's velocity loop. Nothing was launched.
 
 ## 1. One mismatch at a time, at the shipped settings
 
-**The mismatch that actually rings is not in this table.** Every cell below holds
-the OCP on the shipped C3 identification and moves the plant around it; issues
-304-313 found the loaded instability is the *OCP's own* actuator model being
-softer than the plant, and that the lever is that model rather than any knob in
-§2. The envelope for the boom/arm `k, d` family is `records/analysis_307/`
-(OCP x2/x4 calm on plants x1..x12, x12 exits `past_clamp` on x1, so the
-admissible band is about x2..x4), per-axis from `records/analysis_310/` and
-`records/analysis_305/`, and summarised in `README.md`'s `--ocp-fit` and
-`--pi-scale-axes` entries. Read §1 as the 190-era map of *plant* mismatch at the
-shipped model, which is what it is.
-
     ./scripts/wire_chain/sweep_robust.py --latency 0.06 --payload-mass 800 \
         --samples 0 --jobs 7 --by-plant --band <family>=<values>
 

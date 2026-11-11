@@ -1,9 +1,0 @@
-crane_mpc:
-  ros__parameters:
-    # Issue 305's candidate: the OCP posed on the x2 design model. 307 step 0 found the
-    # OCP's own C3 is the stability lever -- the shipped model rings on every plant
-    # stiffer than itself, x2 is calm on x1..x12. Pair it with the JTC gain overlay
-    # (`cbs_mpc_jtc_overlay:=True`, issue 310); that one is a ros2_control file, not here.
-    # Run `scripts/export_ocp.py` before the launch: the node opens a solver, never
-    # exports one, and this model has its own export key.
-    ocp_actuator_fit: c3_ocp_design.json

@@ -15,7 +15,6 @@ from crane_model.conventions import canonical_joints
 from crane_mpc import problem
 from crane_mpc.config import (
     MpcConfigError,
-    apply_overlay,
     check_payload,
     check_settings,
     machine_limits,
@@ -29,12 +28,6 @@ SWAY_PERIOD_S = 2.34
 #: (issue 246): the hunt 1 was picked to stop does not reproduce at any setting
 #: in today's harness, and 4x buys peak sway and hold quiet for nothing.
 DU_RELAXATION = 4.0
-#: issue 309's lab-day variants, applied over the committed yaml (issue 305)
-LABDAY_VARIANTS = (
-    "labday_candidate.yaml",
-    "labday_fallback_a.yaml",
-    "labday_fallback_b.yaml",
-)
 
 
 def read_parameters(name):
@@ -227,11 +220,11 @@ def test_a_payload_the_dynamics_cannot_carry_is_refused():
 # --- which C3 model the OCP is posed on (`ocp_actuator_fit`, issue 311) -------
 
 
-def test_the_shipped_actuator_parameter_is_the_identification(shipped):
-    """Default is today's solver, to the byte: the fit and the description as written."""
+def test_an_empty_actuator_parameter_is_the_identification(shipped):
+    """The lab-day fallback is today's solver, to the byte: the fit and the description as written."""
     written = problem.default_description().read_text()
-    assert shipped["ocp_actuator_fit"] == ""
-    description, fit = ocp_actuator_model(shipped["ocp_actuator_fit"], written)
+    assert shipped["ocp_actuator_fit"] == "c3_ocp_design.json"
+    description, fit = ocp_actuator_model("", written)
     assert fit is None
     assert description == written
 
@@ -257,7 +250,7 @@ def test_a_design_model_comes_with_the_description_its_own_d_damps():
         if joint.find("dynamics") is not None
     }
     for axis, key in enumerate(cs.AXIS_KEYS):
-        factor = 2.0 if key in ("ha", "ka") else 1.0
+        factor = 3.0 if key in ("ha", "ka") else 1.0
         expected = factor * float(identified[key]["d"])
         assert damped[names[cs.PLANNED_INDICES[axis]]] == pytest.approx(expected), key
 
@@ -266,32 +259,3 @@ def test_an_actuator_file_the_package_does_not_carry_is_refused():
     """Falling back would run the identification under the design model's name."""
     with pytest.raises(MpcConfigError, match="ocp_actuator_fit = 'c3_absent.json'"):
         ocp_actuator_model("c3_absent.json", "<robot/>")
-
-
-@pytest.mark.parametrize("name", LABDAY_VARIANTS)
-def test_a_labday_variant_merges_onto_the_shipped_file_and_is_accepted(shipped, name):
-    """
-    309 selects one of these with `config_overlay:=<name>`; they are not scaffolding.
-
-    Merged through `apply_overlay`, which is what `export_ocp.py --config-overlay`
-    runs, so the exported solver and the launched node are one configuration. What
-    this pins is that every key of the overlay is a key the committed file
-    declares (ros2 would carry an undeclared one as an override the node never
-    applies -- silently), that the merged document passes the guard the node runs,
-    that the C3 file it names is carried, and that it moves something.
-    """
-    merged = copy.deepcopy(shipped)
-    apply_overlay(merged, read_parameters(name), name)
-    assert merged != shipped, "an overlay that changes nothing is not a variant"
-    check_settings(merged, merged["hydraulics"])
-    ocp_actuator_model(
-        merged["ocp_actuator_fit"], problem.default_description().read_text()
-    )
-
-
-def test_an_overlay_key_the_shipped_file_does_not_declare_is_refused(shipped):
-    """ros2 keeps it as an undeclared override and the node applies none of it."""
-    with pytest.raises(MpcConfigError, match=r"sets 'weighs'"):
-        apply_overlay(shipped, {"weighs": {"du": 32.0}}, "an_overlay.yaml")
-    with pytest.raises(MpcConfigError, match=r"sets 'dv'"):
-        apply_overlay(shipped, {"weights": {"dv": 32.0}}, "an_overlay.yaml")

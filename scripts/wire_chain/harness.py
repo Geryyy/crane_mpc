@@ -103,15 +103,6 @@ def add_arguments(parser) -> None:
     parser.add_argument(
         "--pi-scale", type=float, default=1.0, help="multiply the JTC's p, i, d"
     )
-    parser.add_argument(
-        "--pi-scale-axes",
-        type=float,
-        nargs=AXES,
-        default=None,
-        metavar="F",
-        help="per-axis p, i, d factor, on top of --pi-scale; 0 opens the loop on "
-        "that axis (--pi-rung never zeroes i)",
-    )
     parser.add_argument("--payload-mass", type=float, default=0.0, help="kg, the OCP's")
     parser.add_argument(
         "--payload-com", type=float, nargs=3, default=(0.0, 0.0, 0.0), help="m, in K8"
@@ -235,13 +226,10 @@ class Chain:
         gains_by_joint, rate_hz = load_velocity_loop()
         gains = [gains_by_joint[canonical_joints()[i]] for i in PLANNED]
         self.step_s = 1.0 / (options.control_rate or rate_hz)
-        per_axis = options.pi_scale_axes or [1.0] * len(gains)
+        s = options.pi_scale
         loop_gains = [
             dataclasses.replace(a, p=a.p * s, i=a.i * s, d=a.d * s)
-            for a, s in zip(
-                pi_rung(gains, options.pi_rung),
-                (options.pi_scale * f for f in per_axis),
-            )
+            for a in pi_rung(gains, options.pi_rung)
         ]
         self.loop = VelocityLoop(
             loop_gains, self.step_s, continuous=plant.continuous_axes

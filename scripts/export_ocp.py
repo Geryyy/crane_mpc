@@ -340,28 +340,11 @@ def check_fit(model: cs.CraneSymbolicModel, fit: dict, label: str = FIT_LABEL) -
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[1])
     ox.add_arguments(parser, PACKAGE, ocp_runtime.EXPORT_ENV, f"crane_mpc_{TOOL}")
-    parser.add_argument(
-        "--config-overlay",
-        default="",
-        metavar="NAME",
-        help="parameter file in config/ read over crane_mpc.yaml, the same name "
-        "`crane_mpc.launch.py config_overlay:=` takes -- so a lab-day variant "
-        "(labday_candidate.yaml, labday_fallback_a.yaml, labday_fallback_b.yaml) "
-        "is exported and launched off one file instead of an edit of the "
-        "committed one. Only a variant that moves the export key needs it: the "
-        "weights go in through the runtime API and are not in that key",
-    )
     arguments = parser.parse_args()
 
     parameters = ox.read_ros_parameters(
         PACKAGE / "config" / "crane_mpc.yaml", "crane_mpc"
     )
-    if arguments.config_overlay:
-        overlay = ocp_config.overlay_path(arguments.config_overlay)
-        ocp_config.apply_overlay(
-            parameters, ox.read_ros_parameters(overlay, "crane_mpc"), str(overlay)
-        )
-        print(f"over the committed yaml: {overlay}")
     # the constants live in crane_model; nothing here repeats them
     hydraulics = hydraulic_limits()
     # the box and u^+ are crane_model's, same as the node reads them

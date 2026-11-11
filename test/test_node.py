@@ -82,12 +82,11 @@ def node(context, export_base):
     # `config/crane_mpc.yaml` and there is no second controller to run. The
     # export is built here and not in `configured` because several tests hand a
     # description over themselves.
-    export_for(
-        export_base,
-        config.parameter_dict(node._values),
-        hydraulic_limits(),
-        problem.default_description().read_text(),
+    parameters = config.parameter_dict(node._values)
+    description, fit = config.ocp_actuator_model(
+        node._values.ocp_actuator_fit, problem.default_description().read_text()
     )
+    export_for(export_base, parameters, hydraulic_limits(), description, fit)
     # Budget overrun is tested separately, not left to decide every other assertion.
     node.set_parameters([Parameter("solve_budget", Parameter.Type.DOUBLE, 10.0)])
     published = {}

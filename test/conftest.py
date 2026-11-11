@@ -72,14 +72,19 @@ def export_base(tmp_path_factory) -> Path:
 
 
 def export_for(
-    base: Path, parameters: dict, hydraulics: dict, description: str
+    base: Path, parameters: dict, hydraulics: dict, description: str, fit=None
 ) -> Path:
     """Export this problem unless the session already did."""
     os.environ[ocp_runtime.EXPORT_ENV] = str(base)
-    key = ocp_runtime.export_key(parameters, hydraulics, description)
+    key = ocp_runtime.export_key(parameters, hydraulics, description, fit)
     digest = ox.key_digest(key)
     if digest not in _DONE:
-        ocp = problem.build_ocp(description, parameters, hydraulics)[0]
+        ocp = problem.build_ocp(
+            description,
+            parameters,
+            hydraulics,
+            cs.load_actuator_fit(fit) if fit else None,
+        )[0]
         ox.export(
             ocp,
             ocp_runtime.export_base(),

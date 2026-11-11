@@ -17,12 +17,6 @@ LAUNCH = PACKAGE / "launch" / "crane_mpc.launch.py"
 MPC_CONFIG = PACKAGE / "config" / "crane_mpc.yaml"
 NODE_NAME = "crane_mpc"
 SHADOW = "shadow"
-#: issue 309's lab-day variants, applied with `config_overlay:=<name>`
-VARIANTS = (
-    "labday_candidate.yaml",
-    "labday_fallback_a.yaml",
-    "labday_fallback_b.yaml",
-)
 
 
 def _source():
@@ -75,44 +69,8 @@ def test_the_launch_starts_the_node_with_its_configuration_file():
     assert [name for group in files for name in group] == [MPC_CONFIG.name]
     assert MPC_CONFIG.is_file()
 
-    # The base file, then issue 305's overlay slot, then the node's own values.
-    # Both file entries are built from this package's share and its `config/`: an
-    # overlay resolved against another package or another directory would load a
-    # document for a node of this name that nothing in this repo carries. The
-    # `.yaml` filter above cannot see the slot -- its name is inside a
-    # `PythonExpression` string -- so it is asserted here instead.
-    assert len(parameters.elts) == 3
-    for element in parameters.elts[:2]:
-        assert _strings(element)[:1] == ["config"], ast.dump(element)
-        assert "share" in ast.dump(element)
-
     # Unconditional: nothing in this launch can leave the file out.
     assert "Condition" not in _source()
-
-
-def test_the_config_overlay_defaults_to_no_overlay_and_names_files_that_exist():
-    """A lab day picks a variant by file (issue 305); a typo must not run the base.
-
-    The default is empty and the launch turns that into the base file again, so
-    the overlay slot is a no-op unset. The variant files are checked here because
-    nothing else reads them until a human passes one on the machine.
-    """
-    declaration = next(
-        node
-        for node in ast.walk(ast.parse(_source()))
-        if isinstance(node, ast.Call)
-        and getattr(node.func, "id", None) == "DeclareLaunchArgument"
-        and node.args
-        and getattr(node.args[0], "value", None) == "config_overlay"
-    )
-    assert _strings(_keyword(declaration, "default_value")) == [""]
-    # unset resolves to the base file again, so the slot adds no second document
-    assert f"' or '{MPC_CONFIG.name}'" in _source()
-    for name in VARIANTS:
-        overlay = PACKAGE / "config" / name
-        assert overlay.is_file(), name
-        # Keyed under this node, or ros2 applies none of it, silently.
-        assert yaml.safe_load(overlay.read_text(encoding="utf-8")).keys() == {NODE_NAME}
 
 
 def test_the_launch_leaves_the_node_in_shadow():
