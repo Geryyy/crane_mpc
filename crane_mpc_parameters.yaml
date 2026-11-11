@@ -33,7 +33,7 @@ crane_mpc:
     description: "C3 file the OCP is posed on, by name in this package's config/; empty is
       the shipped identification (crane_model's c3_full_model.json) and today's solver
       byte-for-byte. A design margin, not a model of the machine: `c3_ocp_design.json` is
-      boom/arm k,d x2, which the bench finds calm on plants x1..x12 where the shipped OCP
+      boom/arm k,d x3, which the bench finds calm on plants x1..x12 where the shipped OCP
       rings (issue 307). Compiled in -- a different export, and `crane_planning` still
       inverts the identification."
 

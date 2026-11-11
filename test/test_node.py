@@ -14,6 +14,9 @@ from control_msgs.msg import JointTrajectoryControllerState
 from controller_manager_msgs.msg import ControllerManagerActivity, NamedLifecycleState
 from crane_model import canonical_joints, hydraulic_limits
 from crane_model import symbolic as cs
+from crane_mpc import config, problem
+from crane_mpc.cycle import Timing
+from crane_mpc.node import MpcNode, StartGate
 from crane_msgs.msg import JointPath, SolverHealth
 from rcl_interfaces.msg import ParameterValue
 from rcl_interfaces.srv import GetParameters
@@ -22,10 +25,6 @@ from rclpy.time import Time
 from sensor_msgs.msg import JointState
 from std_msgs.msg import String
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
-
-from crane_mpc import config, problem
-from crane_mpc.cycle import Timing
-from crane_mpc.node import MpcNode, StartGate
 
 NAMES = canonical_joints()
 ACTUATED = [NAMES[row] for row in cs.ACTUATED_INDICES]
