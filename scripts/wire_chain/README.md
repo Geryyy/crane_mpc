@@ -58,6 +58,17 @@ then withdrawn on that metric. Score on the growth rate instead.
   Score it from **move start**, not after arrival: the machine never arrived, so the json's
   `ring_ptp` / `ring_growth_per_cycle` / `ring_hz` (arm, 0.8 s windows) are what compares --
   machine 0.017 .. 0.243 rad/s at 1.10 Hz, bench at plant x2 0.015 .. 0.248 at 0.95 Hz.
+  Issue 312 reads it at the **control tick** (10 ms, `ring_step_s`) and on all seven axes:
+  `ring_{hz,growth,ptp_max}_per_axis` over `sw ha ka sa ro tip tilt` plus `ring_worst_axis` --
+  the fastest axis **growing** over 1.0 /cycle, `null` when none does, which is the gate: a
+  decaying ring is not a worst anything (the calm x2/x2 cell scores a 0.90 /cycle rotator).
+  The arm fields are the arm's, unchanged in name, and the 0.12 s cycle log scores the same
+  (`records/analysis_312/table.py` reproduces 307's three cells to the digit) -- so the
+  per-axis numbers and 307's grid are one metric. On 307's shipped/x2 cell all six other axes
+  ring on the same 0.95 Hz mode and the tip swings 4x further than the arm turns, which the
+  arm-only score could not see. Mind the floor when comparing axes: it is each axis' own
+  planned peak and spans 45x in one run, so slew's 0.043 rad/s reads `—` while the rotator's
+  0.089 is scored -- amplitudes compare within a row, not across them.
 - `--ocp-fit PATH` — export the OCP from another C3 fit file instead of the shipped
   `c3_full_model.json`; the description's damping follows that file's `d`, so it is the whole
   model and not `k` alone. Minutes of code generation the first time per file, then cached by

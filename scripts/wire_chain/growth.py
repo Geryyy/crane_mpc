@@ -27,7 +27,7 @@ LO, HI = 2e-3, 0.2
 #: Move-start ring scoring, the window the machine was read on
 #: (`records/analysis_304/critic2/onset.py`, issue 308's correction).
 RING_WINDOW_S = 0.8
-RING_SMOOTH = 9  # cycles of mean the ring is read against
+RING_SMOOTH_S = 1.08  # s of mean the ring is read against; = 9 x Ts 0.12 s
 RING_FLOOR = 2e-3  # rad/s ptp; the sensor-noise floor, under the plan's own peak
 CANON = canonical_joints()
 ACT = [CANON[i] for i in ACTUATED_INDICES]
@@ -77,12 +77,13 @@ def ring(t, dq, floor=RING_FLOOR):
     `records/2026-11-09_16-16-56-stacking_mpc` (arm 0.017 .. 0.243 rad/s
     at 1.10 Hz).
 
-    `dq` is high-passed by subtracting a `RING_SMOOTH`-cycle mean, so the plan's
-    own motion drops out. Mind the shape: at `Ts` 0.12 s the mean nulls
-    0.93 Hz, so the high-pass *passes* 0.93 Hz at unity, overshoots to ~1.2x
-    around 1.3 Hz and attenuates 0.35 Hz to ~0.2 -- two cells at different
-    lines are read through different gains. The window is `round(0.8/Ts)`
-    cycles, i.e. 0.84 s at the shipped `Ts` and not 0.8.
+    `dq` is high-passed by subtracting a `RING_SMOOTH_S` mean, so the plan's
+    own motion drops out. The mean's width is a *time*, not a sample count, so
+    the same signal scores the same at the MPC cycle and at the control tick.
+    Mind the shape: the mean nulls 0.93 Hz, so the high-pass *passes* 0.93 Hz at
+    unity, overshoots to ~1.2x around 1.3 Hz and attenuates 0.35 Hz to ~0.2 --
+    two cells at different lines are read through different gains. The window is
+    `round(0.8/step)` samples, i.e. 0.84 s at `Ts` 0.12 s and not 0.8.
 
     `floor` is the amplitude below which there is no ring to score -- pass the
     plan's own peak `|dq|` on this axis, because a window the size of the
@@ -92,7 +93,8 @@ def ring(t, dq, floor=RING_FLOOR):
     past the largest window the ring has saturated and fits a slope of its own.
     """
     step = float(np.median(np.diff(t)))
-    high = dq - np.convolve(dq, np.ones(RING_SMOOTH) / RING_SMOOTH, "same")
+    smooth = max(2, int(round(RING_SMOOTH_S / step)))
+    high = dq - np.convolve(dq, np.ones(smooth) / smooth, "same")
     width = max(2, int(round(RING_WINDOW_S / step)))
     starts = np.arange(0, len(high) - width + 1, width)
     ptp = np.array([np.ptp(high[i : i + width]) for i in starts])
@@ -112,6 +114,33 @@ def ring(t, dq, floor=RING_FLOOR):
     line = float(frequency[keep][np.argmax(spectrum[keep])])
     slope = np.polyfit(t[starts][rise] + 0.5 * RING_WINDOW_S, np.log(ptp[rise]), 1)[0]
     return ptp.tolist(), float(np.exp(slope / line)), line
+
+
+def rings(t, dq, floors, labels):
+    """
+    `ring` per column of `dq`: `({label: score}, worst label or None)`.
+
+    Pass the control tick, not the MPC cycle: at `Ts` 0.12 s nothing above
+    4.17 Hz is in the signal at all, and a ring on an axis nobody looked at is
+    a ring nobody sees.
+
+    Worst is the fastest **growing** axis, over 1.0 per ring cycle, ptp max
+    breaking a tie. A ring that decays is not a worst anything: the calm
+    baseline cell scores a 0.90 /cycle rotator, so admitting it would make
+    `None` unreachable and a gate on "an axis was named" fire on the negative
+    control. `None` therefore means nothing grows anywhere, which is the
+    statement a family table or an abort rule can key on; every axis' own
+    numbers are in `scores` either way.
+    """
+    scores = {
+        label: ring(t, column, floor)
+        for label, column, floor in zip(labels, np.asarray(dq).T, floors, strict=True)
+    }
+    ringing = {k: v for k, v in scores.items() if v[1] > 1.0}  # nan is not > 1.0
+    worst = max(
+        ringing, key=lambda k: (ringing[k][1], max(ringing[k][0])), default=None
+    )
+    return scores, worst
 
 
 def main():
