@@ -1,0 +1,208 @@
+{
+ "design_margin": "Not an identification: c3_full_model.json with boom and arm k and d x3, together, so tau = d/k stays the machine's and C3 degenerates toward a velocity source. The OCP's design model only -- crane_planning inverts the shipped fit and is not built from this. Issue 305 fallback (a): one step stiffer than the x2 candidate, inside the x2..x4 band 307 step 0 measured, for a lab day where x2 still rings. Selected by crane_mpc's `ocp_actuator_fit`.",
+ "model": "C3 full: u_f_dot = (u(t - T_d) - u_f) / tau_v, tau_dot = k (u_f - qdot), M_ii(q) qddot = tau - d qdot",
+ "identified_on": "HydraulicCalib staircases, velocity response; k_held: k from chamber pressures (ha, ka, ro), geometric prior (sa) -- then ha, ka k and d x3 (issue 305 fallback a, a design margin and not an identification)",
+ "inertia": "pinocchio CRBA on /robot_description from the bags, per-bag median M_ii",
+ "dt": 0.01,
+ "score": "free",
+ "band_hz": [
+  0.7,
+  2.5
+ ],
+ "band_weight": 0.5,
+ "axes": {
+  "sw": {
+   "k": 319074.22754530463,
+   "d": 7519.868381756844,
+   "k_units": "N m/rad",
+   "d_units": "N m s/rad",
+   "m_ii_median": 4249.94527502723,
+   "f_n_hz": 1.3790319429168982,
+   "zeta": 0.10210398947883095,
+   "k_within_5pc": [
+    316227.7660168379,
+    316227.7660168379
+   ],
+   "d_within_5pc": [
+    6309.573444801937,
+    7943.282347242822
+   ],
+   "d_mujoco": 1058.09,
+   "tau_v": 0.1,
+   "n_d": 6,
+   "dead_time_s": 0.06,
+   "k_held": false,
+   "nrmse_train": 0.05184716722315379,
+   "nrmse_test": 0.05009382434594545,
+   "nrmse_band_train": 0.39096740364449073,
+   "nrmse_band_test": 0.5121156307298028,
+   "scored_train": 0.05184716722315379,
+   "scored_test": 0.05009382434594545,
+   "score": "free",
+   "bags_train": 15,
+   "bags_test": 8,
+   "command": "official $\\Psi^{-1}$ (two_sided)"
+  },
+  "ha": {
+   "k": 5502000.0,
+   "d": 496869.511189778,
+   "k_units": "N m/rad",
+   "d_units": "N m s/rad",
+   "m_ii_median": 28277.341139397955,
+   "f_n_hz": 2.220041735732092,
+   "zeta": 0.629843677484689,
+   "k_within_5pc": [
+    5502000.0,
+    5502000.0
+   ],
+   "d_within_5pc": [
+    300000.0,
+    753565.9294528747
+   ],
+   "d_mujoco": 25878.8,
+   "tau_v": 0.025,
+   "n_d": 6,
+   "dead_time_s": 0.06,
+   "k_held": true,
+   "nrmse_train": 0.14241378299769222,
+   "nrmse_test": 0.1216992556968559,
+   "nrmse_band_train": 0.5774828183077795,
+   "nrmse_band_test": 0.5007402846744806,
+   "scored_train": 0.14241378299769222,
+   "scored_test": 0.1216992556968559,
+   "score": "free",
+   "bags_train": 12,
+   "bags_test": 6,
+   "command": "official $\\Psi^{-1}$ (residual_2d)"
+  },
+  "ka": {
+   "k": 1734000.0,
+   "d": 140991.4535529286,
+   "k_units": "N m/rad",
+   "d_units": "N m s/rad",
+   "m_ii_median": 6131.800555860227,
+   "f_n_hz": 2.6763978231845096,
+   "zeta": 0.6836663987494895,
+   "k_within_5pc": [
+    1734000.0,
+    1734000.0
+   ],
+   "d_within_5pc": [
+    119432.15116604907,
+    189287.2033440583
+   ],
+   "d_mujoco": 18200.0,
+   "tau_v": 0.0,
+   "n_d": 6,
+   "dead_time_s": 0.06,
+   "k_held": true,
+   "nrmse_train": 0.1118058823433341,
+   "nrmse_test": 0.09898306901117018,
+   "nrmse_band_train": 0.6163512263509504,
+   "nrmse_band_test": 0.3497347377488589,
+   "scored_train": 0.1118058823433341,
+   "scored_test": 0.09898306901117018,
+   "score": "free",
+   "bags_train": 3,
+   "bags_test": 2,
+   "command": "official $\\Psi^{-1}$ (one_sided)"
+  },
+  "sa": {
+   "k": 3500000.0,
+   "d": 133915.56398674008,
+   "k_units": "N/m",
+   "d_units": "N s/m",
+   "m_ii_median": 1689.8830206432767,
+   "f_n_hz": 7.243122539006675,
+   "zeta": 0.870640199501414,
+   "k_within_5pc": [
+    3500000.0,
+    3500000.0
+   ],
+   "d_within_5pc": [
+    15848.931924611143,
+    316227.7660168379
+   ],
+   "d_mujoco": 34000.0,
+   "tau_v": 0.05,
+   "n_d": 6,
+   "dead_time_s": 0.06,
+   "k_held": true,
+   "nrmse_train": 0.18887503328537528,
+   "nrmse_test": 0.2065028923117518,
+   "nrmse_band_train": 0.7128107555396304,
+   "nrmse_band_test": 0.7900696054024317,
+   "scored_train": 0.18887503328537528,
+   "scored_test": 0.2065028923117518,
+   "score": "free",
+   "bags_train": 12,
+   "bags_test": 7,
+   "command": "official $\\Psi^{-1}$ (two_sided)"
+  },
+  "ro": {
+   "k": 7296.0,
+   "d": 483.67181584601883,
+   "k_units": "N m/rad",
+   "d_units": "N m s/rad",
+   "m_ii_median": 49.529569005335446,
+   "f_n_hz": 1.9316581459252573,
+   "zeta": 0.4022963557596591,
+   "k_within_5pc": [
+    7296.0,
+    7296.0
+   ],
+   "d_within_5pc": [
+    63.095734448019336,
+    1584.893192461114
+   ],
+   "d_mujoco": 1160.0,
+   "tau_v": 0.125,
+   "n_d": 6,
+   "dead_time_s": 0.06,
+   "k_held": true,
+   "nrmse_train": 0.1837313093653167,
+   "nrmse_test": 0.1741582724880103,
+   "nrmse_band_train": 0.38593873802436995,
+   "nrmse_band_test": 0.3536175285740228,
+   "scored_train": 0.1837313093653167,
+   "scored_test": 0.1741582724880103,
+   "score": "free",
+   "bags_train": 2,
+   "bags_test": 2,
+   "command": "official $\\Psi^{-1}$ (two_sided)"
+  },
+  "gr": {
+   "k": 292.84178761768777,
+   "d": 12.111162355054814,
+   "k_units": "N m/rad",
+   "d_units": "N m s/rad",
+   "m_ii_median": 12.27367066015224,
+   "f_n_hz": 0.7774087482076308,
+   "zeta": 0.10100713967792589,
+   "k_within_5pc": [
+    1000.0,
+    464158.8833612772
+   ],
+   "d_within_5pc": [
+    10.0,
+    1995.262314968881
+   ],
+   "d_mujoco": 400.0,
+   "tau_v": 0.0,
+   "n_d": 6,
+   "dead_time_s": 0.06,
+   "k_held": false,
+   "nrmse_train": 0.8425482653715196,
+   "nrmse_test": 0.840681089520593,
+   "nrmse_band_train": 0.9204972872548947,
+   "nrmse_band_test": 0.9726067208082085,
+   "scored_train": 0.8425482653715196,
+   "scored_test": 0.840681089520593,
+   "score": "free",
+   "bags_train": 5,
+   "bags_test": 3,
+   "command": "denormalized command, Psi not modelled for this axis"
+  }
+ },
+ "dead_time_common_ms": 60.0
+}

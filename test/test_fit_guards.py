@@ -18,6 +18,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+import yaml
 from crane_model.conventions import canonical_joints
 
 PACKAGE = Path(__file__).resolve().parent.parent
@@ -47,8 +48,10 @@ class Model:
     description: Description
 
 
-#: `ocp_actuator_fit`'s design model, the one file this package ships (issue 311).
+#: `ocp_actuator_fit`'s design model, the candidate (issue 311).
 DESIGN_FIT = PACKAGE / "config" / "c3_ocp_design.json"
+#: every design model the package ships; 305 added the x3 fallback beside it
+DESIGN_FITS = sorted((PACKAGE / "config").glob("c3_ocp_design*.json"))
 
 
 def model_for(document: dict) -> Model:
@@ -211,24 +214,50 @@ def test_a_planned_joint_it_cannot_retune_is_refused(fit):
         eo.retuned_description(shipped, infinite)
 
 
-def test_the_shipped_design_model_is_the_identification_with_scaled_axes(design, fit):
+@pytest.mark.parametrize("path", DESIGN_FITS, ids=lambda path: path.name)
+def test_every_shipped_design_model_is_the_identification_with_scaled_axes(path, fit):
     """
-    `ocp_actuator_fit`'s file (issue 311), against both guards it has to pass.
+    Every file `ocp_actuator_fit` can name, against both guards it has to pass.
 
-    Its own rule first -- it is `c3_full_model.json` with boom/arm `k, d` x2 and
-    nothing else moved -- and then `check_fit` on the description returned to it,
-    which is the pairing the export actually generates from.
+    Its own rule first -- it is `c3_full_model.json` with boom/arm `k, d` scaled
+    together and nothing else moved -- and then `check_fit` on the description
+    returned to it, which is the pairing the export actually generates from.
+    Parametrised over the glob, so a fourth variant cannot ship unguarded, and
+    `test_every_model_a_labday_variant_names_is_one_of_them` is what keeps the glob
+    from being a prefix nothing has to use.
     """
+    design = eo.read_fit(path)
     eo.check_design_fit(design, fit)
-    eo.check_fit(model_for(design), design, "config/c3_ocp_design.json")
+    eo.check_fit(model_for(design), design, f"config/{path.name}")
+    # read off `d`, so the `k` assertion below is a comparison and not a restatement
+    factor = float(design["axes"]["ha"]["d"]) / float(fit["axes"]["ha"]["d"])
+    assert 1.0 < factor <= eo.DESIGN_MAX_FACTOR
     for key in cs.AXIS_KEYS:
-        factor = 2.0 if key in ("ha", "ka") else 1.0
+        scale = factor if key in ("ha", "ka") else 1.0
         for field in ("k", "d"):
             assert design["axes"][key][field] == pytest.approx(
-                factor * float(fit["axes"][key][field])
+                scale * float(fit["axes"][key][field])
             ), (key, field)
         # `tau_v` fixes `LAG_AXES` and `NX`, which come off the shipped fit
         assert design["axes"][key]["tau_v"] == fit["axes"][key]["tau_v"], key
+
+
+def test_every_model_a_labday_variant_names_is_one_of_them():
+    """
+    `ocp_actuator_fit` takes any filename in `config/`, so the glob above is a
+    convention and not a constraint. This is the constraint: every model a shipped
+    `labday_*.yaml` selects is a file the test above ran `check_design_fit` on.
+    Nothing else guards it -- the bench's `create_solver` runs `check_settings` only.
+    """
+    assert DESIGN_FITS, "the glob found no design model; the test above would skip"
+    named = {
+        yaml.safe_load(path.read_text(encoding="utf-8"))["crane_mpc"][
+            "ros__parameters"
+        ].get("ocp_actuator_fit", "")
+        for path in sorted((PACKAGE / "config").glob("labday_*.yaml"))
+    }
+    assert named, "no lab-day variant ships"
+    assert {name for name in named if name} <= {path.name for path in DESIGN_FITS}
 
 
 def test_a_design_model_that_is_not_a_scaled_fit_is_refused(design, fit):

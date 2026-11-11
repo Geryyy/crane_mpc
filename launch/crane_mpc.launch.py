@@ -9,13 +9,18 @@ says why on `/crane/mpc/solver_health`.
 
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
-from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
+from launch.substitutions import (
+    LaunchConfiguration,
+    PathJoinSubstitution,
+    PythonExpression,
+)
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
 from launch_ros.substitutions import FindPackageShare
 
 
 def generate_launch_description():
+    config_overlay = LaunchConfiguration("config_overlay")
     controller_state_topic = LaunchConfiguration("controller_state_topic")
     joint_states_topic = LaunchConfiguration("joint_states_topic")
     horizon_topic = LaunchConfiguration("horizon_topic")
@@ -81,6 +86,22 @@ def generate_launch_description():
                 default_value="/crane/mpc/horizon",
                 description="Where the active horizon is published.",
             ),
+            # The OCP's weights and `ocp_actuator_fit` are read_only, so a variant
+            # is a second parameter file or an edit of the committed one. Issue
+            # 305's lab-day variants are `labday_candidate.yaml`,
+            # `labday_fallback_a.yaml` and `labday_fallback_b.yaml`.
+            DeclareLaunchArgument(
+                "config_overlay",
+                default_value="",
+                description=(
+                    "Parameter file applied over crane_mpc.yaml, by name in the "
+                    "same config/ directory. Empty (the default) is the "
+                    "committed file alone. A variant that moves the export key "
+                    "(`ocp_actuator_fit` does; the weights do not) needs "
+                    "`scripts/export_ocp.py --config-overlay <the same name>` "
+                    "first -- the node opens a solver, it never exports one."
+                ),
+            ),
             Node(
                 package="crane_mpc",
                 executable="crane_mpc_node",
@@ -92,6 +113,18 @@ def generate_launch_description():
                 # here repeats a number.
                 parameters=[
                     PathJoinSubstitution([share, "config", "crane_mpc.yaml"]),
+                    # The overlay, or the base file again: later files win, so
+                    # re-reading it is the no-op an unset argument wants, and no
+                    # condition can leave the configuration out.
+                    PathJoinSubstitution(
+                        [
+                            share,
+                            "config",
+                            PythonExpression(
+                                ["'", config_overlay, "' or 'crane_mpc.yaml'"]
+                            ),
+                        ]
+                    ),
                     {
                         "use_sim_time": ParameterValue(use_sim_time, value_type=bool),
                         "mode": ParameterValue(mode, value_type=str),

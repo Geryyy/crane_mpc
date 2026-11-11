@@ -1,0 +1,14 @@
+crane_mpc:
+  ros__parameters:
+    # Issue 305 fallback (a): one step stiffer than the candidate, PI left deployed.
+    # For a lab day where the candidate still rings -- 307's admissible band is x2..x4,
+    # x12 exits past_clamp on a soft plant, so x3 is the next step and not x6.
+    #
+    # A last resort, not a better candidate. It rings on no move of 305's family, and
+    # it pays for that in the disturbance tail: on the nominal plant with a 0.1 rad tip
+    # kick the tip's rate 1.5-2.5 s after arrival is 77 mrad/s against the shipped
+    # model's 51 and the candidate's 47, monotone in the design factor. `sway.dq_u_settled`
+    # is an instantaneous test with no dwell, so a load swinging twice as far still reads
+    # settled at every turning point -- do not run a grip or a release off it on this
+    # variant without watching the swing.
+    ocp_actuator_fit: c3_ocp_design_x3.json
