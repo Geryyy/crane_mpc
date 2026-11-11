@@ -123,13 +123,33 @@ def add_arguments(parser) -> None:
         type=Path,
         default=None,
         metavar="PATH",
-        help="C3 fit file the OCP is exported from; default the shipped "
-        "c3_full_model.json. The description's damping follows it, so this is "
-        "the whole model and not k alone -- minutes of code generation, once "
+        help="C3 fit file the OCP is exported from; default whatever the shipped "
+        "`ocp_actuator_fit` selects. The description's damping follows it, so this "
+        "is the whole model and not k alone -- minutes of code generation, once "
         "per file",
     )
     parser.add_argument("--rebuild", action="store_true", help="re-export the solver")
     parser.add_argument("--verbose-build", action="store_true")
+
+
+def ocp_fit(path=None, overrides=()):
+    """
+    Return the C3 file the OCP is posed on: `--ocp-fit`, else the node's own.
+
+    Without this the bench would score the shipped fit while the node ships
+    `ocp_actuator_fit`'s design model -- one flag away from a null result.
+    `--set ocp_actuator_fit=...` reaches it too, so the node path can be scored
+    against a `--ocp-fit` cell without editing the committed yaml.
+    """
+    if path is not None:
+        return Path(path)
+    parameters = ox.read_ros_parameters(
+        PACKAGE / "config" / "crane_mpc.yaml", "crane_mpc"
+    )
+    for assignment in overrides:
+        if assignment.partition("=")[0] == "ocp_actuator_fit":
+            override(parameters, assignment)  # only this one; `settings` does the rest
+    return export_ocp.ocp_config.actuator_fit_path(parameters["ocp_actuator_fit"])
 
 
 def description_xml(actuator_fit=None) -> str:

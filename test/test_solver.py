@@ -13,7 +13,7 @@ from conftest import export_for, window_path
 from crane_model import hydraulic_limits
 from crane_model import symbolic as cs
 from crane_mpc import bspline, problem
-from crane_mpc.config import machine_limits
+from crane_mpc.config import machine_limits, ocp_actuator_model
 from crane_mpc.horizon import Grid, Knots, resample
 from crane_mpc.solver import (
     Ocp,
@@ -549,6 +549,24 @@ def test_another_c3_fit_file_moves_the_export_key(parameters, tmp_path):
     assert export_key(parameters, hydraulics, description) != export_key(
         parameters, hydraulics, description, other
     )
+
+
+def test_the_shipped_actuator_parameter_opens_the_shipped_solver(parameters):
+    """
+    `ocp_actuator_fit` default is the shipped solver, key for key (issue 311).
+
+    The other direction is what the key is for: the design model is a different
+    C3 -- `k` in generated code, `d` in the description -- so it must not open
+    the identification's `.so`, and the file's own digest is what says so.
+    """
+    hydraulics = parameters["hydraulics"]
+    written = problem.default_description().read_text()
+    shipped = export_key(parameters, hydraulics, written)
+    description, fit = ocp_actuator_model("", written)
+    assert export_key(parameters, hydraulics, description, fit) == shipped
+
+    description, fit = ocp_actuator_model("c3_ocp_design.json", written)
+    assert export_key(parameters, hydraulics, description, fit) != shipped
 
 
 def test_an_unexported_problem_is_refused_and_says_what_differs(parameters, tmp_path):

@@ -1,17 +1,24 @@
 """What the node refuses to start on, by class of refusal."""
 
 import copy
+import json
+import xml.etree.ElementTree as ET
+from pathlib import Path
 
 import numpy as np
 import pytest
 import yaml
 from ament_index_python.packages import get_package_share_directory
 from crane_model import hydraulic_limits
+from crane_model import symbolic as cs
+from crane_model.conventions import canonical_joints
+from crane_mpc import problem
 from crane_mpc.config import (
     MpcConfigError,
     check_payload,
     check_settings,
     machine_limits,
+    ocp_actuator_model,
 )
 
 #: The sway period `du_max` is sized against, s. A design value of order two
@@ -208,3 +215,47 @@ def test_a_payload_the_dynamics_cannot_carry_is_refused():
         check_payload(120.0, [0.1, float("nan"), 0.0])
     with pytest.raises(MpcConfigError, match="three finite"):
         check_payload(120.0, [0.1, 0.0])
+
+
+# --- which C3 model the OCP is posed on (`ocp_actuator_fit`, issue 311) -------
+
+
+def test_the_shipped_actuator_parameter_is_the_identification(shipped):
+    """Default is today's solver, to the byte: the fit and the description as written."""
+    written = problem.default_description().read_text()
+    assert shipped["ocp_actuator_fit"] == ""
+    description, fit = ocp_actuator_model(shipped["ocp_actuator_fit"], written)
+    assert fit is None
+    assert description == written
+
+
+def test_a_design_model_comes_with_the_description_its_own_d_damps():
+    """
+    Both halves or neither: `d` reaches the dynamics only through the description.
+
+    The file ships in this package's `config/`, so the parameter is a name --
+    an absolute path in a committed yaml is machine-local.
+    """
+    written = problem.default_description().read_text()
+    description, fit = ocp_actuator_model("c3_ocp_design.json", written)
+    assert fit.name == "c3_ocp_design.json"
+    assert fit.parent.name == "config"
+    # the damping itself, per joint: `description != written` is satisfied by the
+    # ET round trip alone, which the shipped `d` on every joint would also pass
+    identified = json.loads(Path(cs.default_actuator_path()).read_text())["axes"]
+    names = canonical_joints()
+    damped = {
+        joint.get("name"): float(joint.find("dynamics").get("damping"))
+        for joint in ET.fromstring(description).iter("joint")
+        if joint.find("dynamics") is not None
+    }
+    for axis, key in enumerate(cs.AXIS_KEYS):
+        factor = 2.0 if key in ("ha", "ka") else 1.0
+        expected = factor * float(identified[key]["d"])
+        assert damped[names[cs.PLANNED_INDICES[axis]]] == pytest.approx(expected), key
+
+
+def test_an_actuator_file_the_package_does_not_carry_is_refused():
+    """Falling back would run the identification under the design model's name."""
+    with pytest.raises(MpcConfigError, match="ocp_actuator_fit = 'c3_absent.json'"):
+        ocp_actuator_model("c3_absent.json", "<robot/>")

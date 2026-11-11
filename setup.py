@@ -50,7 +50,9 @@ setup(
     data_files=[
         ("share/ament_index/resource_index/packages", [f"resource/{PACKAGE}"]),
         (f"share/{PACKAGE}", ["package.xml"]),
-        (f"share/{PACKAGE}/config", glob("config/*.yaml")),
+        # the json is `ocp_actuator_fit`'s design model: the node reads it out of
+        # the share, by name, beside the yaml it is selected in
+        (f"share/{PACKAGE}/config", glob("config/*.yaml") + glob("config/*.json")),
         (f"share/{PACKAGE}/launch", glob("launch/*.launch.py")),
     ],
     install_requires=["setuptools"],

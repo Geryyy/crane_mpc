@@ -9,11 +9,19 @@ every message names the quantity, its value and why the bound exists.
 `control_safe_box`, `command_domain` and the hydraulic constants are asked of
 `crane_model` rather than declared, so no deployment carries a second copy of
 the machine.
+
+`ocp_actuator_model` is the other half: which C3 file the OCP is posed on, and
+the description that carries that file's `d`. The node and
+`scripts/export_ocp.py` both read it here, so the two cannot build different
+models from one parameter.
 """
 
 from __future__ import annotations
 
+import json
 import math
+import xml.etree.ElementTree as ET
+from pathlib import Path
 
 import numpy as np
 from crane_model import symbolic as cs
@@ -162,6 +170,125 @@ def command_domain(dq_a_max) -> list:
         )
         for axis, index in enumerate(ACTUATED_INDICES)
     ]
+
+
+# --- the OCP's own C3 model ---------------------------------------------------
+#
+# `ocp_actuator_fit` selects it: a file in this package's `config/`, empty for
+# the shipped identification. Two routes out of one file -- `k`/`tau_v` through
+# `load_actuator_fit`, `d` through the description's damping -- so the parameter
+# moves both or it builds a damping-ratio error that compiles cleanly.
+
+
+def read_fit(path) -> dict:
+    """Read one C3 fit file as a document, not as numbers."""
+    with open(path, encoding="utf-8") as stream:
+        return json.load(stream)
+
+
+def config_directories() -> list:
+    """List where this package's `config/` is: installed share first, source second."""
+    directories = []
+    try:
+        from ament_index_python.packages import get_package_share_directory
+
+        directories.append(Path(get_package_share_directory("crane_mpc")) / "config")
+    except Exception:
+        pass
+    directories.append(Path(__file__).resolve().parents[1] / "config")
+    return directories
+
+
+def actuator_fit_path(name):
+    """
+    Locate the OCP's C3 file by name in `config/`; empty names the shipped fit.
+
+    A name and not a path: the file ships beside `crane_mpc.yaml` and an
+    absolute path in a committed yaml is machine-local. A name nothing carries
+    is refused -- falling back to the shipped fit would run the identification
+    under the design model's name.
+    """
+    name = str(name).strip()
+    if not name:
+        return None
+    directories = config_directories()
+    for directory in directories:
+        candidate = directory / name
+        if candidate.is_file():
+            return candidate
+    raise MpcConfigError(
+        f"ocp_actuator_fit = {name!r} is in none of "
+        f"{[str(directory) for directory in directories]}; it names a C3 file in "
+        "this package's config/, and an empty value is the shipped fit"
+    )
+
+
+def retuned_description(description_xml: str, fit: dict) -> str:
+    """
+    Return the description with every planned joint damped at `fit`'s own `d`.
+
+    What lets the OCP be posed on another C3 file (`ocp_actuator_fit`, and the
+    bench's `--ocp-fit`): `d` reaches the dynamics only through the
+    description, so a fit handed to `build_ocp` without this is `k` from one
+    model and `d` from another -- a damping-ratio error `export_ocp.check_fit`
+    exists to refuse. Comments are lost in the round trip, which is why this
+    builds a string for a solver and is not how the checked-in description is
+    written.
+
+    It carries its own guards because the bench path does not run `check_fit`:
+    a planned joint this cannot reach keeps the *shipped* damping and nothing
+    downstream reads the attribute to notice, and `inf` walks through
+    `load_actuator_fit` (`inf > 0` is true). Every planned axis has to be
+    returned, or this raises and names the one it could not.
+    """
+    axes = fit["axes"]
+    names = canonical_joints()
+    damping = {}
+    for axis, key in enumerate(cs.AXIS_KEYS[: cs.PLANNED_DOF]):
+        entry = axes[key]
+        for field in ("k", "tau_v", "d"):
+            if not np.isfinite(float(entry[field])):
+                raise ValueError(
+                    f"axis {key!r} has {field}={entry[field]}, which is not a "
+                    "number a solver can be built on"
+                )
+        damping[names[cs.PLANNED_INDICES[axis]]] = float(entry["d"])
+    tree = ET.fromstring(description_xml)
+    returned = set()
+    for joint in tree.iter("joint"):
+        name = joint.get("name")
+        if name not in damping:
+            continue
+        dynamics = joint.find("dynamics")
+        if dynamics is None:
+            raise ValueError(
+                f"joint {name!r} carries no <dynamics>, so this fit's d cannot "
+                "reach the OCP; it would get this fit's k with the "
+                "description's own damping"
+            )
+        dynamics.set("damping", repr(damping[name]))
+        returned.add(name)
+    if returned != set(damping):
+        raise ValueError(
+            f"the description has no joint {sorted(set(damping) - returned)}, so "
+            "this fit's d for it cannot reach the OCP"
+        )
+    return ET.tostring(tree, encoding="unicode")
+
+
+def ocp_actuator_model(name, description_xml: str) -> tuple:
+    """
+    Return the (description, C3 file) pair the OCP is posed on, for this parameter.
+
+    `(description_xml, None)` for the shipped fit -- the description as written
+    and the file `load_actuator_fit` finds by itself, i.e. today's solver
+    byte-for-byte. For a design model, its own file and the description returned
+    to that file's `d`.
+    """
+    path = actuator_fit_path(name)
+    if path is None:
+        return description_xml, None
+    return retuned_description(description_xml, read_fit(path)), path
 
 
 def _positive(value: float) -> bool:

@@ -47,9 +47,42 @@ class Model:
     description: Description
 
 
+#: `ocp_actuator_fit`'s design model, the one file this package ships (issue 311).
+DESIGN_FIT = PACKAGE / "config" / "c3_ocp_design.json"
+
+
+def model_for(document: dict) -> Model:
+    """Build the stub `check_fit` reads, with the description returned to `document`."""
+    shipped = (eo.DEFAULT_DESCRIPTIONS / eo.DESCRIPTION).read_text()
+    tree = ET.fromstring(eo.retuned_description(shipped, document))
+    damped = {
+        joint.get("name"): float(joint.find("dynamics").get("damping"))
+        for joint in tree.iter("joint")
+        if joint.find("dynamics") is not None
+    }
+    names = canonical_joints()
+    damping = np.zeros(max(cs.PLANNED_INDICES) + 1)
+    for row in cs.PLANNED_INDICES:
+        damping[row] = damped[names[row]]
+    axes = [document["axes"][key] for key in cs.AXIS_KEYS]
+    return Model(
+        actuator=cs.ActuatorFit(
+            k=tuple(float(entry["k"]) for entry in axes),
+            tau_v=tuple(float(entry["tau_v"]) for entry in axes),
+            dead_time_s=float(document["dead_time_common_ms"]) * 1.0e-3,
+        ),
+        description=Description(damping=damping),
+    )
+
+
 @pytest.fixture
 def fit() -> dict:
     return eo.read_fit(Path(cs.default_actuator_path()))
+
+
+@pytest.fixture
+def design() -> dict:
+    return eo.read_fit(DESIGN_FIT)
 
 
 @pytest.fixture
@@ -151,31 +184,11 @@ def test_a_scaled_fit_keeps_d_with_k_through_the_description(fit):
     for key in ("ha", "ka"):
         scaled["axes"][key]["k"] *= 2.0
         scaled["axes"][key]["d"] *= 2.0
-    shipped = (eo.DEFAULT_DESCRIPTIONS / eo.DESCRIPTION).read_text()
-    tree = ET.fromstring(eo.retuned_description(shipped, scaled))
-    damped = {
-        joint.get("name"): float(joint.find("dynamics").get("damping"))
-        for joint in tree.iter("joint")
-        if joint.find("dynamics") is not None
-    }
-    names = canonical_joints()
-    damping = np.zeros(max(cs.PLANNED_INDICES) + 1)
-    for row in cs.PLANNED_INDICES:
-        damping[row] = damped[names[row]]
-    axes = [scaled["axes"][key] for key in cs.AXIS_KEYS]
-    model = Model(
-        actuator=cs.ActuatorFit(
-            k=tuple(float(entry["k"]) for entry in axes),
-            tau_v=tuple(float(entry["tau_v"]) for entry in axes),
-            dead_time_s=float(scaled["dead_time_common_ms"]) * 1.0e-3,
-        ),
-        description=Description(damping=damping),
-    )
+    model = model_for(scaled)
     eo.check_fit(model, scaled)
     # and it is a different plant, not a no-op rewrite
-    assert damped[names[cs.PLANNED_INDICES[cs.AXIS_KEYS.index("ha")]]] == pytest.approx(
-        2.0 * float(fit["axes"]["ha"]["d"])
-    )
+    boom = model.description.damping[cs.PLANNED_INDICES[cs.AXIS_KEYS.index("ha")]]
+    assert boom == pytest.approx(2.0 * float(fit["axes"]["ha"]["d"]))
 
 
 def test_a_planned_joint_it_cannot_retune_is_refused(fit):
@@ -196,6 +209,81 @@ def test_a_planned_joint_it_cannot_retune_is_refused(fit):
     infinite["axes"]["sa"]["k"] = float("inf")
     with pytest.raises(ValueError, match=r"axis 'sa' has k=inf"):
         eo.retuned_description(shipped, infinite)
+
+
+def test_the_shipped_design_model_is_the_identification_with_scaled_axes(design, fit):
+    """
+    `ocp_actuator_fit`'s file (issue 311), against both guards it has to pass.
+
+    Its own rule first -- it is `c3_full_model.json` with boom/arm `k, d` x2 and
+    nothing else moved -- and then `check_fit` on the description returned to it,
+    which is the pairing the export actually generates from.
+    """
+    eo.check_design_fit(design, fit)
+    eo.check_fit(model_for(design), design, "config/c3_ocp_design.json")
+    for key in cs.AXIS_KEYS:
+        factor = 2.0 if key in ("ha", "ka") else 1.0
+        for field in ("k", "d"):
+            assert design["axes"][key][field] == pytest.approx(
+                factor * float(fit["axes"][key][field])
+            ), (key, field)
+        # `tau_v` fixes `LAG_AXES` and `NX`, which come off the shipped fit
+        assert design["axes"][key]["tau_v"] == fit["axes"][key]["tau_v"], key
+
+
+def test_a_design_model_that_is_not_a_scaled_fit_is_refused(design, fit):
+    """
+    Each way a design file stops being a margin on the identification.
+
+    `k` without `d` is the one that compiles cleanly and rings (issue 308): it
+    is a stiffer spring rather than a velocity source with the machine's own
+    `tau = d/k`, and nothing downstream reads either number again.
+    """
+    stiffer = copy.deepcopy(design)
+    stiffer["axes"]["ha"]["k"] *= 2.0
+    with pytest.raises(ValueError, match=r"design axis 'ha': k is x4"):
+        eo.check_design_fit(stiffer, fit)
+
+    lagged = copy.deepcopy(design)
+    lagged["axes"]["sw"]["tau_v"] += 0.01
+    with pytest.raises(ValueError, match=r"design axis 'sw': tau_v is"):
+        eo.check_design_fit(lagged, fit)
+
+    softer = copy.deepcopy(design)
+    for field in ("k", "d"):
+        softer["axes"]["ka"][field] *= 0.25
+    with pytest.raises(ValueError, match=r"design axis 'ka': k is x0.5"):
+        eo.check_design_fit(softer, fit)
+
+    # scaled together, so `tau = d/k` holds, and still refused: 307's gate put
+    # the admissible band at x2..x4 and an OCP x12 exits past_clamp on plant x1
+    wide = copy.deepcopy(design)
+    for field in ("k", "d"):
+        wide["axes"]["ha"][field] *= 3.0
+    with pytest.raises(ValueError, match=r"design axis 'ha': k is x6 .*past the x4"):
+        eo.check_design_fit(wide, fit)
+
+    # `dead_time_common_ms` reaches ActuatorFit and check_fit only tests finiteness
+    slow = copy.deepcopy(design)
+    slow["dead_time_common_ms"] = 600.0
+    with pytest.raises(ValueError, match=r"dead_time_common_ms is 600"):
+        eo.check_design_fit(slow, fit)
+
+    # `gr` is outside AXIS_KEYS, so retuned_description drops its d: a margin
+    # written there claims something the OCP never gets
+    tool = copy.deepcopy(design)
+    for field in ("k", "d"):
+        tool["axes"]["gr"][field] *= 2.0
+    with pytest.raises(ValueError, match=r"design axis 'gr' .*not a planned axis"):
+        eo.check_design_fit(tool, fit)
+
+    undeclared = copy.deepcopy(design)
+    del undeclared[eo.DESIGN_FIELD]
+    with pytest.raises(ValueError, match=r"carries no 'design_margin'"):
+        eo.check_design_fit(undeclared, fit)
+    # and the identification itself is not a design model: it says nothing
+    with pytest.raises(ValueError, match=r"carries no 'design_margin'"):
+        eo.check_design_fit(fit, fit)
 
 
 def test_the_digest_is_over_the_numbers_and_not_the_bytes(fit):

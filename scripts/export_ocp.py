@@ -35,6 +35,12 @@ description. The copies are compared (drift fails the export) and the
 description's damping is checked against `d`, so a moved `k` without `d` is
 refused -- before code generation, not after.
 
+`ocp_actuator_fit` poses the OCP on a **design** model instead (issue 311): a
+scaled copy of the fit, read through `config.ocp_actuator_model` so the node
+and this script compile one thing. The identification keeps
+`check_fit_is_one_artifact` whichever is selected; the design file answers to
+`check_design_fit` -- same schema, `tau_v` equal, `k` and `d` scaled together.
+
 ## Boilerplate lives in `crane_ocp`
 
 `crane_ocp_export` is the one export path in this stack, shared with
@@ -47,7 +53,6 @@ import argparse
 import hashlib
 import json
 import sys
-import xml.etree.ElementTree as ET
 from pathlib import Path
 
 import numpy as np
@@ -69,7 +74,6 @@ import crane_ocp_export as ox  # noqa: E402
 cs = ox.import_crane_symbolic(PACKAGE)
 
 from crane_model import hydraulic_limits  # noqa: E402
-from crane_model.conventions import canonical_joints  # noqa: E402
 
 # problem lives in the installed package (node builds it at startup); a from-scratch
 # build runs this before crane_mpc is installed, so source tree is the fallback --
@@ -81,6 +85,14 @@ except ImportError:
 
 from crane_mpc import config as ocp_config  # noqa: E402
 from crane_mpc import solver as ocp_runtime  # noqa: E402
+
+# the installed package owns both: the node selects a C3 file through the same
+# two functions, and `scripts/wire_chain/harness.py` reads them off this module
+from crane_mpc.config import (  # noqa: E402
+    ocp_actuator_model,
+    read_fit,
+    retuned_description,  # noqa: F401
+)
 from crane_mpc.problem import (  # noqa: E402
     DESCRIPTION,
     TOOL,
@@ -116,14 +128,32 @@ SOURCE_FIT = PACKAGE.parent / "crane_model" / "config" / "c3_full_model.json"
 # measured gaps sw 1.8e-5, sa 5.4e-5, ka 6.1e-5, ha 1.4e-4, ro 6.8e-4.
 FIT_DAMPING_TOLERANCE = 2.0e-3
 
+# --- the OCP's design model (`ocp_actuator_fit`, issue 311) -------------------
+
+#: What a design file says about itself, in its own top-level field.
+DESIGN_FIELD = "design_margin"
+
+#: The fields a design axis may differ in: the scaled pair, and the three that
+#: follow from it (`f_n_hz` and `zeta` both go with the square root of the
+#: factor). Every other field is provenance and is carried over unchanged.
+DESIGN_SCALED_FIELDS = ("k", "d", "f_n_hz", "zeta", "k_within_5pc", "d_within_5pc")
+
+#: Allowance on `d/k` against the fit's: the pair is written by scaling in
+#: double, so this is round-off and not a margin.
+DESIGN_RATIO_TOLERANCE = 1.0e-9
+
+#: The top-level fields a design file may word for itself. Everything else above
+#: `axes` is the fit's own value, not just its name -- `dead_time_common_ms`
+#: reaches `ActuatorFit.dead_time_s` and `check_fit` only tests it for finiteness.
+DESIGN_TOP_FIELDS = (DESIGN_FIELD, "identified_on")
+
+#: Widest `k` the gate admits, x the identification. 307's step-0 grid: x2 and x4
+#: are calm on plants x1..x12, x12 exits `past_clamp` on x1 with 0.139 rad error
+#: and a 1.35/cycle ring -- too stiff a model is as bad as too soft.
+DESIGN_MAX_FACTOR = 4.0
+
 
 # --------------------------------------------------------------------- the fit
-
-
-def read_fit(path: Path) -> dict:
-    """Read one copy of the C3 fit as a document, not as numbers."""
-    with open(path, encoding="utf-8") as stream:
-        return json.load(stream)
 
 
 def fit_digest(fit: dict) -> str:
@@ -159,59 +189,103 @@ def check_fit_is_one_artifact(fit: dict) -> None:
         )
 
 
-def retuned_description(description_xml: str, fit: dict) -> str:
+def check_design_fit(design: dict, fit: dict) -> None:
     """
-    Return the description with every planned joint damped at `fit`'s own `d`.
+    Refuse an OCP design model that is not the identification with scaled axes.
 
-    What lets a bench export the OCP from another C3 fit file (`wire_chain`'s
-    `--ocp-fit`): `d` reaches the dynamics only through the description, so a
-    fit handed to `build_ocp` without this is `k` from one identification and
-    `d` from another -- a damping-ratio error `check_fit` exists to refuse.
-    Comments are lost in the round trip, which is why this builds a string for
-    a solver and is not how the checked-in description is written.
+    `ocp_actuator_fit` selects a robustness margin on the OCP's own C3 (issue
+    307: the shipped OCP rings on any plant stiffer than its model), never a
+    second identification, and this is where that is said in code:
 
-    It carries its own guards because the bench path does not run `check_fit`:
-    a planned joint this cannot reach keeps the *shipped* damping and nothing
-    downstream reads the attribute to notice, and `inf` walks through
-    `load_actuator_fit` (`inf > 0` is true). Every planned axis has to be
-    returned, or this raises and names the one it could not.
+    * it declares itself in `design_margin` and carries the fit's own schema,
+      so a copy found later cannot read as an identification;
+    * every field but the scaled pair and what follows from it is the fit's
+      own, **`tau_v` included**: `LAG_AXES` and `NX` are derived from the
+      shipped fit at import, so a moved `tau_v` would pose a problem with a
+      state the runtime does not have;
+    * `k` and `d` move **together** per axis and never below the fit, so
+      `tau = d/k` stays the machine's. `k` alone is a stiffer spring and a
+      different plant -- the JTC rings on it by itself (issue 308);
+    * and never above `DESIGN_MAX_FACTOR`, the band the gate measured. Only a
+      planned axis may scale at all: `gr` is outside `AXIS_KEYS`, so a margin
+      written there would be dropped by `retuned_description` and claim
+      something the OCP never gets.
     """
-    axes = fit["axes"]
-    names = canonical_joints()
-    damping = {}
-    for axis, key in enumerate(cs.AXIS_KEYS[: cs.PLANNED_DOF]):
-        entry = axes[key]
-        for field in ("k", "tau_v", "d"):
-            if not np.isfinite(float(entry[field])):
-                raise ValueError(
-                    f"axis {key!r} has {field}={entry[field]}, which is not a "
-                    "number a solver can be built on"
-                )
-        damping[names[cs.PLANNED_INDICES[axis]]] = float(entry["d"])
-    tree = ET.fromstring(description_xml)
-    returned = set()
-    for joint in tree.iter("joint"):
-        name = joint.get("name")
-        if name not in damping:
-            continue
-        dynamics = joint.find("dynamics")
-        if dynamics is None:
-            raise ValueError(
-                f"joint {name!r} carries no <dynamics>, so this fit's d cannot "
-                "reach the OCP; it would get this fit's k with the "
-                "description's own damping"
-            )
-        dynamics.set("damping", repr(damping[name]))
-        returned.add(name)
-    if returned != set(damping):
+    if not str(design.get(DESIGN_FIELD, "")).strip():
         raise ValueError(
-            f"the description has no joint {sorted(set(damping) - returned)}, so "
-            f"{FIT_LABEL}'s d for it cannot reach the OCP"
+            f"the OCP's actuator file carries no {DESIGN_FIELD!r}, so nothing in it "
+            f"says it is a design margin on {FIT_LABEL} rather than a fit"
         )
-    return ET.tostring(tree, encoding="unicode")
+    if set(design) != set(fit) | {DESIGN_FIELD}:
+        differs = set(design) ^ (set(fit) | {DESIGN_FIELD})
+        raise ValueError(
+            f"the design model and {FIT_LABEL} differ in the fields "
+            f"{sorted(differs)}; it is that file with scaled axes and keeps its schema"
+        )
+    for field, value in design.items():
+        if field in DESIGN_TOP_FIELDS or field == "axes" or value == fit[field]:
+            continue
+        raise ValueError(
+            f"the design model's {field} is {value} and {FIT_LABEL}'s is "
+            f"{fit[field]}; outside the axes a design model words only "
+            f"{DESIGN_TOP_FIELDS} for itself"
+        )
+    if set(design["axes"]) != set(fit["axes"]):
+        raise ValueError(
+            f"the design model's axes {sorted(design['axes'])} are not "
+            f"{FIT_LABEL}'s {sorted(fit['axes'])}"
+        )
+    for key, entry in design["axes"].items():
+        identified = fit["axes"][key]
+        if key not in cs.AXIS_KEYS:
+            if entry != identified:
+                raise ValueError(
+                    f"design axis {key!r} differs from {FIT_LABEL}'s, and it is not "
+                    "a planned axis: the OCP would never see the margin"
+                )
+            continue
+        if set(entry) != set(identified):
+            raise ValueError(
+                f"design axis {key!r} carries the fields {sorted(entry)} and "
+                f"{FIT_LABEL}'s carries {sorted(identified)}"
+            )
+        for field, value in entry.items():
+            if field in DESIGN_SCALED_FIELDS or value == identified[field]:
+                continue
+            raise ValueError(
+                f"design axis {key!r}: {field} is {value} and {FIT_LABEL}'s is "
+                f"{identified[field]}; a design model scales {DESIGN_SCALED_FIELDS} "
+                "and nothing else"
+            )
+        factor = float(entry["k"]) / float(identified["k"])
+        if factor < 1.0:
+            raise ValueError(
+                f"design axis {key!r}: k is x{factor:g} the identified one. A design "
+                "model is a margin -- softer than the machine is not one, and the "
+                "mismatch that rings is an OCP under its plant"
+            )
+        if factor > DESIGN_MAX_FACTOR:
+            raise ValueError(
+                f"design axis {key!r}: k is x{factor:g} the identified one, past the "
+                f"x{DESIGN_MAX_FACTOR:g} the gate admits. Issue 307: an OCP x12 exits "
+                "past_clamp on the nominal plant -- a margin this wide asks for a "
+                "joint velocity the axis answers faster than the model believes"
+            )
+        # cross-multiplied: no division, so a fit with d = 0 is not a special case
+        if not np.isclose(
+            float(entry["d"]) * float(identified["k"]),
+            float(identified["d"]) * float(entry["k"]),
+            rtol=DESIGN_RATIO_TOLERANCE,
+            atol=0.0,
+        ):
+            raise ValueError(
+                f"design axis {key!r}: k is x{factor:g} the identified one and d is "
+                f"{entry['d']} against {identified['d']}. `k` and `d` scale together "
+                "so that tau = d/k stays the machine's; `k` alone is a different plant"
+            )
 
 
-def check_fit(model: cs.CraneSymbolicModel, fit: dict) -> None:
+def check_fit(model: cs.CraneSymbolicModel, fit: dict, label: str = FIT_LABEL) -> None:
     """
     Refuse to generate on a fit the solver must not be built from, by axis name.
 
@@ -226,22 +300,25 @@ def check_fit(model: cs.CraneSymbolicModel, fit: dict) -> None:
       identification, arriving by two routes -- `k`/`tau_v` from the fit at
       full precision, `d` through the description at four figures. A refit
       that moved one and not the other is a damping-ratio error, not rounding.
+
+    `label` is the file the refusal names: the identification, or the design
+    model the OCP is posed on instead.
     """
     actuator = model.actuator
     for axis, key in enumerate(cs.AXIS_KEYS):
         for name, value in (("k", actuator.k[axis]), ("tau_v", actuator.tau_v[axis])):
             if not np.isfinite(value):
                 raise ValueError(
-                    f"{FIT_LABEL}: axis {key!r} has {name}={value}, which is not a "
+                    f"{label}: axis {key!r} has {name}={value}, which is not a "
                     "number a solver can be built on"
                 )
         entry = fit["axes"][key]
         if "d" not in entry:
-            raise ValueError(f"{FIT_LABEL}: axis {key!r} carries no d")
+            raise ValueError(f"{label}: axis {key!r} carries no d")
         fitted = float(entry["d"])
         if not np.isfinite(fitted):
             raise ValueError(
-                f"{FIT_LABEL}: axis {key!r} has d={fitted}, which is not a number "
+                f"{label}: axis {key!r} has d={fitted}, which is not a number "
                 "a solver can be built on"
             )
         damped = float(model.description.damping[cs.PLANNED_INDICES[axis]])
@@ -249,11 +326,11 @@ def check_fit(model: cs.CraneSymbolicModel, fit: dict) -> None:
             raise ValueError(
                 f"axis {key!r}: the description damps it at {damped} and this "
                 f"fit's d is {fitted}. `d` and `k` are one identification -- "
-                f"regenerate the description from {FIT_LABEL} before exporting."
+                f"regenerate the description from {label} before exporting."
             )
     if not np.isfinite(actuator.dead_time_s):
         raise ValueError(
-            f"{FIT_LABEL}: dead_time_common_ms is {actuator.dead_time_s * 1.0e3}"
+            f"{label}: dead_time_common_ms is {actuator.dead_time_s * 1.0e3}"
         )
 
 
@@ -277,20 +354,39 @@ def main() -> int:
     # same file `load_actuator_fit` reads, as a document: the checks want the
     # fit's identity, not just the three numbers the dynamics use
     fit = read_fit(Path(cs.default_actuator_path()))
+    # the identification is guarded whichever model the OCP is posed on: the
+    # machine is still described by this file and `crane_planning` inverts it
     check_fit_is_one_artifact(fit)
-    ocp, _scale, model, _chamber = build_ocp(description_xml, parameters, hydraulics)
+    # `ocp_actuator_fit`, the node's own parameter, so the two compile one thing
+    description_xml, design = ocp_actuator_model(
+        parameters["ocp_actuator_fit"], description_xml
+    )
+    posed_on = fit if design is None else read_fit(design)
+    # the resolved path, not the name: `config/` exists twice (installed share
+    # first) and the key is over the content of whichever copy was read
+    label = FIT_LABEL if design is None else str(design)
+    if design is not None:
+        check_design_fit(posed_on, fit)
+    ocp, _scale, model, _chamber = build_ocp(
+        description_xml,
+        parameters,
+        hydraulics,
+        None if design is None else cs.load_actuator_fit(design),
+    )
     # before code generation, so a bad fit stops the export rather than
     # complaining about a solver it already compiled
-    check_fit(model, fit)
+    check_fit(model, posed_on, label)
 
     root = ox.export(
         ocp,
         arguments.output,
-        ocp_runtime.export_key(parameters, hydraulics, description_xml),
+        ocp_runtime.export_key(parameters, hydraulics, description_xml, design),
         sims=ocp_runtime.predictor_sims(ocp, parameters),
         verbose=arguments.verbose,
     )
     print(f"exported and compiled into {root}")
+    if design is not None:
+        print(f"posed on {label}, a design margin and not the identification")
     return 0
 
 

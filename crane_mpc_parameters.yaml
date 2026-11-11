@@ -27,6 +27,16 @@ crane_mpc:
     description: "The JTC that plays the horizon. Its update_rate (0: the manager's) is read
       at configuration and must match velocity_loop.yaml rate_hz, or the node refuses."
 
+  ocp_actuator_fit:
+    type: string
+    read_only: true
+    description: "C3 file the OCP is posed on, by name in this package's config/; empty is
+      the shipped identification (crane_model's c3_full_model.json) and today's solver
+      byte-for-byte. A design margin, not a model of the machine: `c3_ocp_design.json` is
+      boom/arm k,d x2, which the bench finds calm on plants x1..x12 where the shipped OCP
+      rings (issue 307). Compiled in -- a different export, and `crane_planning` still
+      inverts the identification."
+
   Ts:
     type: double
     read_only: true

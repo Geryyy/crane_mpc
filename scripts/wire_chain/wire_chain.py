@@ -21,7 +21,7 @@ MPC / OCP
   --payload-mass KG --payload-com M M M --payload-box A B C    what the OCP believes
   --pace F | --mean-pace   progress reference compressed / plan's mean pace
   --relax-h {force,pump,both} --h-factor F    scale constraint 6/7 allowance
-  --ocp-fit PATH           C3 fit the OCP is exported from; default the shipped one
+  --ocp-fit PATH           C3 fit the OCP is exported from; default `ocp_actuator_fit`'s
   --rebuild --verbose-build                re-export the solver
 Wire and JTC
   --latency S              measurement to JTC receipt
@@ -513,6 +513,8 @@ def main(argv=None) -> int:
     planner = tune_planner.Planner(
         description, tune_planner.plan_example.configure(options)
     )
+    # the flag, or the C3 model the shipped `ocp_actuator_fit` poses the OCP on
+    options.ocp_fit = harness.ocp_fit(options.ocp_fit, options.set)
     parameters, hydraulics = harness.settings(options.set, options.ocp_fit)
     plant_fit, damping_scale = perturb_fit(
         k=options.k_scale, d=options.d_scale, lag_shift_s=options.lag_shift

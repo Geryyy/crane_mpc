@@ -433,10 +433,19 @@ class MpcNode(Node):
             # `Ocp.__init__` runs `config.check_settings`, which is where
             # `delay == Ts` is refused -- inside this `try`, so it is a reported
             # configuration failure and not a dead process in `MpcNode.__init__`.
-            self._ocp = Ocp(
+            # `ocp_actuator_fit` selects the OCP's own C3 model; empty is the
+            # shipped fit and the description as written. A design model's `d`
+            # reaches the dynamics only through that description, so the pair
+            # comes back together.
+            description, actuator_fit = config.ocp_actuator_model(
+                self._values.ocp_actuator_fit,
                 problem.default_description().read_text(),
+            )
+            self._ocp = Ocp(
+                description,
                 config.parameter_dict(self._values),
                 hydraulic_limits(),
+                actuator_fit=actuator_fit,
             )
         except Exception as error:  # the description decides whether this node runs
             self._configuration_failure = str(error)
@@ -460,6 +469,12 @@ class MpcNode(Node):
             self.get_logger().warning(
                 f"the acados backend is patched by {problem.TUNING_ENV}: {patched} -- "
                 "a swept solver, not the one this package ships."
+            )
+        if actuator_fit is not None:
+            self.get_logger().warning(
+                f"the OCP is posed on {actuator_fit}, selected by "
+                "ocp_actuator_fit: a design margin on the C3 identification and not "
+                "the machine's own fit."
             )
         self.adopt_reference()
         self.adopt_path()
