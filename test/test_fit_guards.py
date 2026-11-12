@@ -284,13 +284,3 @@ def test_a_design_model_that_is_not_a_scaled_fit_is_refused(design, fit):
     # and the identification itself is not a design model: it says nothing
     with pytest.raises(ValueError, match=r"carries no 'design_margin'"):
         eo.check_design_fit(fit, fit)
-
-
-def test_the_digest_is_over_the_numbers_and_not_the_bytes(fit):
-    """The two copies differ by a trailing newline and are the same fit."""
-    assert eo.fit_digest(fit) == eo.fit_digest(json.loads(json.dumps(fit, indent=4)))
-    # `gr.d` is unread by the model but still moves the digest -- what makes
-    # a refit fail `--check` rather than ship.
-    moved = copy.deepcopy(fit)
-    moved["axes"]["gr"]["d"] = 99.0
-    assert eo.fit_digest(moved) != eo.fit_digest(fit)

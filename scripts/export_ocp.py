@@ -50,8 +50,6 @@ and this script compile one thing. The identification keeps
 from __future__ import annotations
 
 import argparse
-import hashlib
-import json
 import sys
 from pathlib import Path
 
@@ -154,20 +152,6 @@ DESIGN_MAX_FACTOR = 4.0
 
 
 # --------------------------------------------------------------------- the fit
-
-
-def fit_digest(fit: dict) -> str:
-    """
-    Return a content digest of the whole fit: which identification this is.
-
-    Parsed document, not bytes (two copies differ by a trailing newline, same
-    fit). Every number is in it, including `d`, which the description carries
-    into the dynamics without this export reading it directly: a refit moves
-    the digest, the digest is in the header, so `--check` fails until the tree
-    is rewritten rather than shipping under the previous fit's identity.
-    """
-    canonical = json.dumps(fit, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
 
 
 def check_fit_is_one_artifact(fit: dict) -> None:

@@ -165,7 +165,8 @@ selection anywhere in this package.
 
 The offline harness is the one exception to "never build at startup":
 `scripts/wire_chain/wire_chain.py` exports on demand, into a directory named for the
-problem, through the same `ox.export`. A sweep walks configurations no
+problem, through the same `ox.export` — but under its own `wire_chain/` root
+inside `CRANE_MPC_OCP_EXPORT`'s, never the node's tree (issue 315). A sweep walks configurations no
 deliberate export could have anticipated — a compiled `--set` or an acados
 variant — so a hand-run export per variant would make it unusable. The node has
 no such path.

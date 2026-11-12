@@ -103,7 +103,9 @@ then withdrawn on that metric. Score on the growth rate instead.
 - `--ocp-fit PATH` — export the OCP from another C3 fit file instead of the shipped
   `c3_full_model.json`; the description's damping follows that file's `d`, so it is the whole
   model and not `k` alone. Minutes of code generation the first time per file, then cached by
-  export key. Issue 307's gate ran it over boom/arm `k, d` x2/x4/x12 against plants x1..x12
+  export key under `~/.cache/crane_ocp/wire_chain/`, which the node never reads. It carries
+  the node's own key -- the bench exports on `check_settings` alone, so one shared tree made
+  "the key matches" the node's only check on this model (315). Issue 307's gate ran it over boom/arm `k, d` x2/x4/x12 against plants x1..x12
   (`records/analysis_307/`): **the OCP's own C3 is the lever** -- x2 and x4 are calm on every
   plant, the shipped one rings on everything above x1, and x12 rings on x1 (too stiff a model
   is as bad as too soft). Solve time is unchanged, p50 5-7 ms, p95 6-18 ms.

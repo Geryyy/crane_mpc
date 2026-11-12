@@ -58,6 +58,25 @@ AXES = 5
 #: draws before a random goal gives up; 62 % of joint draws clear collision and ground.
 GOAL_DRAWS = 12
 
+#: Leaf of the bench's own export root under `CRANE_MPC_OCP_EXPORT`'s.
+BENCH_EXPORT_LEAF = "wire_chain"
+
+
+def bench_export_root() -> Path:
+    """Put `wire_chain` on the node's export root; already there, leave it."""
+    root = ocp_runtime.export_base().parent
+    return root if root.name == BENCH_EXPORT_LEAF else root / BENCH_EXPORT_LEAF
+
+
+# Never the node's tree: `create_solver` exports on `check_settings` alone -- no
+# `check_fit_is_one_artifact`, no `check_design_fit`, no `check_fit` -- and what
+# it writes carries the node's own `export_key`, so sharing one tree made "the
+# key matches" the node's whole protection against a `--ocp-fit` model (315).
+# The key is unchanged; the node simply never looks here. `Ocp` opens where this
+# says, so the one assignment moves export and open together; a subprocess
+# inherits it, hence the leaf check above.
+os.environ[ocp_runtime.EXPORT_ENV] = str(bench_export_root())
+
 
 def add_arguments(parser) -> None:
     """Plan, plant, mismatch and solver flags; all identity by default."""
@@ -228,7 +247,7 @@ def create_solver(
     xml = description_xml(actuator_fit)
     fit = None if actuator_fit is None else cs.load_actuator_fit(actuator_fit)
     key = ocp_runtime.export_key(parameters, hydraulics, xml, actuator_fit)
-    base = ocp_runtime.export_base()
+    base = ocp_runtime.export_base()  # the bench's own, see `bench_export_root`
     if rebuild:
         shutil.rmtree(ox.solver_root(base, key), ignore_errors=True)
     try:

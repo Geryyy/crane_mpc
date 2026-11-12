@@ -21,7 +21,9 @@ Two sources, one number:
 
 `PAYLOAD=kg,com_z_m` sets what the model carries; `C3_FIT=<path>` scores it
 against another C3 fit file instead of the shipped one (its solver has to exist
-already: one `wire_chain.py --ocp-fit <path>` run compiles it).
+already: one `wire_chain.py --ocp-fit <path>` run compiles it -- into the bench's
+own tree since 315, so prefix this run with
+`CRANE_MPC_OCP_EXPORT=~/.cache/crane_ocp/wire_chain` to open it).
 
 Positions, velocities and both passive rows are re-seeded from the measurement
 every cycle, so they cannot compound. Only C3's force and command-lag rows carry
