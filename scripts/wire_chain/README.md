@@ -69,6 +69,37 @@ then withdrawn on that metric. Score on the growth rate instead.
   arm-only score could not see. Mind the floor when comparing axes: it is each axis' own
   planned peak and spans 45x in one run, so slew's 0.043 rad/s reads `—` while the rotator's
   0.089 is scored -- amplitudes compare within a row, not across them.
+- `--plant hyd` — issue 316's bench plant: the two regimes 313 and 314 measured the *same*
+  loaded boom in, on one plant, instead of a scaled C3. Above `--hyd-spool-open` (default
+  5 mrad/s of `|u_f|`) boom and arm are a **velocity source** — 60 ms dead time, PT1
+  107 / 94 ms (313 check 2's measured 167 / 154 ms total lag less the dead time),
+  per-direction flow gain, stiff servo on the holding force — which is the shape the machine
+  measured as (`|G|` 0.89-0.97, pure delay, **no mode in 0.4-2.4 Hz**). Below it they are a
+  **trapped-oil spring**: C3's own block 3 at `--hyd-k-scale` x the identified `k` (default
+  1.43, 314 step 3's median over 65 sway-free rings) with `d` x0.44 as joint damping (314
+  step 4c), the deviation zeroed when the spool closes. The boom's lowering branch carries
+  314 step 5's load law, `Q ~ sqrt(p_A)` with `p_A` read off the boom's own holding force and
+  normalised to x1.30 loaded against empty; lifting is load-blind. Slew, telescope and
+  rotator stay C3. `test/test_hyd_plant.py` pins the switch, the load law and that.
+  To move the shut-spool `d` from a cell, use `--k-scale 1 1 1 1 1 --d-scale 1 S S 1 1`
+  (`k` x1 leaves the fit alone; the two flags only pair with each other).
+
+      ./scripts/wire_chain/wire_chain.py --seconds 20 --latency 0.06 \
+        --start -0.2568 0.6704 0.5493 1.0676 0.3863 1.5644 5.0444 0.40 0 0 \
+        --goal-pose 7.0276 2.2039 2.7452 1.5552 \
+        --payload-mass 880 --payload-com 0 0 1.05 --plant-payload-com 0 0 1.12 \
+        --plant hyd --set 'ocp_actuator_fit=""'
+
+  On it the OCP the machine ran (the identification) rings on the 304 slew at **1.30 Hz**,
+  arm ptp 0.022 -> 0.176 rad/s, 1.43 /cycle over the machine's own 5.7 s window, slack 6 %
+  — against the machine's 1.10-1.22 Hz, 0.017 -> 0.243, 1.21-1.24 /cycle, slack 0. Both
+  design models (x2 and the committed x3) are calm on every cell of
+  `records/analysis_316/grid.sh`. The JTC alone is admissible on it at the deployed PI
+  (worst 1.06 /cycle, ptp 0.05 rad/s). A valve-closed stop needs `--hyd-k-scale 2.2..2.5`
+  with `d` x1 to reproduce the 11-09 ring (0.83 Hz, 0.47/0.60 per cycle); 314's single-axis
+  pair (x1.43, x0.44) gives 0.63 Hz and 0.64 — the single-axis reduction is a floor in both,
+  as 314 says it is, and the shut-spool rings here are **coupled** (stopping the boom alone
+  rings the arm twice as hard).
 - `--ocp-fit PATH` — export the OCP from another C3 fit file instead of the shipped
   `c3_full_model.json`; the description's damping follows that file's `d`, so it is the whole
   model and not `k` alone. Minutes of code generation the first time per file, then cached by

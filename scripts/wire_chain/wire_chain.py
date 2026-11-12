@@ -34,6 +34,8 @@ Plant (MuJoCo + C3), mismatch against the OCP
   --plant-payload KG --plant-payload-com M M M    default the OCP's
   --plant-payload-box A B C                     MuJoCo payload inertia; default near-point
   --noise-scale F          joint noise + bias off the Gazebo xacro; 0 = exact
+  --plant {c3,hyd}         boom/arm: scaled C3, or 316's measured two-regime hydraulics
+  --hyd-k-scale --hyd-spool-open                  --plant hyd's shut-spool k and switch
   --k-scale --d-scale --lag-shift --tau-v-scale --tau-v-offset --dead-time
   --psi-gain-positive --psi-gain-negative --no-clamp --timestep
 Output
@@ -57,6 +59,7 @@ import time
 from pathlib import Path
 
 import harness
+import hyd_plant
 import numpy as np
 from builtin_interfaces.msg import Time
 from crane_model.mismatch import perturb_fit
@@ -573,6 +576,10 @@ def main(argv=None) -> int:
         planner.model, Payload(ocp.payload_mass_kg, ocp.payload_com_m, valid=True)
     )
 
+    if options.plant == "hyd":
+        # 314 step 4c's shut-spool d, on top of --d-scale; `d` is the description's
+        # joint damping, so the force law cannot carry it
+        damping_scale = np.asarray(damping_scale) * hyd_plant.damping_scale()
     plant.scale_planned_damping(damping_scale)
     start = anchor = tune_planner.start_of(planner, options.resettle_start)
     if options.start is not None:
@@ -1018,7 +1025,14 @@ def fly(
         over_plan(any_peak),
     )
     print(
-        f"wire {options.wire}, latency {1e3 * options.latency:.0f} ms, "
+        f"plant {options.plant}"
+        + (
+            f" (k x{options.hyd_k_scale:g} shut, spool {1e3 * options.hyd_spool_open:g}"
+            " mrad/s)"
+            if options.plant == "hyd"
+            else ""
+        )
+        + f", wire {options.wire}, latency {1e3 * options.latency:.0f} ms, "
         f"dropped {events['dropped']} horizons, "
         f"cadence phase {1e3 * options.cadence_phase:.0f} ms, {len(log)} cycles\n"
         f"  final error      {np.abs(log[-1, 2 : 2 + nq] - plan.q[-1, PLANNED]).max():.4f}\n"
@@ -1078,6 +1092,7 @@ def fly(
         rate, _ = growth(log[:, 0], np.abs(sway).max(axis=1))
         scores = {
             "exit": reason[0] if reason else "ok",
+            "plant": options.plant,
             "cycles": len(log),
             "final_error": float(
                 np.abs(log[-1, 2 : 2 + nq] - plan.q[-1, PLANNED]).max()

@@ -28,6 +28,7 @@ sys.path.insert(0, str(PACKAGE / "scripts"))
 sys.path.insert(0, str(PACKAGE.parent / "crane_planning" / "scripts"))
 
 import export_ocp  # noqa: E402
+import hyd_plant  # noqa: E402
 import tune_planner  # noqa: E402
 from crane_model.actuator import C3Actuator  # noqa: E402
 from crane_model.conventions import (  # noqa: E402
@@ -98,6 +99,30 @@ def add_arguments(parser) -> None:
     )
     parser.add_argument(
         "--lag-shift", type=float, default=0.0, help="plant tau_v += s, dead time -= s"
+    )
+    parser.add_argument(
+        "--plant",
+        choices=("c3", "hyd"),
+        default="c3",
+        help="what sits under the JTC on boom and arm: the C3 the staircases "
+        "fitted (scaled by --k-scale/--d-scale), or 316's measured two-regime "
+        "hydraulics -- velocity source with the spool open, trapped-oil spring "
+        "with it shut. Other axes are C3 either way",
+    )
+    parser.add_argument(
+        "--hyd-k-scale",
+        type=float,
+        default=hyd_plant.K_SHUT_SCALE,
+        help="--plant hyd: shut-spool k as a scale of the identified C3 k; "
+        f"default {hyd_plant.K_SHUT_SCALE} is 314's median and a floor "
+        "(the coupled rig on the 11-09 stop needs x2.5)",
+    )
+    parser.add_argument(
+        "--hyd-spool-open",
+        type=float,
+        default=hyd_plant.SPOOL_OPEN_RAD_S,
+        help="--plant hyd: |u_f| rad/s above which the spool is open; the "
+        "switching rule itself is unmeasured (314 step 4)",
     )
     parser.add_argument("--pi-rung", choices=PI_RUNGS, default="full")
     parser.add_argument(
@@ -238,14 +263,25 @@ class Chain:
         self.low = np.array([a.u_clamp_min for a in gains])
         self.high = np.array([a.u_clamp_max for a in gains])
         self.psi = PsiGain(options.psi_gain_positive, options.psi_gain_negative)
-        self.actuator = C3Actuator(
-            timestep=plant.model.opt.timestep,
-            fit=fit,
-            dead_time_s=fit.dead_time_s
-            if options.dead_time is None
-            else options.dead_time,
-            tau_max=None if options.no_clamp else plant.effort_limits,
-        )
+        dead_time = fit.dead_time_s if options.dead_time is None else options.dead_time
+        tau_max = None if options.no_clamp else plant.effort_limits
+        if getattr(options, "plant", "c3") == "hyd":
+            self.actuator = hyd_plant.HydraulicActuator(
+                plant,
+                timestep=plant.model.opt.timestep,
+                fit=fit,
+                k_shut_scale=options.hyd_k_scale,
+                spool_open_rad_s=options.hyd_spool_open,
+                dead_time_s=dead_time,
+                tau_max=tau_max,
+            )
+        else:
+            self.actuator = C3Actuator(
+                timestep=plant.model.opt.timestep,
+                fit=fit,
+                dead_time_s=dead_time,
+                tau_max=tau_max,
+            )
 
     def seed(self, state: np.ndarray) -> None:
         """Place the plant; C3 starts holding it up, not from tau = 0."""
