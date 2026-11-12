@@ -19,7 +19,6 @@ import sys
 from pathlib import Path
 
 import numpy as np
-
 from crane_mpc import dump
 from crane_mpc.solver import Guess, PathCycle, status_word
 
@@ -119,8 +118,13 @@ def main(argv=None) -> int:
     record = dump.load(options.file)
     print(report(record))
 
-    parameters, hydraulics = harness.settings(options.set)
-    ocp = harness.create_solver(parameters, hydraulics, options.rebuild)
+    fit = harness.ocp_fit(
+        None, options.set
+    )  # the model the node ran, not the identified one
+    parameters, hydraulics = harness.settings(options.set, fit)
+    ocp = harness.create_solver(
+        parameters, hydraulics, options.rebuild, actuator_fit=fit
+    )
     try:
         solution = replay(ocp, record)
     except Exception as refusal:

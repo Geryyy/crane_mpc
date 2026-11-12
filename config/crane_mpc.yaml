@@ -4,7 +4,7 @@ crane_mpc:
     start_signal_action: ""  # empty: /crane/reference starts the move; else that action's accepted goal
     jtc_name: trajectory_controller_a2b  # JTC that plays the horizon; its rate must match velocity_loop.yaml
 
-    ocp_actuator_fit: c3_ocp_design.json  # boom/arm k,d x3 design margin, recompiles; "" = shipped identified C3 model (lab-day fallback)
+    ocp_actuator_fit: c3_ocp_design.json  # boom/arm k,d x3 design margin, recompiles; "" = shipped identified C3 model
 
     Ts: 0.12  # s, control cycle and knot spacing; must equal sensor_to_valve_delay
     horizon_length: 40  # knots; longer sees more of the sway, solves slower

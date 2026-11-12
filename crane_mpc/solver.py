@@ -586,6 +586,8 @@ def export_key(
         "symbolic.py": _file_digest(cs.__file__),
         # the fit this solver's k/tau_v came from; `None` is the shipped one
         "actuator_fit": _file_digest(actuator_fit or cs.default_actuator_path()),
+        # a design file is a margin on the identification: a refit must move the key too
+        "identified_fit": _file_digest(cs.default_actuator_path()),
         # The whole file, not the three numbers `hydraulics` carries: the
         # chamber areas, `r_gear` and `V_m` live in it too, and since issue 226
         # they set `problem.state_scale` -- the **units of the force state
