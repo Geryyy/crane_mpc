@@ -384,6 +384,8 @@ class MpcNode(Node):
         """Is a goal live on the action this node is gated on."""
         if not self._gate.adopt(message):
             return
+        if not self._gate.open:
+            self.drop_reference()
         drives = (
             "accepted a goal, so this node drives"
             if self._gate.open
@@ -399,9 +401,13 @@ class MpcNode(Node):
             if self._jtc_active and not active:
                 # The tree took the move as done. A plan still running would wake on
                 # the next activation and replace the descent -- live, it did.
-                self._reference_message = None
-                self._cycle.reference = None
+                self.drop_reference()
             self._jtc_active = active
+
+    def drop_reference(self) -> None:
+        """Forget the plan: whatever drove it is gone, so a reopen must not resume it."""
+        self._reference_message = None
+        self._cycle.reference = None
 
     def on_controller_state(self, message: JointTrajectoryControllerState) -> None:
         # Timber bringup profiles put both trajectory controllers on one topic;
@@ -706,6 +712,7 @@ class MpcNode(Node):
         """Read the gate; its publisher having gone closes it, fail-closed."""
         gate = self._gate
         if gate.closed_with_its_publisher(self.count_publishers):
+            self.drop_reference()
             self.get_logger().warn(
                 f"{gate.action} has no status publisher left, so its goal cannot "
                 "still be live and this node stops driving."
@@ -716,8 +723,8 @@ class MpcNode(Node):
         return Silence(
             f"no goal is live on {self._gate.action}",
             f"{self._gate.action} carries no goal, so nothing goes out on "
-            f"{HORIZON_TOPIC}; the reference is held unanchored (start_signal_action) "
-            "until the controller is given one.",
+            f"{HORIZON_TOPIC}; a plan that has not run waits unanchored, one a closing "
+            "gate dropped is gone and the tree re-plans it (start_signal_action).",
         )
 
     def fall_silent(self, silence) -> None:

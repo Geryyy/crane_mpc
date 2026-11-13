@@ -402,6 +402,21 @@ def test_a_finished_goal_closes_the_gate_again(node):
     assert len(one.published["_shadow_horizon_publisher"]) == published
 
 
+def test_a_closed_gate_drops_the_plan_it_was_driving(node):
+    """A cancelled carry may not resume on the next goal: the tree re-plans it."""
+    one = gated(node)
+    one.on_start_signal(goal_status(GoalStatus.STATUS_EXECUTING))
+    one.update()
+    assert "_shadow_horizon_publisher" in one.published
+    published = len(one.published["_shadow_horizon_publisher"])
+
+    one.on_start_signal(goal_status(GoalStatus.STATUS_CANCELED))
+    one.on_start_signal(goal_status(GoalStatus.STATUS_EXECUTING))
+    one.update()
+    assert len(one.published["_shadow_horizon_publisher"]) == published
+    assert "no reference" in one._last_silence
+
+
 def test_an_inactive_jtc_gets_nothing_and_the_plan_waits(node):
     """The tree's grip goals share the JTC; a horizon replaced them, jaws shut."""
     one = configured(node)
