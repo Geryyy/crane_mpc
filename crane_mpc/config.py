@@ -255,7 +255,7 @@ def retuned_description(description_xml: str, fit: dict) -> str:
         damping[names[cs.PLANNED_INDICES[axis]]] = float(entry["d"])
     tree = ET.fromstring(description_xml)
     returned = set()
-    for joint in tree.iter("joint"):
+    for joint in tree.findall("joint"):  # top level only; <ros2_control> repeats the names
         name = joint.get("name")
         if name not in damping:
             continue
